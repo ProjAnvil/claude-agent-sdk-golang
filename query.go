@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/ProjAnvil/claude-agent-sdk-golang/internal"
@@ -99,6 +100,34 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 		if _, err := q.Initialize(ctx); err != nil {
 			errs <- wrapTransportError(err)
 			return
+		}
+
+		// For string prompts, write user message to stdin after initialize
+		// (matching Python SDK behavior)
+		if promptStr, isString := prompt.(string); isString {
+			userMessage := map[string]interface{}{
+				"type":       "user",
+				"session_id": "",
+				"message": map[string]interface{}{
+					"role":    "user",
+					"content": promptStr,
+				},
+				"parent_tool_use_id": nil,
+			}
+			data, err := json.Marshal(userMessage)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if err := q.Write(string(data) + "\n"); err != nil {
+				errs <- wrapTransportError(err)
+				return
+			}
+			// End input to signal no more messages (matching Python SDK)
+			if err := q.EndInput(); err != nil {
+				errs <- wrapTransportError(err)
+				return
+			}
 		}
 
 		// Read messages

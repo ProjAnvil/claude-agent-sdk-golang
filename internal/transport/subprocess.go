@@ -260,16 +260,12 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 	go t.readStderr()
 
 	// Handle input
-	if _, isString := t.prompt.(string); isString {
-		// For string prompts, they are passed as arguments (via --print), so we close stdin immediately
-		t.stdin.Close()
-	} else if ch, ok := t.prompt.(chan map[string]interface{}); ok {
+	if ch, ok := t.prompt.(chan map[string]interface{}); ok {
 		// For channel prompts, stream messages to stdin
 		go t.streamInput(ch)
-	} else {
-		// Unknown prompt type, just close stdin
-		t.stdin.Close()
 	}
+	// For string prompts, stdin is kept open so caller can write messages
+	// (matching Python SDK behavior where write happens after connect)
 
 	return nil
 }
@@ -437,12 +433,9 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		}
 	}
 
-	// Prompt handling
-	if promptStr, isString := t.prompt.(string); isString {
-		args = append(args, "--print", "--", promptStr)
-	} else {
-		args = append(args, "--input-format", "stream-json")
-	}
+	// Input format - always use stream-json mode for consistency
+	// (matching Python SDK behavior where prompts are sent via stdin)
+	args = append(args, "--input-format", "stream-json")
 
 	return exec.CommandContext(ctx, t.cliPath, args...)
 }

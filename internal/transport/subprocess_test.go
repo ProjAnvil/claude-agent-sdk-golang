@@ -37,7 +37,7 @@ func TestBuildCommand(t *testing.T) {
 				"--verbose",
 				"--system-prompt", "",
 				"--setting-sources", "",
-				"--print", "--", "Hello",
+				"--input-format", "stream-json",
 			},
 		},
 		{
