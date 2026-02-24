@@ -175,12 +175,15 @@ func TestParseInvalidMessage(t *testing.T) {
 		t.Error("Expected error for missing type field")
 	}
 
-	// Unknown type
-	_, err = ParseMessage(map[string]interface{}{
+	// Unknown type - should return nil for forward compatibility
+	msg, err := ParseMessage(map[string]interface{}{
 		"type": "unknown",
 	})
-	if err == nil {
-		t.Error("Expected error for unknown type")
+	if err != nil {
+		t.Errorf("Expected no error for unknown type, got: %v", err)
+	}
+	if msg != nil {
+		t.Error("Expected nil message for unknown type")
 	}
 
 	// Nil data
@@ -610,7 +613,8 @@ func TestParseAssistantMessageWithRateLimitError(t *testing.T) {
 }
 
 func TestMessageParseErrorContainsData(t *testing.T) {
-	data := map[string]interface{}{"type": "unknown", "some": "data"}
+	// Use a malformed known type (missing required fields) to trigger error
+	data := map[string]interface{}{"type": "assistant"}
 
 	_, err := ParseMessage(data)
 	if err == nil {
@@ -626,8 +630,9 @@ func TestMessageParseErrorContainsData(t *testing.T) {
 		t.Error("Expected Data to be present in error")
 	}
 
-	if val, ok := parseErr.Data["some"].(string); !ok || val != "data" {
-		t.Errorf("Expected Data['some']='data', got %v", parseErr.Data["some"])
+	// Verify the data contains the type
+	if val, ok := parseErr.Data["type"].(string); !ok || val != "assistant" {
+		t.Errorf("Expected Data['type']='assistant', got %v", parseErr.Data["type"])
 	}
 }
 

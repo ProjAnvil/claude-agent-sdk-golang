@@ -143,8 +143,10 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 					goto End
 				}
 				msg, err := ParseMessage(rawMsg)
-				if err != nil {
-					errs <- err
+				if err != nil || msg == nil {
+					if err != nil {
+						errs <- err
+					}
 					continue
 				}
 				messages <- msg

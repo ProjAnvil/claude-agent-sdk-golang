@@ -1,6 +1,7 @@
 package claude
 
 // ParseMessage parses a raw JSON message into a typed Message.
+// Returns nil for unknown message types for forward compatibility.
 func ParseMessage(data map[string]interface{}) (Message, error) {
 	if data == nil {
 		return nil, NewMessageParseError("message data is nil", nil)
@@ -23,7 +24,9 @@ func ParseMessage(data map[string]interface{}) (Message, error) {
 	case "stream_event":
 		return parseStreamEvent(data)
 	default:
-		return nil, NewMessageParseError("unknown message type: "+msgType, data)
+		// Forward-compatible: skip unrecognized message types so newer
+		// CLI versions don't crash older SDK versions.
+		return nil, nil
 	}
 }
 

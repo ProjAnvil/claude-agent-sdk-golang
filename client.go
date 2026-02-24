@@ -280,7 +280,7 @@ func (c *ClaudeSDKClient) Query(ctx context.Context, prompt string, opts ...Quer
 		defer close(messages)
 		for rawMsg := range c.query.RawMessages() {
 			msg, err := ParseMessage(rawMsg)
-			if err != nil {
+			if err != nil || msg == nil {
 				continue
 			}
 			messages <- msg
@@ -304,7 +304,7 @@ func (c *ClaudeSDKClient) ReceiveResponse(ctx context.Context) (<-chan Message, 
 		defer close(messages)
 		for rawMsg := range c.query.RawMessages() {
 			msg, err := ParseMessage(rawMsg)
-			if err != nil {
+			if err != nil || msg == nil {
 				continue
 			}
 			messages <- msg
