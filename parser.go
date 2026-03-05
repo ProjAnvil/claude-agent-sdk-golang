@@ -112,7 +112,20 @@ func parseAssistantMessage(data map[string]interface{}) (*AssistantMessage, erro
 	return msg, nil
 }
 
-func parseSystemMessage(data map[string]interface{}) (*SystemMessage, error) {
+func parseSystemMessage(data map[string]interface{}) (Message, error) {
+	// Check for specific system message subtypes
+	if subtype, ok := data["subtype"].(string); ok {
+		switch subtype {
+		case "task_started":
+			return parseTaskStartedMessage(data)
+		case "task_progress":
+			return parseTaskProgressMessage(data)
+		case "task_notification":
+			return parseTaskNotificationMessage(data)
+		}
+	}
+
+	// Generic system message for other subtypes
 	msg := &SystemMessage{
 		Data: data,
 	}
@@ -124,6 +137,158 @@ func parseSystemMessage(data map[string]interface{}) (*SystemMessage, error) {
 	}
 
 	return msg, nil
+}
+
+func parseTaskStartedMessage(data map[string]interface{}) (*TaskStartedMessage, error) {
+	msg := &TaskStartedMessage{}
+
+	if taskID, ok := data["task_id"].(string); ok {
+		msg.TaskID = taskID
+	} else {
+		return nil, NewMessageParseError("missing required field in task_started message: task_id", data)
+	}
+
+	if description, ok := data["description"].(string); ok {
+		msg.Description = description
+	} else {
+		return nil, NewMessageParseError("missing required field in task_started message: description", data)
+	}
+
+	if uuid, ok := data["uuid"].(string); ok {
+		msg.UUID = uuid
+	} else {
+		return nil, NewMessageParseError("missing required field in task_started message: uuid", data)
+	}
+
+	if sessionID, ok := data["session_id"].(string); ok {
+		msg.SessionID = sessionID
+	} else {
+		return nil, NewMessageParseError("missing required field in task_started message: session_id", data)
+	}
+
+	if toolUseID, ok := data["tool_use_id"].(string); ok {
+		msg.ToolUseID = toolUseID
+	}
+
+	if taskType, ok := data["task_type"].(string); ok {
+		msg.TaskType = taskType
+	}
+
+	return msg, nil
+}
+
+func parseTaskProgressMessage(data map[string]interface{}) (*TaskProgressMessage, error) {
+	msg := &TaskProgressMessage{}
+
+	if taskID, ok := data["task_id"].(string); ok {
+		msg.TaskID = taskID
+	} else {
+		return nil, NewMessageParseError("missing required field in task_progress message: task_id", data)
+	}
+
+	if description, ok := data["description"].(string); ok {
+		msg.Description = description
+	} else {
+		return nil, NewMessageParseError("missing required field in task_progress message: description", data)
+	}
+
+	if uuid, ok := data["uuid"].(string); ok {
+		msg.UUID = uuid
+	} else {
+		return nil, NewMessageParseError("missing required field in task_progress message: uuid", data)
+	}
+
+	if sessionID, ok := data["session_id"].(string); ok {
+		msg.SessionID = sessionID
+	} else {
+		return nil, NewMessageParseError("missing required field in task_progress message: session_id", data)
+	}
+
+	// Parse usage
+	if usageRaw, ok := data["usage"].(map[string]interface{}); ok {
+		msg.Usage.TotalTokens = parseIntField(usageRaw, "total_tokens")
+		msg.Usage.ToolUses = parseIntField(usageRaw, "tool_uses")
+		msg.Usage.DurationMS = parseIntField(usageRaw, "duration_ms")
+	} else {
+		return nil, NewMessageParseError("missing required field in task_progress message: usage", data)
+	}
+
+	if toolUseID, ok := data["tool_use_id"].(string); ok {
+		msg.ToolUseID = toolUseID
+	}
+
+	if lastToolName, ok := data["last_tool_name"].(string); ok {
+		msg.LastToolName = lastToolName
+	}
+
+	return msg, nil
+}
+
+func parseTaskNotificationMessage(data map[string]interface{}) (*TaskNotificationMessage, error) {
+	msg := &TaskNotificationMessage{}
+
+	if taskID, ok := data["task_id"].(string); ok {
+		msg.TaskID = taskID
+	} else {
+		return nil, NewMessageParseError("missing required field in task_notification message: task_id", data)
+	}
+
+	if status, ok := data["status"].(string); ok {
+		msg.Status = TaskNotificationStatus(status)
+	} else {
+		return nil, NewMessageParseError("missing required field in task_notification message: status", data)
+	}
+
+	if outputFile, ok := data["output_file"].(string); ok {
+		msg.OutputFile = outputFile
+	} else {
+		return nil, NewMessageParseError("missing required field in task_notification message: output_file", data)
+	}
+
+	if summary, ok := data["summary"].(string); ok {
+		msg.Summary = summary
+	} else {
+		return nil, NewMessageParseError("missing required field in task_notification message: summary", data)
+	}
+
+	if uuid, ok := data["uuid"].(string); ok {
+		msg.UUID = uuid
+	} else {
+		return nil, NewMessageParseError("missing required field in task_notification message: uuid", data)
+	}
+
+	if sessionID, ok := data["session_id"].(string); ok {
+		msg.SessionID = sessionID
+	} else {
+		return nil, NewMessageParseError("missing required field in task_notification message: session_id", data)
+	}
+
+	if toolUseID, ok := data["tool_use_id"].(string); ok {
+		msg.ToolUseID = toolUseID
+	}
+
+	// Parse optional usage
+	if usageRaw, ok := data["usage"].(map[string]interface{}); ok {
+		msg.Usage = &TaskUsage{
+			TotalTokens: parseIntField(usageRaw, "total_tokens"),
+			ToolUses:    parseIntField(usageRaw, "tool_uses"),
+			DurationMS:  parseIntField(usageRaw, "duration_ms"),
+		}
+	}
+
+	return msg, nil
+}
+
+// parseIntField safely parses an int field from a map, handling both float64 and int types.
+func parseIntField(m map[string]interface{}, key string) int {
+	switch v := m[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	default:
+		return 0
+	}
 }
 
 func parseResultMessage(data map[string]interface{}) (*ResultMessage, error) {
@@ -163,6 +328,10 @@ func parseResultMessage(data map[string]interface{}) (*ResultMessage, error) {
 		msg.SessionID = sessionID
 	} else {
 		return nil, NewMessageParseError("missing required field in result message: session_id", data)
+	}
+
+	if stopReason, ok := data["stop_reason"].(string); ok {
+		msg.StopReason = stopReason
 	}
 
 	if totalCost, ok := data["total_cost_usd"].(float64); ok {

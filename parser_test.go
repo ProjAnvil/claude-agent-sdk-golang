@@ -662,3 +662,95 @@ func TestParseStreamEventMissingFields(t *testing.T) {
 		t.Error("Expected error for missing fields in stream_event message")
 	}
 }
+
+func TestParseResultMessageWithStopReason(t *testing.T) {
+	// Test parsing a result message with stop_reason field.
+	// The stop_reason field mirrors the Anthropic API's stop_reason on the
+	// final assistant turn (e.g., "end_turn", "max_tokens", "tool_use").
+	data := map[string]interface{}{
+		"type":           "result",
+		"subtype":        "success",
+		"duration_ms":    float64(1000),
+		"duration_api_ms": float64(500),
+		"is_error":       false,
+		"num_turns":      float64(2),
+		"session_id":     "session_123",
+		"stop_reason":    "end_turn",
+		"result":         "Done",
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+
+	resultMsg, ok := msg.(*ResultMessage)
+	if !ok {
+		t.Fatalf("Expected *ResultMessage, got %T", msg)
+	}
+
+	if resultMsg.StopReason != "end_turn" {
+		t.Errorf("Expected StopReason 'end_turn', got '%s'", resultMsg.StopReason)
+	}
+
+	if resultMsg.Result != "Done" {
+		t.Errorf("Expected Result 'Done', got '%s'", resultMsg.Result)
+	}
+}
+
+func TestParseResultMessageWithNullStopReason(t *testing.T) {
+	// Test parsing a result message with explicit null stop_reason.
+	// When stop_reason is null/missing, it should be an empty string.
+	data := map[string]interface{}{
+		"type":           "result",
+		"subtype":        "error_max_turns",
+		"duration_ms":    float64(1000),
+		"duration_api_ms": float64(500),
+		"is_error":       true,
+		"num_turns":      float64(10),
+		"session_id":     "session_123",
+		"stop_reason":    nil,
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+
+	resultMsg, ok := msg.(*ResultMessage)
+	if !ok {
+		t.Fatalf("Expected *ResultMessage, got %T", msg)
+	}
+
+	if resultMsg.StopReason != "" {
+		t.Errorf("Expected empty StopReason for null value, got '%s'", resultMsg.StopReason)
+	}
+}
+
+func TestParseResultMessageWithoutStopReason(t *testing.T) {
+	// Test backward compatibility: parsing a result message without stop_reason field.
+	// Older CLI output without the field should produce empty string.
+	data := map[string]interface{}{
+		"type":           "result",
+		"subtype":        "success",
+		"duration_ms":    float64(1000),
+		"duration_api_ms": float64(500),
+		"is_error":       false,
+		"num_turns":      float64(2),
+		"session_id":     "session_123",
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+
+	resultMsg, ok := msg.(*ResultMessage)
+	if !ok {
+		t.Fatalf("Expected *ResultMessage, got %T", msg)
+	}
+
+	if resultMsg.StopReason != "" {
+		t.Errorf("Expected empty StopReason for missing field, got '%s'", resultMsg.StopReason)
+	}
+}

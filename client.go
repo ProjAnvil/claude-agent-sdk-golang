@@ -83,15 +83,28 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 					internalCallbacks[j] = func(input internal.HookInput, toolUseID string, ctx internal.HookContext) (internal.HookOutput, error) {
 						// Convert internal types to public types
 						publicInput := HookInput{
-							HookEventName:  input.HookEventName,
-							SessionID:      input.SessionID,
-							TranscriptPath: input.TranscriptPath,
-							CWD:            input.CWD,
-							PermissionMode: input.PermissionMode,
-							ToolName:       input.ToolName,
-							ToolInput:      input.ToolInput,
-							ToolResponse:   input.ToolResponse,
-							Prompt:         input.Prompt,
+							HookEventName:       input.HookEventName,
+							SessionID:           input.SessionID,
+							TranscriptPath:      input.TranscriptPath,
+							CWD:                 input.CWD,
+							PermissionMode:      input.PermissionMode,
+							ToolName:            input.ToolName,
+							ToolInput:           input.ToolInput,
+							ToolResponse:        input.ToolResponse,
+							ToolUseID:           input.ToolUseID,
+							Error:               input.Error,
+							IsInterrupt:         input.IsInterrupt,
+							Prompt:              input.Prompt,
+							StopHookActive:      input.StopHookActive,
+							AgentID:             input.AgentID,
+							AgentTranscriptPath: input.AgentTranscriptPath,
+							AgentType:           input.AgentType,
+							Trigger:             input.Trigger,
+							CustomInstructions:  input.CustomInstructions,
+							Message:             input.Message,
+							Title:               input.Title,
+							NotificationType:    input.NotificationType,
+							PermissionSuggestions: input.PermissionSuggestions,
 						}
 						publicCtx := HookContext{}
 
@@ -367,8 +380,44 @@ func (c *ClaudeSDKClient) RewindFiles(ctx context.Context, userMessageID string)
 	return c.query.RewindFiles(ctx, userMessageID)
 }
 
+// ReconnectMCPServer reconnects to an MCP server.
+func (c *ClaudeSDKClient) ReconnectMCPServer(ctx context.Context, serverName string) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if !c.connected {
+		return NewCLIConnectionError("not connected", nil)
+	}
+
+	return c.query.ReconnectMCPServer(ctx, serverName)
+}
+
+// ToggleMCPServer enables or disables an MCP server.
+func (c *ClaudeSDKClient) ToggleMCPServer(ctx context.Context, serverName string, enabled bool) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if !c.connected {
+		return NewCLIConnectionError("not connected", nil)
+	}
+
+	return c.query.ToggleMCPServer(ctx, serverName, enabled)
+}
+
+// StopTask stops a running task.
+func (c *ClaudeSDKClient) StopTask(ctx context.Context, taskID string) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if !c.connected {
+		return NewCLIConnectionError("not connected", nil)
+	}
+
+	return c.query.StopTask(ctx, taskID)
+}
+
 // GetMCPStatus returns the current MCP server connection status.
-func (c *ClaudeSDKClient) GetMCPStatus(ctx context.Context) (map[string]interface{}, error) {
+func (c *ClaudeSDKClient) GetMCPStatus(ctx context.Context) (*McpStatusResponse, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -376,7 +425,78 @@ func (c *ClaudeSDKClient) GetMCPStatus(ctx context.Context) (map[string]interfac
 		return nil, NewCLIConnectionError("not connected", nil)
 	}
 
-	return c.query.GetMCPStatus(ctx)
+	rawData, err := c.query.GetMCPStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the response into McpStatusResponse
+	response := &McpStatusResponse{}
+	if servers, ok := rawData["mcpServers"].([]interface{}); ok {
+		response.MCPServers = make([]McpServerStatus, 0, len(servers))
+		for _, server := range servers {
+			if serverMap, ok := server.(map[string]interface{}); ok {
+				serverStatus := McpServerStatus{
+					Name:   toString(serverMap["name"]),
+					Status: McpServerConnectionStatus(toString(serverMap["status"])),
+					Error:  toString(serverMap["error"]),
+					Scope:  toString(serverMap["scope"]),
+				}
+
+				// Parse serverInfo if present
+				if serverInfo, ok := serverMap["serverInfo"].(map[string]interface{}); ok {
+					serverStatus.ServerInfo = &McpServerInfo{
+						Name:    toString(serverInfo["name"]),
+						Version: toString(serverInfo["version"]),
+					}
+				}
+
+				// Parse tools if present
+				if tools, ok := serverMap["tools"].([]interface{}); ok {
+					serverStatus.Tools = make([]McpToolInfo, 0, len(tools))
+					for _, tool := range tools {
+						if toolMap, ok := tool.(map[string]interface{}); ok {
+							toolInfo := McpToolInfo{
+								Name:        toString(toolMap["name"]),
+								Description: toString(toolMap["description"]),
+							}
+							// Parse annotations if present
+							if annotations, ok := toolMap["annotations"].(map[string]interface{}); ok {
+								toolInfo.Annotations = &McpToolAnnotations{}
+								if readOnly, ok := annotations["readOnly"].(bool); ok {
+									toolInfo.Annotations.ReadOnly = readOnly
+								}
+								if destructive, ok := annotations["destructive"].(bool); ok {
+									toolInfo.Annotations.Destructive = destructive
+								}
+								if openWorld, ok := annotations["openWorld"].(bool); ok {
+									toolInfo.Annotations.OpenWorld = openWorld
+								}
+							}
+							serverStatus.Tools = append(serverStatus.Tools, toolInfo)
+						}
+					}
+				}
+
+				// Parse config if present
+				if config, ok := serverMap["config"].(map[string]interface{}); ok {
+					serverStatus.Config = config
+				}
+
+				response.MCPServers = append(response.MCPServers, serverStatus)
+			}
+		}
+	}
+
+	return response, nil
+}
+
+// toString is a helper to convert interface{} to string.
+func toString(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 // GetServerInfo returns information about the connected server.

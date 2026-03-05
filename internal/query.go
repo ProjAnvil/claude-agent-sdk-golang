@@ -93,15 +93,28 @@ type HookContext struct {
 
 // HookInput contains data passed to hook callbacks.
 type HookInput struct {
-	HookEventName  string
-	SessionID      string
-	TranscriptPath string
-	CWD            string
-	PermissionMode string
-	ToolName       string
-	ToolInput      map[string]interface{}
-	ToolResponse   interface{}
-	Prompt         string
+	HookEventName         string
+	SessionID             string
+	TranscriptPath        string
+	CWD                   string
+	PermissionMode        string
+	ToolName              string
+	ToolInput             map[string]interface{}
+	ToolResponse          interface{}
+	ToolUseID             string
+	Error                 string
+	IsInterrupt           bool
+	Prompt                string
+	StopHookActive        bool
+	AgentID               string
+	AgentTranscriptPath   string
+	AgentType             string
+	Trigger               string
+	CustomInstructions    string
+	Message               string
+	Title                 string
+	NotificationType      string
+	PermissionSuggestions []interface{}
 }
 
 // HookOutput defines the response from a hook callback.
@@ -265,6 +278,34 @@ func (q *Query) RewindFiles(ctx context.Context, userMessageID string) error {
 	_, err := q.sendControlRequest(ctx, map[string]interface{}{
 		"subtype":         "rewind_files",
 		"user_message_id": userMessageID,
+	})
+	return err
+}
+
+// ReconnectMCPServer reconnects to an MCP server.
+func (q *Query) ReconnectMCPServer(ctx context.Context, serverName string) error {
+	_, err := q.sendControlRequest(ctx, map[string]interface{}{
+		"subtype":    "mcp_reconnect",
+		"serverName": serverName,
+	})
+	return err
+}
+
+// ToggleMCPServer enables or disables an MCP server.
+func (q *Query) ToggleMCPServer(ctx context.Context, serverName string, enabled bool) error {
+	_, err := q.sendControlRequest(ctx, map[string]interface{}{
+		"subtype":    "mcp_toggle",
+		"serverName": serverName,
+		"enabled":    enabled,
+	})
+	return err
+}
+
+// StopTask stops a running task.
+func (q *Query) StopTask(ctx context.Context, taskID string) error {
+	_, err := q.sendControlRequest(ctx, map[string]interface{}{
+		"subtype": "stop_task",
+		"task_id": taskID,
 	})
 	return err
 }
@@ -503,6 +544,48 @@ func (q *Query) handleHookCallback(request map[string]interface{}) (map[string]i
 	}
 	if prompt, ok := inputData["prompt"].(string); ok {
 		hookInput.Prompt = prompt
+	}
+	if permissionMode, ok := inputData["permission_mode"].(string); ok {
+		hookInput.PermissionMode = permissionMode
+	}
+	if toolUseIDValue, ok := inputData["tool_use_id"].(string); ok {
+		hookInput.ToolUseID = toolUseIDValue
+	}
+	if error, ok := inputData["error"].(string); ok {
+		hookInput.Error = error
+	}
+	if isInterrupt, ok := inputData["is_interrupt"].(bool); ok {
+		hookInput.IsInterrupt = isInterrupt
+	}
+	if stopHookActive, ok := inputData["stop_hook_active"].(bool); ok {
+		hookInput.StopHookActive = stopHookActive
+	}
+	if agentID, ok := inputData["agent_id"].(string); ok {
+		hookInput.AgentID = agentID
+	}
+	if agentTranscriptPath, ok := inputData["agent_transcript_path"].(string); ok {
+		hookInput.AgentTranscriptPath = agentTranscriptPath
+	}
+	if agentType, ok := inputData["agent_type"].(string); ok {
+		hookInput.AgentType = agentType
+	}
+	if trigger, ok := inputData["trigger"].(string); ok {
+		hookInput.Trigger = trigger
+	}
+	if customInstructions, ok := inputData["custom_instructions"].(string); ok {
+		hookInput.CustomInstructions = customInstructions
+	}
+	if message, ok := inputData["message"].(string); ok {
+		hookInput.Message = message
+	}
+	if title, ok := inputData["title"].(string); ok {
+		hookInput.Title = title
+	}
+	if notificationType, ok := inputData["notification_type"].(string); ok {
+		hookInput.NotificationType = notificationType
+	}
+	if permissionSuggestions, ok := inputData["permission_suggestions"].([]interface{}); ok {
+		hookInput.PermissionSuggestions = permissionSuggestions
 	}
 
 	ctx := HookContext{}

@@ -90,6 +90,7 @@ type ResultMessage struct {
 	IsError          bool                   `json:"is_error"`
 	NumTurns         int                    `json:"num_turns"`
 	SessionID        string                 `json:"session_id"`
+	StopReason       string                 `json:"stop_reason,omitempty"`
 	TotalCostUSD     float64                `json:"total_cost_usd,omitempty"`
 	Usage            map[string]interface{} `json:"usage,omitempty"`
 	Result           string                 `json:"result,omitempty"`
@@ -107,6 +108,61 @@ type StreamEvent struct {
 }
 
 func (m *StreamEvent) messageMarker() {}
+
+// TaskUsage represents usage statistics reported in task_progress and task_notification messages.
+type TaskUsage struct {
+	TotalTokens int `json:"total_tokens"`
+	ToolUses    int `json:"tool_uses"`
+	DurationMS  int `json:"duration_ms"`
+}
+
+// TaskNotificationStatus represents the status of a task notification.
+type TaskNotificationStatus string
+
+const (
+	TaskNotificationStatusCompleted TaskNotificationStatus = "completed"
+	TaskNotificationStatusFailed    TaskNotificationStatus = "failed"
+	TaskNotificationStatusStopped   TaskNotificationStatus = "stopped"
+)
+
+// TaskStartedMessage represents a task started system message.
+type TaskStartedMessage struct {
+	TaskID      string `json:"task_id"`
+	Description string `json:"description"`
+	UUID        string `json:"uuid"`
+	SessionID   string `json:"session_id"`
+	ToolUseID   string `json:"tool_use_id,omitempty"`
+	TaskType    string `json:"task_type,omitempty"`
+}
+
+func (m *TaskStartedMessage) messageMarker() {}
+
+// TaskProgressMessage represents a task progress system message.
+type TaskProgressMessage struct {
+	TaskID       string    `json:"task_id"`
+	Description  string    `json:"description"`
+	Usage        TaskUsage `json:"usage"`
+	UUID         string    `json:"uuid"`
+	SessionID    string    `json:"session_id"`
+	ToolUseID    string    `json:"tool_use_id,omitempty"`
+	LastToolName string    `json:"last_tool_name,omitempty"`
+}
+
+func (m *TaskProgressMessage) messageMarker() {}
+
+// TaskNotificationMessage represents a task notification system message.
+type TaskNotificationMessage struct {
+	TaskID     string                `json:"task_id"`
+	Status     TaskNotificationStatus `json:"status"`
+	OutputFile string                `json:"output_file"`
+	Summary    string                `json:"summary"`
+	UUID       string                `json:"uuid"`
+	SessionID  string                `json:"session_id"`
+	ToolUseID  string                `json:"tool_use_id,omitempty"`
+	Usage      *TaskUsage            `json:"usage,omitempty"`
+}
+
+func (m *TaskNotificationMessage) messageMarker() {}
 
 // TextBlock represents a text content block.
 type TextBlock struct {
@@ -417,7 +473,7 @@ type HookInput struct {
 	TranscriptPath        string                 `json:"transcript_path"`
 	CWD                   string                 `json:"cwd"`
 	PermissionMode        string                 `json:"permission_mode,omitempty"`
-	ToolName              string                 `json:"tool_name,omitempty"`              // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
+	ToolName              string                 `json:"tool_name,omitempty"`              // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest (includes agent_id/agent_type for subagents)
 	ToolInput             map[string]interface{} `json:"tool_input,omitempty"`             // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
 	ToolResponse          interface{}            `json:"tool_response,omitempty"`          // PostToolUse
 	ToolUseID             string                 `json:"tool_use_id,omitempty"`            // PreToolUse, PostToolUse, PostToolUseFailure
@@ -425,9 +481,9 @@ type HookInput struct {
 	IsInterrupt           bool                   `json:"is_interrupt,omitempty"`           // PostToolUseFailure
 	Prompt                string                 `json:"prompt,omitempty"`                 // UserPromptSubmit
 	StopHookActive        bool                   `json:"stop_hook_active,omitempty"`       // Stop, SubagentStop
-	AgentID               string                 `json:"agent_id,omitempty"`               // SubagentStop, SubagentStart
+	AgentID               string                 `json:"agent_id,omitempty"`               // SubagentStop, SubagentStart, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
 	AgentTranscriptPath   string                 `json:"agent_transcript_path,omitempty"`  // SubagentStop
-	AgentType             string                 `json:"agent_type,omitempty"`             // SubagentStop, SubagentStart
+	AgentType             string                 `json:"agent_type,omitempty"`             // SubagentStop, SubagentStart, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
 	Trigger               string                 `json:"trigger,omitempty"`                // PreCompact: "manual" or "auto"
 	CustomInstructions    string                 `json:"custom_instructions,omitempty"`    // PreCompact
 	Message               string                 `json:"message,omitempty"`                // Notification
@@ -447,4 +503,126 @@ type HookOutput struct {
 	SystemMessage      string                 `json:"systemMessage,omitempty"`
 	Reason             string                 `json:"reason,omitempty"`
 	HookSpecificOutput map[string]interface{} `json:"hookSpecificOutput,omitempty"`
+}
+
+// MCP Server Status Types
+
+// McpServerConnectionStatus represents the connection status of an MCP server.
+type McpServerConnectionStatus string
+
+const (
+	McpServerStatusConnected  McpServerConnectionStatus = "connected"
+	McpServerStatusFailed     McpServerConnectionStatus = "failed"
+	McpServerStatusNeedsAuth  McpServerConnectionStatus = "needs-auth"
+	McpServerStatusPending    McpServerConnectionStatus = "pending"
+	McpServerStatusDisabled   McpServerConnectionStatus = "disabled"
+)
+
+// McpToolAnnotations represents optional hints for tool usage.
+type McpToolAnnotations struct {
+	ReadOnly    bool `json:"readOnly,omitempty"`
+	Destructive bool `json:"destructive,omitempty"`
+	OpenWorld   bool `json:"openWorld,omitempty"`
+}
+
+// McpToolInfo represents information about an MCP tool.
+type McpToolInfo struct {
+	Name        string                `json:"name"`
+	Description string                `json:"description,omitempty"`
+	Annotations *McpToolAnnotations   `json:"annotations,omitempty"`
+}
+
+// McpServerInfo represents server information from an MCP server.
+type McpServerInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// McpSdkServerConfigStatus represents the status configuration for an SDK MCP server.
+type McpSdkServerConfigStatus struct {
+	Type string `json:"type"` // "sdk"
+	Name string `json:"name"`
+}
+
+// McpClaudeAIProxyServerConfig represents the configuration for a Claude.ai proxy server.
+type McpClaudeAIProxyServerConfig struct {
+	Type string `json:"type"` // "claudeai-proxy"
+	URL  string `json:"url"`
+	ID   string `json:"id"`
+}
+
+// McpServerStatusConfig is a union type for MCP server status configurations.
+type McpServerStatusConfig interface {
+	mcpServerStatusConfigMarker()
+}
+
+func (c *McpSdkServerConfigStatus) mcpServerStatusConfigMarker() {}
+func (c *McpClaudeAIProxyServerConfig) mcpServerStatusConfigMarker() {}
+
+// McpServerStatus represents the status of an MCP server.
+type McpServerStatus struct {
+	Name       string                    `json:"name"`
+	Status     McpServerConnectionStatus `json:"status"`
+	ServerInfo *McpServerInfo            `json:"serverInfo,omitempty"`
+	Error      string                    `json:"error,omitempty"`
+	Config     map[string]interface{}    `json:"config,omitempty"`
+	Scope      string                    `json:"scope,omitempty"`
+	Tools      []McpToolInfo             `json:"tools,omitempty"`
+}
+
+// McpStatusResponse represents the response from an MCP status request.
+type McpStatusResponse struct {
+	MCPServers []McpServerStatus `json:"mcpServers"`
+}
+
+// SDK Control Request Types for MCP
+
+// SDKControlMcpReconnectRequest requests reconnection to an MCP server.
+type SDKControlMcpReconnectRequest struct {
+	Subtype    string `json:"subtype"`    // "mcp_reconnect"
+	ServerName string `json:"serverName"`
+}
+
+// SDKControlMcpToggleRequest requests toggling an MCP server on/off.
+type SDKControlMcpToggleRequest struct {
+	Subtype    string `json:"subtype"`    // "mcp_toggle"
+	ServerName string `json:"serverName"`
+	Enabled    bool   `json:"enabled"`
+}
+
+// SDKControlStopTaskRequest requests stopping a running task.
+type SDKControlStopTaskRequest struct {
+	Subtype string `json:"subtype"` // "stop_task"
+	TaskID  string `json:"task_id"`
+}
+
+// Session Management Types
+
+// SessionMessageType represents the type of a session message.
+type SessionMessageType string
+
+const (
+	SessionMessageTypeUser      SessionMessageType = "user"
+	SessionMessageTypeAssistant SessionMessageType = "assistant"
+)
+
+// SDKSessionInfo contains metadata about a Claude Code session.
+type SDKSessionInfo struct {
+	SessionID    string  `json:"session_id"`
+	Summary      string  `json:"summary"`
+	LastModified int64   `json:"last_modified"`
+	FileSize     int64   `json:"file_size"`
+	CustomTitle  *string `json:"custom_title,omitempty"`
+	FirstPrompt  *string `json:"first_prompt,omitempty"`
+	GitBranch    *string `json:"git_branch,omitempty"`
+	CWD          *string `json:"cwd,omitempty"`
+}
+
+// SessionMessage represents a message in a session's conversation.
+type SessionMessage struct {
+	Type            SessionMessageType `json:"type"`
+	UUID            string             `json:"uuid"`
+	SessionID       string             `json:"session_id"`
+	Message         interface{}        `json:"message"`
+	ParentToolUseID *string            `json:"parent_tool_use_id,omitempty"`
 }
