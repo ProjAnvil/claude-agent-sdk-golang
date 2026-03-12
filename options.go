@@ -77,6 +77,8 @@ type ClaudeAgentOptions struct {
 	OutputFormat map[string]interface{}
 	// EnableFileCheckpointing enables file change tracking.
 	EnableFileCheckpointing bool
+	// Effort controls thinking depth ("low", "medium", "high", "max").
+	Effort string
 }
 
 // DefaultOptions returns ClaudeAgentOptions with default values.

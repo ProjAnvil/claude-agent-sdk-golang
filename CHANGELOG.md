@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.48] - 2025-03-12
+
+### Added
+
+- **Effort option**: Added `Effort` field to `ClaudeAgentOptions` for controlling thinking depth. Valid values are `"low"`, `"medium"`, `"high"`, and `"max"`. This option maps to the `--effort` CLI flag.
+
+### Bug Fixes
+
+- **Fine-grained tool streaming**: Fixed `IncludePartialMessages=true` not delivering `input_json_delta` events by enabling the `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` environment variable in the subprocess. User-supplied values in `Env` take precedence over the SDK default. This regression affected versions 0.1.36 through 0.1.47 for users without the server-side feature flag.
+
+### Changed
+
+- Synced with Python SDK v0.1.48 changes
+- Updated transport layer to support the new `--effort` CLI flag
+
 ## [0.1.46] - 2025-03-05
 
 ### Added

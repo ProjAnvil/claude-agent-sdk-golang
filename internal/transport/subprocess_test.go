@@ -517,3 +517,89 @@ func TestConcurrentWrite(t *testing.T) {
 		}
 	}
 }
+
+// TestIncludePartialMessagesEnablesFGTS tests that IncludePartialMessages=true
+// sets CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1.
+// --include-partial-messages tells the CLI to forward stream_event messages,
+// but tool input parameters are still buffered by the API unless
+// eager_input_streaming is enabled via this env var.
+func TestIncludePartialMessagesEnablesFGTS(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:                 "/fake/path/claude",
+		IncludePartialMessages:  true,
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+
+	// Check that the env var is set
+	found := false
+	for _, env := range cmd.Env {
+		if env == "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Error("Expected CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1 to be set when IncludePartialMessages is true")
+	}
+}
+
+// TestIncludePartialMessagesFalseDoesNotSetFGTS tests that IncludePartialMessages=false
+// does not force-enable FGTS.
+func TestIncludePartialMessagesFalseDoesNotSetFGTS(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:                 "/fake/path/claude",
+		IncludePartialMessages:  false,
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+
+	// Check that the env var is NOT set (unless user already had it in their env)
+	for _, env := range cmd.Env {
+		if strings.HasPrefix(env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=") {
+			t.Error("CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING should not be set when IncludePartialMessages is false")
+			break
+		}
+	}
+}
+
+// TestUserCanOverrideFGTSEnvVar tests that a user-supplied env var takes precedence
+// over the SDK default.
+func TestUserCanOverrideFGTSEnvVar(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:                "/fake/path/claude",
+		IncludePartialMessages: true,
+		Env: map[string]string{
+			"CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING": "0",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+
+	// User's explicit "0" should win over SDK default "1"
+	found := false
+	var value string
+	for _, env := range cmd.Env {
+		if strings.HasPrefix(env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=") {
+			found = true
+			value = strings.TrimPrefix(env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=")
+			break
+		}
+	}
+
+	if !found {
+		t.Error("Expected CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING to be set from user env")
+	} else if value != "0" {
+		t.Errorf("Expected user value '0', got '%s'", value)
+	}
+}

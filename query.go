@@ -334,6 +334,7 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 		MaxThinkingTokens:        opts.MaxThinkingTokens,
 		OutputFormat:             opts.OutputFormat,
 		EnableFileCheckpointing:  opts.EnableFileCheckpointing,
+		Effort:                   opts.Effort,
 	}
 
 	if opts.ToolsPreset != nil {

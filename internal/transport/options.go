@@ -37,6 +37,8 @@ type TransportOptions struct {
 	OutputFormat             map[string]interface{}
 	EnableFileCheckpointing  bool
 	Sandbox                  *SandboxSettings
+	// Effort controls thinking depth ("low", "medium", "high", "max").
+	Effort string
 }
 
 // SystemPromptPreset represents a system prompt preset.

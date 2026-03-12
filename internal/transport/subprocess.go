@@ -229,20 +229,6 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 		return &CLIConnectionError{Message: "failed to create stderr pipe", Cause: err}
 	}
 
-	// Set environment
-	env := os.Environ()
-	for k, v := range t.options.Env {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
-	}
-	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
-	if t.cwd != "" {
-		env = append(env, fmt.Sprintf("PWD=%s", t.cwd))
-	}
-	if t.options.EnableFileCheckpointing {
-		env = append(env, "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true")
-	}
-	cmd.Env = env
-
 	if t.cwd != "" {
 		cmd.Dir = t.cwd
 	}
@@ -423,6 +409,11 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		args = append(args, "--sandbox", string(sandboxJSON))
 	}
 
+	// Effort
+	if t.options.Effort != "" {
+		args = append(args, "--effort", t.options.Effort)
+	}
+
 	// Output format (JSON schema)
 	if t.options.OutputFormat != nil {
 		if t.options.OutputFormat["type"] == "json_schema" {
@@ -437,7 +428,40 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	// (matching Python SDK behavior where prompts are sent via stdin)
 	args = append(args, "--input-format", "stream-json")
 
-	return exec.CommandContext(ctx, t.cliPath, args...)
+	cmd := exec.CommandContext(ctx, t.cliPath, args...)
+
+	// Set environment
+	env := os.Environ()
+
+	// Track which env vars were set by user to implement setdefault behavior
+	userEnvKeys := make(map[string]bool)
+	for k, v := range t.options.Env {
+		env = append(env, fmt.Sprintf("%s=%s", k, v))
+		userEnvKeys[k] = true
+	}
+
+	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	if t.cwd != "" {
+		env = append(env, fmt.Sprintf("PWD=%s", t.cwd))
+	}
+	if t.options.EnableFileCheckpointing {
+		env = append(env, "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true")
+	}
+
+	// Enable fine-grained tool streaming when partial messages are requested.
+	// --include-partial-messages emits stream_event messages, but tool input
+	// parameters are still buffered by the API unless eager_input_streaming is
+	// also enabled at the per-tool level via this env var.
+	// User-supplied values take precedence (setdefault behavior).
+	if t.options.IncludePartialMessages {
+		if !userEnvKeys["CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING"] {
+			env = append(env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1")
+		}
+	}
+
+	cmd.Env = env
+
+	return cmd
 }
 
 // buildMCPConfig builds the MCP configuration JSON.
