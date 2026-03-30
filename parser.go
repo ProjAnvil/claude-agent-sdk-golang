@@ -23,6 +23,8 @@ func ParseMessage(data map[string]interface{}) (Message, error) {
 		return parseResultMessage(data)
 	case "stream_event":
 		return parseStreamEvent(data)
+	case "rate_limit_event":
+		return parseRateLimitEvent(data)
 	default:
 		// Forward-compatible: skip unrecognized message types so newer
 		// CLI versions don't crash older SDK versions.
@@ -89,12 +91,31 @@ func parseAssistantMessage(data map[string]interface{}) (*AssistantMessage, erro
 		msg.Model = model
 	}
 
+	// Extract optional message-level fields
+	if usage, ok := messageData["usage"].(map[string]interface{}); ok {
+		msg.Usage = usage
+	}
+	if messageID, ok := messageData["id"].(string); ok {
+		msg.MessageID = messageID
+	}
+	if stopReason, ok := messageData["stop_reason"].(string); ok {
+		msg.StopReason = stopReason
+	}
+
 	if errStr, ok := messageData["error"].(string); ok {
 		msg.Error = errStr
 	}
 
 	if errStr, ok := data["error"].(string); ok {
 		msg.Error = errStr
+	}
+
+	// Extract optional fields from outer data
+	if sessionID, ok := data["session_id"].(string); ok {
+		msg.SessionID = sessionID
+	}
+	if uuid, ok := data["uuid"].(string); ok {
+		msg.UUID = uuid
 	}
 
 	// Extract content blocks
@@ -350,6 +371,28 @@ func parseResultMessage(data map[string]interface{}) (*ResultMessage, error) {
 		msg.StructuredOutput = structuredOutput
 	}
 
+	if modelUsage, ok := data["modelUsage"].(map[string]interface{}); ok {
+		msg.ModelUsage = modelUsage
+	}
+
+	if permDenials, ok := data["permission_denials"].([]interface{}); ok {
+		msg.PermissionDenials = permDenials
+	}
+
+	if errors, ok := data["errors"].([]interface{}); ok {
+		errStrings := make([]string, 0, len(errors))
+		for _, e := range errors {
+			if s, ok := e.(string); ok {
+				errStrings = append(errStrings, s)
+			}
+		}
+		msg.Errors = errStrings
+	}
+
+	if uuid, ok := data["uuid"].(string); ok {
+		msg.UUID = uuid
+	}
+
 	return msg, nil
 }
 
@@ -376,6 +419,62 @@ func parseStreamEvent(data map[string]interface{}) (*StreamEvent, error) {
 
 	if parentID, ok := data["parent_tool_use_id"].(string); ok {
 		msg.ParentToolUseID = parentID
+	}
+
+	return msg, nil
+}
+
+func parseRateLimitEvent(data map[string]interface{}) (*RateLimitEvent, error) {
+	msg := &RateLimitEvent{}
+
+	infoRaw, ok := data["rate_limit_info"].(map[string]interface{})
+	if !ok {
+		return nil, NewMessageParseError("missing required field in rate_limit_event message: rate_limit_info", data)
+	}
+
+	statusStr, ok := infoRaw["status"].(string)
+	if !ok {
+		return nil, NewMessageParseError("missing required field in rate_limit_event message: rate_limit_info.status", data)
+	}
+
+	info := RateLimitInfo{
+		Status: RateLimitStatus(statusStr),
+		Raw:    infoRaw,
+	}
+
+	if resetsAt, ok := infoRaw["resetsAt"].(float64); ok {
+		v := int64(resetsAt)
+		info.ResetsAt = &v
+	}
+	if rlType, ok := infoRaw["rateLimitType"].(string); ok {
+		info.RateLimitType = RateLimitType(rlType)
+	}
+	if utilization, ok := infoRaw["utilization"].(float64); ok {
+		info.Utilization = &utilization
+	}
+	if overageStatus, ok := infoRaw["overageStatus"].(string); ok {
+		info.OverageStatus = RateLimitStatus(overageStatus)
+	}
+	if overageResetsAt, ok := infoRaw["overageResetsAt"].(float64); ok {
+		v := int64(overageResetsAt)
+		info.OverageResetsAt = &v
+	}
+	if overageDisabledReason, ok := infoRaw["overageDisabledReason"].(string); ok {
+		info.OverageDisabledReason = overageDisabledReason
+	}
+
+	msg.RateLimitInfo = info
+
+	if uuid, ok := data["uuid"].(string); ok {
+		msg.UUID = uuid
+	} else {
+		return nil, NewMessageParseError("missing required field in rate_limit_event message: uuid", data)
+	}
+
+	if sessionID, ok := data["session_id"].(string); ok {
+		msg.SessionID = sessionID
+	} else {
+		return nil, NewMessageParseError("missing required field in rate_limit_event message: session_id", data)
 	}
 
 	return msg, nil

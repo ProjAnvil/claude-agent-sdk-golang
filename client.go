@@ -50,8 +50,16 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 	transportOpts := convertToTransportOptions(c.options)
 
 	var promptArg interface{}
+	var stringPrompt string
 	if len(prompt) > 0 {
-		promptArg = prompt[0]
+		if s, ok := prompt[0].(string); ok {
+			// String prompts are sent via transport.write() after initialize,
+			// so the transport only needs an empty channel.
+			stringPrompt = s
+			promptArg = make(chan map[string]interface{})
+		} else {
+			promptArg = prompt[0]
+		}
 	} else {
 		// Default to empty channel for interactive mode
 		promptArg = make(chan map[string]interface{})
@@ -150,7 +158,10 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 	var canUseTool internal.CanUseToolFunc
 	if c.options.CanUseTool != nil {
 		canUseTool = func(toolName string, input map[string]interface{}, ctx internal.ToolPermissionContext) (internal.PermissionResult, error) {
-			publicCtx := ToolPermissionContext{}
+			publicCtx := ToolPermissionContext{
+				ToolUseID: ctx.ToolUseID,
+				AgentID:   ctx.AgentID,
+			}
 			result, err := c.options.CanUseTool(toolName, input, publicCtx)
 			if err != nil {
 				return nil, err
@@ -197,6 +208,28 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 	if _, err := c.query.Initialize(ctx); err != nil {
 		c.transport.Close()
 		return err
+	}
+
+	// If we have a string prompt, send it as a user message after initialize
+	if stringPrompt != "" {
+		message := map[string]interface{}{
+			"type": "user",
+			"message": map[string]interface{}{
+				"role":    "user",
+				"content": stringPrompt,
+			},
+			"parent_tool_use_id": nil,
+			"session_id":         "default",
+		}
+		data, err := json.Marshal(message)
+		if err != nil {
+			c.transport.Close()
+			return err
+		}
+		if err := c.query.Write(string(data) + "\n"); err != nil {
+			c.transport.Close()
+			return err
+		}
 	}
 
 	c.connected = true
@@ -489,6 +522,18 @@ func (c *ClaudeSDKClient) GetMCPStatus(ctx context.Context) (*McpStatusResponse,
 	}
 
 	return response, nil
+}
+
+// GetContextUsage returns a breakdown of current context window usage by category.
+func (c *ClaudeSDKClient) GetContextUsage(ctx context.Context) (map[string]interface{}, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if !c.connected {
+		return nil, NewCLIConnectionError("not connected", nil)
+	}
+
+	return c.query.GetContextUsage(ctx)
 }
 
 // toString is a helper to convert interface{} to string.

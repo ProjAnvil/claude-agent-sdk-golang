@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,9 +44,11 @@ func TestManualConnectDisconnect(t *testing.T) {
 }
 
 func TestConnectWithStringPrompt(t *testing.T) {
-	mockT := createMockTransport()
+	mockT := newMockTransport()
 
 	var capturedPrompt interface{}
+	var writtenMessages []string
+	handleInitialization(mockT, &writtenMessages)
 
 	client := NewClient(nil)
 	client.transportFactory = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
@@ -59,8 +62,22 @@ func TestConnectWithStringPrompt(t *testing.T) {
 		t.Fatalf("Connect failed: %v", err)
 	}
 
-	if capturedPrompt != prompt {
-		t.Errorf("Expected prompt '%s', got '%v'", prompt, capturedPrompt)
+	// String prompts create a channel for the transport; the actual text
+	// is written via transport.Write() after connect.
+	if _, ok := capturedPrompt.(chan map[string]interface{}); !ok {
+		t.Errorf("Expected channel prompt for string input, got %T", capturedPrompt)
+	}
+
+	// Verify the string was written as a user message (writtenMessages captures all writes)
+	found := false
+	for _, msg := range writtenMessages {
+		if strings.Contains(msg, "Hello Claude") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Expected string prompt to be written to transport, got %v", writtenMessages)
 	}
 }
 
@@ -629,5 +646,105 @@ func TestQueryWithSessionID(t *testing.T) {
 
 	if !found {
 		t.Error("User message with custom session ID not found in writes")
+	}
+}
+
+func TestGetContextUsage(t *testing.T) {
+	mockT := newMockTransport()
+
+	contextUsageResponse := map[string]interface{}{
+		"categories": []interface{}{
+			map[string]interface{}{"name": "System prompt", "tokens": float64(3200), "color": "#abc"},
+			map[string]interface{}{"name": "Messages", "tokens": float64(61400), "color": "#def"},
+		},
+		"totalTokens":          float64(98200),
+		"maxTokens":            float64(155000),
+		"rawMaxTokens":         float64(200000),
+		"percentage":           49.1,
+		"model":                "claude-sonnet-4-5",
+		"isAutoCompactEnabled": true,
+		"memoryFiles":          []interface{}{map[string]interface{}{"path": "CLAUDE.md", "type": "project", "tokens": float64(512)}},
+		"mcpTools":             []interface{}{map[string]interface{}{"name": "search", "serverName": "ref", "tokens": float64(164), "isLoaded": true}},
+		"agents":               []interface{}{map[string]interface{}{"agentType": "coder", "source": "sdk", "tokens": float64(299)}},
+		"gridRows":             []interface{}{},
+	}
+
+	// Handle init + get_context_usage control requests
+	mockT.WriteFunc = func(data string) error {
+		var msg map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &msg); err != nil {
+			return nil
+		}
+		if msg["type"] == "control_request" {
+			reqID, _ := msg["request_id"].(string)
+			req, _ := msg["request"].(map[string]interface{})
+			subtype, _ := req["subtype"].(string)
+
+			var respPayload map[string]interface{}
+			switch subtype {
+			case "initialize":
+				respPayload = map[string]interface{}{"version": "0.1.0"}
+			case "get_context_usage":
+				respPayload = contextUsageResponse
+			}
+			if respPayload != nil {
+				mockT.readCh <- map[string]interface{}{
+					"type": "control_response",
+					"response": map[string]interface{}{
+						"subtype":    "success",
+						"request_id": reqID,
+						"response":   respPayload,
+					},
+				}
+			}
+		}
+		return nil
+	}
+
+	client := NewClient(nil)
+	client.transportFactory = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+		return mockT, nil
+	}
+
+	ctx := context.Background()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	usage, err := client.GetContextUsage(ctxWithTimeout)
+	if err != nil {
+		t.Fatalf("GetContextUsage: %v", err)
+	}
+
+	if usage["model"] != "claude-sonnet-4-5" {
+		t.Errorf("Expected model='claude-sonnet-4-5', got %v", usage["model"])
+	}
+	if usage["totalTokens"] != float64(98200) {
+		t.Errorf("Expected totalTokens=98200, got %v", usage["totalTokens"])
+	}
+	if usage["maxTokens"] != float64(155000) {
+		t.Errorf("Expected maxTokens=155000, got %v", usage["maxTokens"])
+	}
+	if usage["percentage"] != 49.1 {
+		t.Errorf("Expected percentage=49.1, got %v", usage["percentage"])
+	}
+	categories, ok := usage["categories"].([]interface{})
+	if !ok || len(categories) != 2 {
+		t.Fatalf("Expected 2 categories, got %v", usage["categories"])
+	}
+}
+
+func TestGetContextUsageNotConnected(t *testing.T) {
+	client := NewClient(nil)
+	ctx := context.Background()
+	_, err := client.GetContextUsage(ctx)
+	if err == nil {
+		t.Fatal("Expected error when not connected")
+	}
+	if _, ok := err.(*CLIConnectionError); !ok {
+		t.Errorf("Expected CLIConnectionError, got %T: %v", err, err)
 	}
 }

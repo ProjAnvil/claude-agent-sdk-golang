@@ -754,3 +754,245 @@ func TestParseResultMessageWithoutStopReason(t *testing.T) {
 		t.Errorf("Expected empty StopReason for missing field, got '%s'", resultMsg.StopReason)
 	}
 }
+
+// TestParseAssistantMessageWithUsage tests that per-turn usage is preserved.
+func TestParseAssistantMessageWithUsage(t *testing.T) {
+	data := map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{
+			"content": []interface{}{map[string]interface{}{"type": "text", "text": "hi"}},
+			"model":   "claude-opus-4-5",
+			"usage": map[string]interface{}{
+				"input_tokens":                float64(100),
+				"output_tokens":               float64(50),
+				"cache_read_input_tokens":      float64(2000),
+				"cache_creation_input_tokens":  float64(500),
+			},
+		},
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	am, ok := msg.(*AssistantMessage)
+	if !ok {
+		t.Fatalf("Expected *AssistantMessage, got %T", msg)
+	}
+	if am.Usage == nil {
+		t.Fatal("Expected usage to be set")
+	}
+	if am.Usage["input_tokens"] != float64(100) {
+		t.Errorf("Expected input_tokens=100, got %v", am.Usage["input_tokens"])
+	}
+}
+
+// TestParseAssistantMessageWithoutUsage tests usage defaults to nil.
+func TestParseAssistantMessageWithoutUsage(t *testing.T) {
+	data := map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{
+			"content": []interface{}{map[string]interface{}{"type": "text", "text": "hi"}},
+			"model":   "claude-opus-4-5",
+		},
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	am := msg.(*AssistantMessage)
+	if am.Usage != nil {
+		t.Errorf("Expected nil usage, got %v", am.Usage)
+	}
+}
+
+// TestParseAssistantMessageWithAllFields tests id, stop_reason, session_id, uuid.
+func TestParseAssistantMessageWithAllFields(t *testing.T) {
+	data := map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{
+			"content":     []interface{}{map[string]interface{}{"type": "text", "text": "Hello"}},
+			"model":       "claude-sonnet-4-5-20250929",
+			"id":          "msg_01HRq7YZE3apPqSHydvG77Ve",
+			"stop_reason": "end_turn",
+			"usage":       map[string]interface{}{"input_tokens": float64(10), "output_tokens": float64(5)},
+		},
+		"session_id": "fdf2d90a-fd9e-4736-ae35-806edd13643f",
+		"uuid":       "0dbd2453-1209-4fe9-bd51-4102f64e33df",
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	am := msg.(*AssistantMessage)
+	if am.MessageID != "msg_01HRq7YZE3apPqSHydvG77Ve" {
+		t.Errorf("Expected MessageID, got '%s'", am.MessageID)
+	}
+	if am.StopReason != "end_turn" {
+		t.Errorf("Expected StopReason='end_turn', got '%s'", am.StopReason)
+	}
+	if am.SessionID != "fdf2d90a-fd9e-4736-ae35-806edd13643f" {
+		t.Errorf("Expected SessionID, got '%s'", am.SessionID)
+	}
+	if am.UUID != "0dbd2453-1209-4fe9-bd51-4102f64e33df" {
+		t.Errorf("Expected UUID, got '%s'", am.UUID)
+	}
+}
+
+// TestParseAssistantMessageOptionalFieldsAbsent tests defaults to zero values.
+func TestParseAssistantMessageOptionalFieldsAbsent(t *testing.T) {
+	data := map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{
+			"content": []interface{}{map[string]interface{}{"type": "text", "text": "hi"}},
+			"model":   "claude-opus-4-5",
+		},
+	}
+	msg, _ := ParseMessage(data)
+	am := msg.(*AssistantMessage)
+	if am.MessageID != "" {
+		t.Errorf("Expected empty MessageID, got '%s'", am.MessageID)
+	}
+	if am.StopReason != "" {
+		t.Errorf("Expected empty StopReason, got '%s'", am.StopReason)
+	}
+	if am.SessionID != "" {
+		t.Errorf("Expected empty SessionID, got '%s'", am.SessionID)
+	}
+	if am.UUID != "" {
+		t.Errorf("Expected empty UUID, got '%s'", am.UUID)
+	}
+}
+
+// TestParseResultMessageWithModelUsage tests modelUsage, permission_denials, uuid.
+func TestParseResultMessageWithModelUsage(t *testing.T) {
+	data := map[string]interface{}{
+		"type":            "result",
+		"subtype":         "success",
+		"duration_ms":     float64(3000),
+		"duration_api_ms": float64(2000),
+		"is_error":        false,
+		"num_turns":       float64(1),
+		"session_id":      "fdf2d90a-fd9e-4736-ae35-806edd13643f",
+		"result":          "Hello",
+		"modelUsage": map[string]interface{}{
+			"claude-sonnet-4-5-20250929": map[string]interface{}{
+				"inputTokens":  float64(3),
+				"outputTokens": float64(24),
+				"costUSD":      0.0106,
+			},
+		},
+		"permission_denials": []interface{}{},
+		"uuid":               "d379c496-f33a-4ea4-b920-3c5483baa6f7",
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	rm := msg.(*ResultMessage)
+	if rm.ModelUsage == nil {
+		t.Fatal("Expected ModelUsage to be set")
+	}
+	if rm.UUID != "d379c496-f33a-4ea4-b920-3c5483baa6f7" {
+		t.Errorf("Expected UUID, got '%s'", rm.UUID)
+	}
+}
+
+// TestParseResultMessageOptionalFieldsAbsent tests defaults.
+func TestParseResultMessageOptionalFieldsAbsent(t *testing.T) {
+	data := map[string]interface{}{
+		"type":            "result",
+		"subtype":         "success",
+		"duration_ms":     float64(1000),
+		"duration_api_ms": float64(500),
+		"is_error":        false,
+		"num_turns":       float64(1),
+		"session_id":      "session_123",
+	}
+	msg, _ := ParseMessage(data)
+	rm := msg.(*ResultMessage)
+	if rm.ModelUsage != nil {
+		t.Errorf("Expected nil ModelUsage, got %v", rm.ModelUsage)
+	}
+	if rm.PermissionDenials != nil {
+		t.Errorf("Expected nil PermissionDenials")
+	}
+	if rm.Errors != nil {
+		t.Errorf("Expected nil Errors")
+	}
+	if rm.UUID != "" {
+		t.Errorf("Expected empty UUID")
+	}
+}
+
+// TestParseResultMessageWithErrors tests errors field.
+func TestParseResultMessageWithErrors(t *testing.T) {
+	data := map[string]interface{}{
+		"type":            "result",
+		"subtype":         "error_during_execution",
+		"duration_ms":     float64(5000),
+		"duration_api_ms": float64(3000),
+		"is_error":        true,
+		"num_turns":       float64(3),
+		"session_id":      "session_456",
+		"errors": []interface{}{
+			"Tool execution failed: permission denied",
+			"Unable to write to /etc/hosts",
+		},
+		"uuid": "err-uuid-789",
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	rm := msg.(*ResultMessage)
+	if len(rm.Errors) != 2 {
+		t.Fatalf("Expected 2 errors, got %d", len(rm.Errors))
+	}
+	if rm.Errors[0] != "Tool execution failed: permission denied" {
+		t.Errorf("Unexpected first error: %s", rm.Errors[0])
+	}
+	if rm.UUID != "err-uuid-789" {
+		t.Errorf("Expected UUID, got '%s'", rm.UUID)
+	}
+}
+
+// TestParseRateLimitEvent tests typed RateLimitEvent parsing.
+func TestParseRateLimitEvent(t *testing.T) {
+	data := map[string]interface{}{
+		"type": "rate_limit_event",
+		"rate_limit_info": map[string]interface{}{
+			"status":        "allowed_warning",
+			"resetsAt":      float64(1700000000),
+			"rateLimitType": "five_hour",
+			"utilization":   0.91,
+		},
+		"uuid":       "abc-123",
+		"session_id": "session_xyz",
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	rle, ok := msg.(*RateLimitEvent)
+	if !ok {
+		t.Fatalf("Expected *RateLimitEvent, got %T", msg)
+	}
+	if rle.UUID != "abc-123" {
+		t.Errorf("Expected UUID 'abc-123', got '%s'", rle.UUID)
+	}
+	if rle.SessionID != "session_xyz" {
+		t.Errorf("Expected SessionID 'session_xyz', got '%s'", rle.SessionID)
+	}
+	if rle.RateLimitInfo.Status != RateLimitStatusAllowedWarning {
+		t.Errorf("Expected status 'allowed_warning', got '%s'", rle.RateLimitInfo.Status)
+	}
+	if rle.RateLimitInfo.ResetsAt == nil || *rle.RateLimitInfo.ResetsAt != 1700000000 {
+		t.Errorf("Expected ResetsAt=1700000000, got %v", rle.RateLimitInfo.ResetsAt)
+	}
+	if rle.RateLimitInfo.RateLimitType != RateLimitTypeFiveHour {
+		t.Errorf("Expected RateLimitType 'five_hour', got '%s'", rle.RateLimitInfo.RateLimitType)
+	}
+	if rle.RateLimitInfo.Utilization == nil || *rle.RateLimitInfo.Utilization != 0.91 {
+		t.Errorf("Expected Utilization=0.91, got %v", rle.RateLimitInfo.Utilization)
+	}
+}

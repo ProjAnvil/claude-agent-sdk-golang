@@ -15,7 +15,7 @@ import (
 // See: https://github.com/anthropics/claude-agent-sdk-python/issues/583
 
 func TestRateLimitEventReturnsNil(t *testing.T) {
-	// rate_limit_event should be silently skipped, not crash
+	// rate_limit_event should be parsed into a RateLimitEvent
 	data := map[string]interface{}{
 		"type": "rate_limit_event",
 		"rate_limit_info": map[string]interface{}{
@@ -33,13 +33,23 @@ func TestRateLimitEventReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected no error for rate_limit_event, got: %v", err)
 	}
-	if result != nil {
-		t.Error("Expected nil message for rate_limit_event")
+	rle, ok := result.(*RateLimitEvent)
+	if !ok {
+		t.Fatalf("Expected *RateLimitEvent, got %T", result)
+	}
+	if rle.RateLimitInfo.Status != RateLimitStatusAllowedWarning {
+		t.Errorf("Expected status 'allowed_warning', got '%s'", rle.RateLimitInfo.Status)
+	}
+	if rle.RateLimitInfo.RateLimitType != RateLimitTypeFiveHour {
+		t.Errorf("Expected rate limit type 'five_hour', got '%s'", rle.RateLimitInfo.RateLimitType)
+	}
+	if rle.UUID != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("Expected UUID '550e8400-e29b-41d4-a716-446655440000', got '%s'", rle.UUID)
 	}
 }
 
 func TestRateLimitEventRejectedReturnsNil(t *testing.T) {
-	// Hard rate limit (status=rejected) should also be skipped
+	// Hard rate limit (status=rejected) should also be parsed
 	data := map[string]interface{}{
 		"type": "rate_limit_event",
 		"rate_limit_info": map[string]interface{}{
@@ -58,8 +68,15 @@ func TestRateLimitEventRejectedReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected no error for rate_limit_event rejected, got: %v", err)
 	}
-	if result != nil {
-		t.Error("Expected nil message for rate_limit_event rejected")
+	rle, ok := result.(*RateLimitEvent)
+	if !ok {
+		t.Fatalf("Expected *RateLimitEvent, got %T", result)
+	}
+	if rle.RateLimitInfo.Status != RateLimitStatusRejected {
+		t.Errorf("Expected status 'rejected', got '%s'", rle.RateLimitInfo.Status)
+	}
+	if rle.RateLimitInfo.OverageStatus != "rejected" {
+		t.Errorf("Expected overage status 'rejected', got '%s'", rle.RateLimitInfo.OverageStatus)
 	}
 }
 
@@ -119,5 +136,36 @@ func TestKnownMessageTypesStillParsed(t *testing.T) {
 
 	if textBlock.Text != "hello" {
 		t.Errorf("Expected text 'hello', got '%s'", textBlock.Text)
+	}
+}
+
+// TestRateLimitEventMinimalFields tests that only status is required.
+func TestRateLimitEventMinimalFields(t *testing.T) {
+	data := map[string]interface{}{
+		"type": "rate_limit_event",
+		"rate_limit_info": map[string]interface{}{
+			"status": "allowed",
+		},
+		"uuid":       "minimal-uuid",
+		"session_id": "minimal-session",
+	}
+
+	result, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	rle, ok := result.(*RateLimitEvent)
+	if !ok {
+		t.Fatalf("Expected *RateLimitEvent, got %T", result)
+	}
+	if rle.RateLimitInfo.Status != RateLimitStatusAllowed {
+		t.Errorf("Expected status 'allowed', got '%s'", rle.RateLimitInfo.Status)
+	}
+	// Optional fields should be zero values
+	if rle.RateLimitInfo.RateLimitType != "" {
+		t.Errorf("Expected empty RateLimitType, got '%s'", rle.RateLimitInfo.RateLimitType)
+	}
+	if rle.RateLimitInfo.Utilization != nil {
+		t.Errorf("Expected nil Utilization, got %v", rle.RateLimitInfo.Utilization)
 	}
 }

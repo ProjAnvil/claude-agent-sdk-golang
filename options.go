@@ -12,6 +12,8 @@ type ClaudeAgentOptions struct {
 	SystemPrompt string
 	// SystemPromptPreset specifies a system prompt preset.
 	SystemPromptPreset *SystemPromptPreset
+	// SystemPromptFile specifies a system prompt from a file.
+	SystemPromptFile *SystemPromptFile
 	// MCPServers configures MCP servers (external or SDK).
 	MCPServers map[string]MCPServerConfig
 	// PermissionMode sets the permission level for tool execution.
@@ -20,6 +22,8 @@ type ClaudeAgentOptions struct {
 	ContinueConversation bool
 	// Resume resumes a specific session.
 	Resume string
+	// SessionID specifies a session ID to use.
+	SessionID string
 	// MaxTurns limits the number of conversation turns.
 	MaxTurns int
 	// MaxBudgetUSD sets a cost limit in USD.
@@ -79,6 +83,8 @@ type ClaudeAgentOptions struct {
 	EnableFileCheckpointing bool
 	// Effort controls thinking depth ("low", "medium", "high", "max").
 	Effort string
+	// TaskBudget sets an API-side task budget in tokens.
+	TaskBudget *TaskBudget
 }
 
 // DefaultOptions returns ClaudeAgentOptions with default values.

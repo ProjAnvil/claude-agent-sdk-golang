@@ -23,10 +23,11 @@ type Query struct {
 	initializeTimeout time.Duration
 
 	// Control protocol state
-	pendingResponses map[string]chan controlResult
-	hookCallbacks    map[string]HookCallback
-	nextCallbackID   int
-	requestCounter   int
+	pendingResponses  map[string]chan controlResult
+	hookCallbacks     map[string]HookCallback
+	inflightRequests  map[string]context.CancelFunc
+	nextCallbackID    int
+	requestCounter    int
 
 	// Message channels - raw JSON data
 	rawMessages chan map[string]interface{}
@@ -48,6 +49,8 @@ type CanUseToolFunc func(toolName string, input map[string]interface{}, ctx Tool
 type ToolPermissionContext struct {
 	Signal      interface{}
 	Suggestions []PermissionUpdate
+	ToolUseID   string
+	AgentID     string
 }
 
 // PermissionResult is the interface for permission results.
@@ -162,6 +165,7 @@ func NewQuery(cfg QueryConfig) *Query {
 		initializeTimeout: cfg.InitializeTimeout,
 		pendingResponses:  make(map[string]chan controlResult),
 		hookCallbacks:     make(map[string]HookCallback),
+		inflightRequests:  make(map[string]context.CancelFunc),
 		rawMessages:       make(chan map[string]interface{}, 100),
 		errors:            make(chan error, 10),
 		firstResultCh:     make(chan struct{}),
@@ -244,6 +248,13 @@ func (q *Query) GetServerInfo() map[string]interface{} {
 func (q *Query) GetMCPStatus(ctx context.Context) (map[string]interface{}, error) {
 	return q.sendControlRequest(ctx, map[string]interface{}{
 		"subtype": "mcp_status",
+	})
+}
+
+// GetContextUsage returns a breakdown of current context window usage by category.
+func (q *Query) GetContextUsage(ctx context.Context) (map[string]interface{}, error) {
+	return q.sendControlRequest(ctx, map[string]interface{}{
+		"subtype": "get_context_usage",
 	})
 }
 
@@ -359,9 +370,18 @@ func (q *Query) readMessages() {
 			q.handleControlResponse(data)
 			continue
 		case "control_request":
-			go q.handleControlRequest(data)
+			go q.spawnControlRequestHandler(data)
 			continue
 		case "control_cancel_request":
+			cancelID, _ := data["request_id"].(string)
+			if cancelID != "" {
+				q.mu.Lock()
+				if cancel, ok := q.inflightRequests[cancelID]; ok {
+					cancel()
+					delete(q.inflightRequests, cancelID)
+				}
+				q.mu.Unlock()
+			}
 			continue
 		}
 
@@ -419,8 +439,28 @@ func (q *Query) handleControlResponse(data map[string]interface{}) {
 	}
 }
 
+// spawnControlRequestHandler spawns a control request handler and tracks it for cancellation.
+func (q *Query) spawnControlRequestHandler(data map[string]interface{}) {
+	reqID, _ := data["request_id"].(string)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	q.mu.Lock()
+	q.inflightRequests[reqID] = cancel
+	q.mu.Unlock()
+
+	go func() {
+		defer func() {
+			q.mu.Lock()
+			delete(q.inflightRequests, reqID)
+			q.mu.Unlock()
+			cancel()
+		}()
+		q.handleControlRequest(ctx, data)
+	}()
+}
+
 // handleControlRequest handles incoming control requests from CLI.
-func (q *Query) handleControlRequest(data map[string]interface{}) {
+func (q *Query) handleControlRequest(ctx context.Context, data map[string]interface{}) {
 	requestID, _ := data["request_id"].(string)
 	request, ok := data["request"].(map[string]interface{})
 	if !ok {
@@ -461,6 +501,8 @@ func (q *Query) handleCanUseTool(request map[string]interface{}) (map[string]int
 	toolName, _ := request["tool_name"].(string)
 	input, _ := request["input"].(map[string]interface{})
 	suggestions, _ := request["permission_suggestions"].([]interface{})
+	toolUseID, _ := request["tool_use_id"].(string)
+	agentID, _ := request["agent_id"].(string)
 
 	var permSuggestions []PermissionUpdate
 	for _, s := range suggestions {
@@ -475,6 +517,8 @@ func (q *Query) handleCanUseTool(request map[string]interface{}) (map[string]int
 
 	ctx := ToolPermissionContext{
 		Suggestions: permSuggestions,
+		ToolUseID:   toolUseID,
+		AgentID:     agentID,
 	}
 
 	result, err := q.canUseTool(toolName, input, ctx)

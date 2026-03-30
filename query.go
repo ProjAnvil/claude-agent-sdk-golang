@@ -263,7 +263,10 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 	var canUseTool internal.CanUseToolFunc
 	if opts.CanUseTool != nil {
 		canUseTool = func(toolName string, input map[string]interface{}, ctx internal.ToolPermissionContext) (internal.PermissionResult, error) {
-			publicCtx := ToolPermissionContext{}
+			publicCtx := ToolPermissionContext{
+				ToolUseID: ctx.ToolUseID,
+				AgentID:   ctx.AgentID,
+			}
 			result, err := opts.CanUseTool(toolName, input, publicCtx)
 			if err != nil {
 				return nil, err
@@ -335,6 +338,22 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 		OutputFormat:             opts.OutputFormat,
 		EnableFileCheckpointing:  opts.EnableFileCheckpointing,
 		Effort:                   opts.Effort,
+	}
+
+	if opts.SessionID != "" {
+		transportOpts.SessionID = opts.SessionID
+	}
+
+	if opts.TaskBudget != nil {
+		total := opts.TaskBudget.Total
+		transportOpts.TaskBudget = &total
+	}
+
+	if opts.SystemPromptFile != nil {
+		transportOpts.SystemPromptFile = &transport.SystemPromptFile{
+			Type: opts.SystemPromptFile.Type,
+			Path: opts.SystemPromptFile.Path,
+		}
 	}
 
 	if opts.ToolsPreset != nil {

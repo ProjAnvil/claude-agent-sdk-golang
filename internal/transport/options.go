@@ -39,6 +39,18 @@ type TransportOptions struct {
 	Sandbox                  *SandboxSettings
 	// Effort controls thinking depth ("low", "medium", "high", "max").
 	Effort string
+	// SessionID is the session ID for resuming a session.
+	SessionID string
+	// TaskBudget is the total task budget in tokens.
+	TaskBudget *int
+	// SystemPromptFile is the path to a file containing the system prompt.
+	SystemPromptFile *SystemPromptFile
+}
+
+// SystemPromptFile represents a file-based system prompt.
+type SystemPromptFile struct {
+	Type string
+	Path string
 }
 
 // SystemPromptPreset represents a system prompt preset.

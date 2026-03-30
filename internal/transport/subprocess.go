@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 const (
@@ -278,7 +280,9 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	args := []string{"--output-format", "stream-json", "--verbose"}
 
 	// System prompt
-	if t.options.SystemPrompt == "" && t.options.SystemPromptPreset == nil {
+	if t.options.SystemPromptFile != nil && t.options.SystemPromptFile.Path != "" {
+		args = append(args, "--system-prompt-file", t.options.SystemPromptFile.Path)
+	} else if t.options.SystemPrompt == "" && t.options.SystemPromptPreset == nil {
 		args = append(args, "--system-prompt", "")
 	} else if t.options.SystemPrompt != "" {
 		args = append(args, "--system-prompt", t.options.SystemPrompt)
@@ -309,6 +313,10 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		args = append(args, "--disallowedTools", strings.Join(t.options.DisallowedTools, ","))
 	}
 
+	if t.options.TaskBudget != nil {
+		args = append(args, "--task-budget", strconv.Itoa(*t.options.TaskBudget))
+	}
+
 	if t.options.Model != "" {
 		args = append(args, "--model", t.options.Model)
 	}
@@ -335,6 +343,10 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 
 	if t.options.Resume != "" {
 		args = append(args, "--resume", t.options.Resume)
+	}
+
+	if t.options.SessionID != "" {
+		args = append(args, "--session-id", t.options.SessionID)
 	}
 
 	if t.options.Settings != "" {
@@ -430,33 +442,24 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 
 	cmd := exec.CommandContext(ctx, t.cliPath, args...)
 
-	// Set environment
-	env := os.Environ()
-
-	// Track which env vars were set by user to implement setdefault behavior
-	userEnvKeys := make(map[string]bool)
+	// Set environment: inherit → default ENTRYPOINT → user env → SDK required.
+	// Filter out CLAUDECODE so SDK-spawned subprocesses don't think
+	// they're running inside a Claude Code parent.
+	var env []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "CLAUDECODE=") {
+			env = append(env, e)
+		}
+	}
+	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
 	for k, v := range t.options.Env {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
-		userEnvKeys[k] = true
 	}
-
-	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
 	if t.cwd != "" {
 		env = append(env, fmt.Sprintf("PWD=%s", t.cwd))
 	}
 	if t.options.EnableFileCheckpointing {
 		env = append(env, "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true")
-	}
-
-	// Enable fine-grained tool streaming when partial messages are requested.
-	// --include-partial-messages emits stream_event messages, but tool input
-	// parameters are still buffered by the API unless eager_input_streaming is
-	// also enabled at the per-tool level via this env var.
-	// User-supplied values take precedence (setdefault behavior).
-	if t.options.IncludePartialMessages {
-		if !userEnvKeys["CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING"] {
-			env = append(env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1")
-		}
 	}
 
 	cmd.Env = env
@@ -509,6 +512,12 @@ func (t *SubprocessTransport) readStdout() {
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
+			continue
+		}
+
+		// Skip non-JSON lines (e.g. [SandboxDebug]) when not
+		// mid-parse — they corrupt the buffer otherwise.
+		if jsonBuffer.Len() == 0 && !strings.HasPrefix(line, "{") {
 			continue
 		}
 
@@ -618,8 +627,34 @@ func (t *SubprocessTransport) Close() error {
 	t.ready = false
 	t.EndInput()
 
+	// Wait for graceful shutdown after stdin EOF, then terminate if needed.
+	// The subprocess needs time to flush its session file after receiving
+	// EOF on stdin. Without this grace period, SIGTERM can interrupt the
+	// write and cause the last assistant message to be lost.
 	if t.process != nil && t.process.Process != nil {
-		t.process.Process.Kill()
+		if t.process.ProcessState == nil {
+			// Process hasn't exited yet — wait with timeout
+			done := make(chan struct{})
+			go func() {
+				t.process.Wait()
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				// Process exited gracefully
+			case <-time.After(5 * time.Second):
+				// Graceful shutdown timed out — send SIGTERM
+				t.process.Process.Signal(syscall.SIGTERM)
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					// SIGTERM timed out — force kill
+					t.process.Process.Kill()
+					<-done
+				}
+			}
+		}
 	}
 
 	return nil

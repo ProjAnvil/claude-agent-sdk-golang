@@ -17,6 +17,8 @@ const (
 	PermissionModePlan PermissionMode = "plan"
 	// PermissionModeBypassPermissions allows all tools (use with caution).
 	PermissionModeBypassPermissions PermissionMode = "bypassPermissions"
+	// PermissionModeDontAsk allows all tools without prompting.
+	PermissionModeDontAsk PermissionMode = "dontAsk"
 )
 
 // SettingSource specifies which setting sources to load.
@@ -66,10 +68,15 @@ func (m *UserMessage) messageMarker() {}
 
 // AssistantMessage represents an assistant message with content blocks.
 type AssistantMessage struct {
-	Content         []ContentBlock `json:"content"`
-	Model           string         `json:"model"`
-	ParentToolUseID string         `json:"parent_tool_use_id,omitempty"`
-	Error           string         `json:"error,omitempty"`
+	Content         []ContentBlock         `json:"content"`
+	Model           string                 `json:"model"`
+	ParentToolUseID string                 `json:"parent_tool_use_id,omitempty"`
+	Error           string                 `json:"error,omitempty"`
+	Usage           map[string]interface{} `json:"usage,omitempty"`
+	MessageID       string                 `json:"message_id,omitempty"`
+	StopReason      string                 `json:"stop_reason,omitempty"`
+	SessionID       string                 `json:"session_id,omitempty"`
+	UUID            string                 `json:"uuid,omitempty"`
 }
 
 func (m *AssistantMessage) messageMarker() {}
@@ -84,17 +91,21 @@ func (m *SystemMessage) messageMarker() {}
 
 // ResultMessage represents a result message with cost and usage information.
 type ResultMessage struct {
-	Subtype          string                 `json:"subtype"`
-	DurationMS       int                    `json:"duration_ms"`
-	DurationAPIMS    int                    `json:"duration_api_ms"`
-	IsError          bool                   `json:"is_error"`
-	NumTurns         int                    `json:"num_turns"`
-	SessionID        string                 `json:"session_id"`
-	StopReason       string                 `json:"stop_reason,omitempty"`
-	TotalCostUSD     float64                `json:"total_cost_usd,omitempty"`
-	Usage            map[string]interface{} `json:"usage,omitempty"`
-	Result           string                 `json:"result,omitempty"`
-	StructuredOutput interface{}            `json:"structured_output,omitempty"`
+	Subtype           string                 `json:"subtype"`
+	DurationMS        int                    `json:"duration_ms"`
+	DurationAPIMS     int                    `json:"duration_api_ms"`
+	IsError           bool                   `json:"is_error"`
+	NumTurns          int                    `json:"num_turns"`
+	SessionID         string                 `json:"session_id"`
+	StopReason        string                 `json:"stop_reason,omitempty"`
+	TotalCostUSD      float64                `json:"total_cost_usd,omitempty"`
+	Usage             map[string]interface{} `json:"usage,omitempty"`
+	Result            string                 `json:"result,omitempty"`
+	StructuredOutput  interface{}            `json:"structured_output,omitempty"`
+	ModelUsage        map[string]interface{} `json:"model_usage,omitempty"`
+	PermissionDenials []interface{}          `json:"permission_denials,omitempty"`
+	Errors            []string               `json:"errors,omitempty"`
+	UUID              string                 `json:"uuid,omitempty"`
 }
 
 func (m *ResultMessage) messageMarker() {}
@@ -108,6 +119,70 @@ type StreamEvent struct {
 }
 
 func (m *StreamEvent) messageMarker() {}
+
+// RateLimitStatus represents the current rate limit state.
+type RateLimitStatus string
+
+const (
+	RateLimitStatusAllowed        RateLimitStatus = "allowed"
+	RateLimitStatusAllowedWarning RateLimitStatus = "allowed_warning"
+	RateLimitStatusRejected       RateLimitStatus = "rejected"
+)
+
+// RateLimitType identifies which rate limit window applies.
+type RateLimitType string
+
+const (
+	RateLimitTypeFiveHour      RateLimitType = "five_hour"
+	RateLimitTypeSevenDay      RateLimitType = "seven_day"
+	RateLimitTypeSevenDayOpus  RateLimitType = "seven_day_opus"
+	RateLimitTypeSevenDaySonnet RateLimitType = "seven_day_sonnet"
+	RateLimitTypeOverage       RateLimitType = "overage"
+)
+
+// RateLimitInfo contains rate limit status details.
+type RateLimitInfo struct {
+	Status                RateLimitStatus        `json:"status"`
+	ResetsAt              *int64                 `json:"resets_at,omitempty"`
+	RateLimitType         RateLimitType          `json:"rate_limit_type,omitempty"`
+	Utilization           *float64               `json:"utilization,omitempty"`
+	OverageStatus         RateLimitStatus        `json:"overage_status,omitempty"`
+	OverageResetsAt       *int64                 `json:"overage_resets_at,omitempty"`
+	OverageDisabledReason string                 `json:"overage_disabled_reason,omitempty"`
+	Raw                   map[string]interface{} `json:"raw,omitempty"`
+}
+
+// RateLimitEvent represents a rate limit event emitted when rate limit info changes.
+type RateLimitEvent struct {
+	RateLimitInfo RateLimitInfo `json:"rate_limit_info"`
+	UUID          string        `json:"uuid"`
+	SessionID     string        `json:"session_id"`
+}
+
+func (m *RateLimitEvent) messageMarker() {}
+
+// ContextUsageCategory represents a single context usage category.
+type ContextUsageCategory struct {
+	Name       string `json:"name"`
+	Tokens     int    `json:"tokens"`
+	Color      string `json:"color"`
+	IsDeferred bool   `json:"isDeferred,omitempty"`
+}
+
+// ContextUsageResponse represents the response from GetContextUsage.
+type ContextUsageResponse struct {
+	Categories           []ContextUsageCategory   `json:"categories"`
+	TotalTokens          int                      `json:"totalTokens"`
+	MaxTokens            int                      `json:"maxTokens"`
+	RawMaxTokens         int                      `json:"rawMaxTokens"`
+	Percentage           float64                  `json:"percentage"`
+	Model                string                   `json:"model"`
+	IsAutoCompactEnabled bool                     `json:"isAutoCompactEnabled"`
+	MemoryFiles          []map[string]interface{} `json:"memoryFiles"`
+	McpTools             []map[string]interface{} `json:"mcpTools"`
+	Agents               []map[string]interface{} `json:"agents"`
+	GridRows             [][]map[string]interface{} `json:"gridRows"`
+}
 
 // TaskUsage represents usage statistics reported in task_progress and task_notification messages.
 type TaskUsage struct {
@@ -357,12 +432,29 @@ type MCPSdkServerConfig struct {
 
 func (c *MCPSdkServerConfig) mcpServerConfigMarker() {}
 
+// SystemPromptFile configures a system prompt loaded from a file.
+type SystemPromptFile struct {
+	Type string `json:"type"` // "file"
+	Path string `json:"path"`
+}
+
+// TaskBudget configures an API-side task budget in tokens.
+type TaskBudget struct {
+	Total int `json:"total"`
+}
+
 // AgentDefinition defines a custom agent configuration.
 type AgentDefinition struct {
-	Description string   `json:"description"`
-	Prompt      string   `json:"prompt"`
-	Tools       []string `json:"tools,omitempty"`
-	Model       string   `json:"model,omitempty"` // "sonnet", "opus", "haiku", "inherit"
+	Description     string        `json:"description"`
+	Prompt          string        `json:"prompt"`
+	Tools           []string      `json:"tools,omitempty"`
+	DisallowedTools []string      `json:"disallowedTools,omitempty"`
+	Model           string        `json:"model,omitempty"`
+	Skills          []string      `json:"skills,omitempty"`
+	Memory          string        `json:"memory,omitempty"` // "user", "project", "local"
+	McpServers      []interface{} `json:"mcpServers,omitempty"`
+	InitialPrompt   string        `json:"initialPrompt,omitempty"`
+	MaxTurns        *int          `json:"maxTurns,omitempty"`
 }
 
 // SandboxSettings configures bash command sandboxing.
@@ -410,6 +502,8 @@ type CanUseToolFunc func(toolName string, input map[string]interface{}, ctx Tool
 type ToolPermissionContext struct {
 	Signal      interface{}        // Future: abort signal support
 	Suggestions []PermissionUpdate // Permission suggestions from CLI
+	ToolUseID   string             // Unique identifier for this specific tool call
+	AgentID     string             // If running within a sub-agent, the sub-agent's ID
 }
 
 // PermissionResult is the interface for permission results.
@@ -611,11 +705,13 @@ type SDKSessionInfo struct {
 	SessionID    string  `json:"session_id"`
 	Summary      string  `json:"summary"`
 	LastModified int64   `json:"last_modified"`
-	FileSize     int64   `json:"file_size"`
+	FileSize     *int64  `json:"file_size,omitempty"`
 	CustomTitle  *string `json:"custom_title,omitempty"`
 	FirstPrompt  *string `json:"first_prompt,omitempty"`
 	GitBranch    *string `json:"git_branch,omitempty"`
 	CWD          *string `json:"cwd,omitempty"`
+	Tag          *string `json:"tag,omitempty"`
+	CreatedAt    *int64  `json:"created_at,omitempty"`
 }
 
 // SessionMessage represents a message in a session's conversation.

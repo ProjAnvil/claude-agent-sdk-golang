@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -518,15 +519,16 @@ func TestConcurrentWrite(t *testing.T) {
 	}
 }
 
-// TestIncludePartialMessagesEnablesFGTS tests that IncludePartialMessages=true
-// sets CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1.
-// --include-partial-messages tells the CLI to forward stream_event messages,
-// but tool input parameters are still buffered by the API unless
-// eager_input_streaming is enabled via this env var.
-func TestIncludePartialMessagesEnablesFGTS(t *testing.T) {
+// TestCLAUDECODEEnvFiltered tests that the CLAUDECODE env var is filtered out
+// from inherited environment so SDK-spawned subprocesses don't think they're
+// running inside a Claude Code parent.
+func TestCLAUDECODEEnvFiltered(t *testing.T) {
+	// Set CLAUDECODE in current env
+	os.Setenv("CLAUDECODE", "1")
+	defer os.Unsetenv("CLAUDECODE")
+
 	transport, err := NewSubprocessTransport("test", &TransportOptions{
-		CLIPath:                 "/fake/path/claude",
-		IncludePartialMessages:  true,
+		CLIPath: "/fake/path/claude",
 	})
 	if err != nil {
 		t.Fatalf("NewSubprocessTransport failed: %v", err)
@@ -534,50 +536,21 @@ func TestIncludePartialMessagesEnablesFGTS(t *testing.T) {
 
 	cmd := transport.buildCommand(context.Background())
 
-	// Check that the env var is set
-	found := false
 	for _, env := range cmd.Env {
-		if env == "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1" {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		t.Error("Expected CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1 to be set when IncludePartialMessages is true")
-	}
-}
-
-// TestIncludePartialMessagesFalseDoesNotSetFGTS tests that IncludePartialMessages=false
-// does not force-enable FGTS.
-func TestIncludePartialMessagesFalseDoesNotSetFGTS(t *testing.T) {
-	transport, err := NewSubprocessTransport("test", &TransportOptions{
-		CLIPath:                 "/fake/path/claude",
-		IncludePartialMessages:  false,
-	})
-	if err != nil {
-		t.Fatalf("NewSubprocessTransport failed: %v", err)
-	}
-
-	cmd := transport.buildCommand(context.Background())
-
-	// Check that the env var is NOT set (unless user already had it in their env)
-	for _, env := range cmd.Env {
-		if strings.HasPrefix(env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=") {
-			t.Error("CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING should not be set when IncludePartialMessages is false")
+		if strings.HasPrefix(env, "CLAUDECODE=") {
+			t.Error("CLAUDECODE env var should be filtered out from inherited environment")
 			break
 		}
 	}
 }
 
-// TestUserCanOverrideFGTSEnvVar tests that a user-supplied env var takes precedence
-// over the SDK default.
-func TestUserCanOverrideFGTSEnvVar(t *testing.T) {
+// TestEntrypointDefaultBeforeUserEnv tests that CLAUDE_CODE_ENTRYPOINT defaults
+// to sdk-go but can be overridden by user-provided env.
+func TestEntrypointDefaultBeforeUserEnv(t *testing.T) {
 	transport, err := NewSubprocessTransport("test", &TransportOptions{
-		CLIPath:                "/fake/path/claude",
-		IncludePartialMessages: true,
+		CLIPath: "/fake/path/claude",
 		Env: map[string]string{
-			"CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING": "0",
+			"CLAUDE_CODE_ENTRYPOINT": "custom-entrypoint",
 		},
 	})
 	if err != nil {
@@ -586,20 +559,74 @@ func TestUserCanOverrideFGTSEnvVar(t *testing.T) {
 
 	cmd := transport.buildCommand(context.Background())
 
-	// User's explicit "0" should win over SDK default "1"
-	found := false
-	var value string
+	// The last occurrence should win; user env is appended after default
+	var lastValue string
 	for _, env := range cmd.Env {
-		if strings.HasPrefix(env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=") {
-			found = true
-			value = strings.TrimPrefix(env, "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=")
-			break
+		if strings.HasPrefix(env, "CLAUDE_CODE_ENTRYPOINT=") {
+			lastValue = strings.TrimPrefix(env, "CLAUDE_CODE_ENTRYPOINT=")
 		}
 	}
 
-	if !found {
-		t.Error("Expected CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING to be set from user env")
-	} else if value != "0" {
-		t.Errorf("Expected user value '0', got '%s'", value)
+	if lastValue != "custom-entrypoint" {
+		t.Errorf("Expected user env to override CLAUDE_CODE_ENTRYPOINT, got '%s'", lastValue)
+	}
+}
+
+// TestSessionIDFlag tests that --session-id flag is generated.
+func TestSessionIDFlag(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:   "/fake/path/claude",
+		SessionID: "test-session-123",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--session-id test-session-123") {
+		t.Errorf("Expected --session-id flag in args: %s", args)
+	}
+}
+
+// TestTaskBudgetFlag tests that --task-budget flag is generated.
+func TestTaskBudgetFlag(t *testing.T) {
+	budget := 1000
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:    "/fake/path/claude",
+		TaskBudget: &budget,
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--task-budget 1000") {
+		t.Errorf("Expected --task-budget flag in args: %s", args)
+	}
+}
+
+// TestSystemPromptFileFlag tests that --system-prompt-file flag is generated.
+func TestSystemPromptFileFlag(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:          "/fake/path/claude",
+		SystemPromptFile: &SystemPromptFile{Type: "file", Path: "/path/to/prompt.md"},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--system-prompt-file /path/to/prompt.md") {
+		t.Errorf("Expected --system-prompt-file flag in args: %s", args)
+	}
+	// Should NOT have --system-prompt when --system-prompt-file is set
+	if strings.Contains(args, "--system-prompt \"\"") || strings.Contains(args, "--system-prompt  ") {
+		t.Errorf("Should not have --system-prompt when --system-prompt-file is set: %s", args)
 	}
 }

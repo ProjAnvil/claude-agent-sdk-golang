@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -39,7 +40,7 @@ func TestToolPermissionCallback_Allow(t *testing.T) {
 	}
 
 	// Direct call to private handler
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	if !callbackInvoked {
 		t.Error("Callback was not invoked")
@@ -83,7 +84,7 @@ func TestToolPermissionCallback_Deny(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	written := mt.getWritten()
 	if len(written) != 1 {
@@ -128,7 +129,7 @@ func TestToolPermissionCallback_ModifyInput(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	written := mt.getWritten()
 	var response map[string]interface{}
@@ -165,7 +166,7 @@ func TestToolPermissionCallback_Exception(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	written := mt.getWritten()
 	var response map[string]interface{}
@@ -222,7 +223,7 @@ func TestHookExecution(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	if len(hookCalls) != 1 {
 		t.Fatalf("Expected 1 hook call, got %d", len(hookCalls))
@@ -271,7 +272,7 @@ func TestHookOutputFields(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	written := mt.getWritten()
 	var response map[string]interface{}
@@ -316,7 +317,7 @@ func TestAsyncHookOutput(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	written := mt.getWritten()
 	var response map[string]interface{}
@@ -359,7 +360,7 @@ func TestHookEventCallbacks(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 	// We verify output at least
 	written := mt.getWritten()
 	var response map[string]interface{}
@@ -399,7 +400,7 @@ func TestHookEventCallbacks_PermissionRequest(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	written := mt.getWritten()
 	var response map[string]interface{}
@@ -443,7 +444,7 @@ func TestHookEventCallbacks_SubagentStart(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	written := mt.getWritten()
 	var response map[string]interface{}
@@ -486,7 +487,7 @@ func TestHookEventCallbacks_PostToolUse(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	written := mt.getWritten()
 	var response map[string]interface{}
@@ -531,7 +532,7 @@ func TestHookEventCallbacks_PreToolUse(t *testing.T) {
 		},
 	}
 
-	q.handleControlRequest(request)
+	q.handleControlRequest(context.Background(), request)
 
 	written := mt.getWritten()
 	var response map[string]interface{}
@@ -544,5 +545,79 @@ func TestHookEventCallbacks_PreToolUse(t *testing.T) {
 	}
 	if hs["additionalContext"] != "Extra context" {
 		t.Errorf("Expected 'Extra context'")
+	}
+}
+
+// TestToolPermissionCallback_ReceivesToolUseIDAndAgentID tests that ToolPermissionContext
+// receives tool_use_id and agent_id from the request.
+func TestToolPermissionCallback_ReceivesToolUseIDAndAgentID(t *testing.T) {
+	var receivedCtx ToolPermissionContext
+	callback := func(toolName string, input map[string]interface{}, ctx ToolPermissionContext) (PermissionResult, error) {
+		receivedCtx = ctx
+		return &PermissionResultAllow{}, nil
+	}
+
+	mt := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       mt,
+		IsStreamingMode: true,
+		CanUseTool:      callback,
+	})
+
+	request := map[string]interface{}{
+		"request_id": "test-tuid-1",
+		"request": map[string]interface{}{
+			"subtype":                "can_use_tool",
+			"tool_name":              "Bash",
+			"input":                  map[string]interface{}{"command": "ls"},
+			"permission_suggestions": []interface{}{},
+			"tool_use_id":            "toolu_abc123",
+			"agent_id":              "agent_def456",
+		},
+	}
+
+	q.handleControlRequest(context.Background(), request)
+
+	if receivedCtx.ToolUseID != "toolu_abc123" {
+		t.Errorf("Expected ToolUseID 'toolu_abc123', got '%s'", receivedCtx.ToolUseID)
+	}
+	if receivedCtx.AgentID != "agent_def456" {
+		t.Errorf("Expected AgentID 'agent_def456', got '%s'", receivedCtx.AgentID)
+	}
+}
+
+// TestToolPermissionCallback_MissingAgentID tests when agent_id is absent.
+func TestToolPermissionCallback_MissingAgentID(t *testing.T) {
+	var receivedCtx ToolPermissionContext
+	callback := func(toolName string, input map[string]interface{}, ctx ToolPermissionContext) (PermissionResult, error) {
+		receivedCtx = ctx
+		return &PermissionResultAllow{}, nil
+	}
+
+	mt := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       mt,
+		IsStreamingMode: true,
+		CanUseTool:      callback,
+	})
+
+	request := map[string]interface{}{
+		"request_id": "test-tuid-2",
+		"request": map[string]interface{}{
+			"subtype":                "can_use_tool",
+			"tool_name":              "Bash",
+			"input":                  map[string]interface{}{"command": "ls"},
+			"permission_suggestions": []interface{}{},
+			"tool_use_id":            "toolu_xyz789",
+		},
+	}
+
+	q.handleControlRequest(context.Background(), request)
+
+	if receivedCtx.ToolUseID != "toolu_xyz789" {
+		t.Errorf("Expected ToolUseID 'toolu_xyz789', got '%s'", receivedCtx.ToolUseID)
+	}
+	if receivedCtx.AgentID != "" {
+		t.Errorf("Expected empty AgentID, got '%s'", receivedCtx.AgentID)
 	}
 }

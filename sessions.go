@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Constants for session management
@@ -46,6 +47,9 @@ type ListSessionsOptions struct {
 	Directory *string
 	// Maximum number of sessions to return.
 	Limit *int
+	// Number of sessions to skip from the start of the sorted result set.
+	// Use with Limit for pagination. Defaults to 0.
+	Offset int
 	// Include sessions from git worktrees when directory is provided.
 	IncludeWorktrees bool
 }
@@ -60,9 +64,9 @@ func ListSessions(opts *ListSessionsOptions) ([]SDKSessionInfo, error) {
 	}
 
 	if opts.Directory != nil {
-		return listSessionsForProject(*opts.Directory, opts.Limit, opts.IncludeWorktrees)
+		return listSessionsForProject(*opts.Directory, opts.Limit, opts.Offset, opts.IncludeWorktrees)
 	}
-	return listAllSessions(opts.Limit)
+	return listAllSessions(opts.Limit, opts.Offset)
 }
 
 // GetSessionMessagesOptions contains options for getting session messages.
@@ -496,6 +500,119 @@ func getWorktreePaths(cwd string) ([]string, error) {
 	return paths, nil
 }
 
+// parseSessionInfoFromLite parses SDKSessionInfo fields from a lite session read.
+// Returns nil for sidechain sessions or metadata-only sessions with no extractable summary.
+// Shared by readSessionsFromDir and GetSessionInfo.
+func parseSessionInfoFromLite(sessionID string, lite *liteSessionFile, projectPath string) *SDKSessionInfo {
+	head, tail, mtime, size := lite.head, lite.tail, lite.mtime, lite.size
+
+	// Check first line for sidechain sessions
+	firstNewline := strings.Index(head, "\n")
+	firstLine := head
+	if firstNewline >= 0 {
+		firstLine = head[:firstNewline]
+	}
+	if strings.Contains(firstLine, `"isSidechain":true`) || strings.Contains(firstLine, `"isSidechain": true`) {
+		return nil
+	}
+
+	// User-set title (customTitle) wins over AI-generated title (aiTitle).
+	// Head fallback covers short sessions where the title entry may not be in tail.
+	customTitle := extractLastJSONStringField(tail, "customTitle")
+	if customTitle == "" {
+		customTitle = extractLastJSONStringField(head, "customTitle")
+	}
+	if customTitle == "" {
+		customTitle = extractLastJSONStringField(tail, "aiTitle")
+	}
+	if customTitle == "" {
+		customTitle = extractLastJSONStringField(head, "aiTitle")
+	}
+
+	firstPrompt := extractFirstPromptFromHead(head)
+
+	// lastPrompt tail entry shows what the user was most recently doing.
+	summary := customTitle
+	if summary == "" {
+		summary = extractLastJSONStringField(tail, "lastPrompt")
+	}
+	if summary == "" {
+		summary = extractLastJSONStringField(tail, "summary")
+	}
+	if summary == "" {
+		summary = firstPrompt
+	}
+
+	// Skip metadata-only sessions (no title, no summary, no prompt)
+	if summary == "" {
+		return nil
+	}
+
+	gitBranch := extractLastJSONStringField(tail, "gitBranch")
+	if gitBranch == "" {
+		gitBranch = extractJSONStringField(head, "gitBranch")
+	}
+
+	sessionCWD := extractJSONStringField(head, "cwd")
+	if sessionCWD == "" && projectPath != "" {
+		sessionCWD = projectPath
+	}
+
+	// Scope tag extraction to {"type":"tag"} lines — a bare tail scan for
+	// "tag" would match tool_use inputs (git tag, Docker tags, etc.)
+	var tag string
+	tailLines := strings.Split(tail, "\n")
+	for i := len(tailLines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(tailLines[i], `{"type":"tag"`) {
+			tag = extractLastJSONStringField(tailLines[i], "tag")
+			break
+		}
+	}
+
+	// created_at from first entry's ISO timestamp (epoch ms)
+	var createdAt *int64
+	firstTimestamp := extractJSONStringField(firstLine, "timestamp")
+	if firstTimestamp != "" {
+		// Go's time.Parse doesn't handle trailing 'Z' formatting issues like Python
+		ts := firstTimestamp
+		if strings.HasSuffix(ts, "Z") {
+			ts = ts[:len(ts)-1] + "+00:00"
+		}
+		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			millis := t.UnixMilli()
+			createdAt = &millis
+		} else if t, err := time.Parse("2006-01-02T15:04:05.999999999-07:00", ts); err == nil {
+			millis := t.UnixMilli()
+			createdAt = &millis
+		}
+	}
+
+	sessionInfo := SDKSessionInfo{
+		SessionID:    sessionID,
+		Summary:      summary,
+		LastModified: mtime,
+		FileSize:     &size,
+		CreatedAt:    createdAt,
+	}
+	if customTitle != "" {
+		sessionInfo.CustomTitle = &customTitle
+	}
+	if firstPrompt != "" {
+		sessionInfo.FirstPrompt = &firstPrompt
+	}
+	if gitBranch != "" {
+		sessionInfo.GitBranch = &gitBranch
+	}
+	if sessionCWD != "" {
+		sessionInfo.CWD = &sessionCWD
+	}
+	if tag != "" {
+		sessionInfo.Tag = &tag
+	}
+
+	return &sessionInfo
+}
+
 // readSessionsFromDir reads session files from a single project directory.
 func readSessionsFromDir(projectDir, projectPath string) []SDKSessionInfo {
 	entries, err := os.ReadDir(projectDir)
@@ -521,64 +638,10 @@ func readSessionsFromDir(projectDir, projectPath string) []SDKSessionInfo {
 			continue
 		}
 
-		head, tail, mtime, size := lite.head, lite.tail, lite.mtime, lite.size
-
-		// Check first line for sidechain sessions
-		firstNewline := strings.Index(head, "\n")
-		firstLine := head
-		if firstNewline >= 0 {
-			firstLine = head[:firstNewline]
+		info := parseSessionInfoFromLite(sessionID, lite, projectPath)
+		if info != nil {
+			results = append(results, *info)
 		}
-		if strings.Contains(firstLine, `"isSidechain":true`) || strings.Contains(firstLine, `"isSidechain": true`) {
-			continue
-		}
-
-		// Extract metadata
-		customTitle := extractLastJSONStringField(tail, "customTitle")
-		firstPrompt := extractFirstPromptFromHead(head)
-		summary := customTitle
-		if summary == "" {
-			summary = extractLastJSONStringField(tail, "summary")
-		}
-		if summary == "" {
-			summary = firstPrompt
-		}
-
-		// Skip metadata-only sessions
-		if summary == "" {
-			continue
-		}
-
-		gitBranch := extractLastJSONStringField(tail, "gitBranch")
-		if gitBranch == "" {
-			gitBranch = extractJSONStringField(head, "gitBranch")
-		}
-
-		sessionCWD := extractJSONStringField(head, "cwd")
-		if sessionCWD == "" && projectPath != "" {
-			sessionCWD = projectPath
-		}
-
-		sessionInfo := SDKSessionInfo{
-			SessionID:    sessionID,
-			Summary:      summary,
-			LastModified: mtime,
-			FileSize:     size,
-		}
-		if customTitle != "" {
-			sessionInfo.CustomTitle = &customTitle
-		}
-		if firstPrompt != "" {
-			sessionInfo.FirstPrompt = &firstPrompt
-		}
-		if gitBranch != "" {
-			sessionInfo.GitBranch = &gitBranch
-		}
-		if sessionCWD != "" {
-			sessionInfo.CWD = &sessionCWD
-		}
-
-		results = append(results, sessionInfo)
 	}
 
 	return results
@@ -600,11 +663,16 @@ func deduplicateBySessionID(sessions []SDKSessionInfo) []SDKSessionInfo {
 	return result
 }
 
-// applySortAndLimit sorts sessions by last_modified descending and applies optional limit.
-func applySortAndLimit(sessions []SDKSessionInfo, limit *int) []SDKSessionInfo {
+// applySortLimitOffset sorts sessions by last_modified descending and applies offset + limit.
+func applySortLimitOffset(sessions []SDKSessionInfo, limit *int, offset int) []SDKSessionInfo {
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].LastModified > sessions[j].LastModified
 	})
+	if offset > 0 && offset < len(sessions) {
+		sessions = sessions[offset:]
+	} else if offset >= len(sessions) {
+		return []SDKSessionInfo{}
+	}
 	if limit != nil && *limit > 0 && *limit < len(sessions) {
 		return sessions[:*limit]
 	}
@@ -612,7 +680,7 @@ func applySortAndLimit(sessions []SDKSessionInfo, limit *int) []SDKSessionInfo {
 }
 
 // listSessionsForProject lists sessions for a specific project directory (and its worktrees).
-func listSessionsForProject(directory string, limit *int, includeWorktrees bool) ([]SDKSessionInfo, error) {
+func listSessionsForProject(directory string, limit *int, offset int, includeWorktrees bool) ([]SDKSessionInfo, error) {
 	canonicalDir, err := canonicalizePath(directory)
 	if err != nil {
 		return nil, err
@@ -630,7 +698,7 @@ func listSessionsForProject(directory string, limit *int, includeWorktrees bool)
 			return []SDKSessionInfo{}, nil
 		}
 		sessions := readSessionsFromDir(projectDir, canonicalDir)
-		return applySortAndLimit(sessions, limit), nil
+		return applySortLimitOffset(sessions, limit, offset), nil
 	}
 
 	// Worktree-aware scanning
@@ -678,7 +746,7 @@ func listSessionsForProject(directory string, limit *int, includeWorktrees bool)
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		// Fall back to single project dir
-		return applySortAndLimit(allSessions, limit), nil
+		return applySortLimitOffset(allSessions, limit, offset), nil
 	}
 
 	for _, entry := range entries {
@@ -708,11 +776,11 @@ func listSessionsForProject(directory string, limit *int, includeWorktrees bool)
 	}
 
 	deduped := deduplicateBySessionID(allSessions)
-	return applySortAndLimit(deduped, limit), nil
+	return applySortLimitOffset(deduped, limit, offset), nil
 }
 
 // listAllSessions lists sessions across all project directories.
-func listAllSessions(limit *int) ([]SDKSessionInfo, error) {
+func listAllSessions(limit *int, offset int) ([]SDKSessionInfo, error) {
 	projectsDir, err := getProjectsDir()
 	if err != nil {
 		return nil, err
@@ -734,7 +802,7 @@ func listAllSessions(limit *int) ([]SDKSessionInfo, error) {
 	}
 
 	deduped := deduplicateBySessionID(allSessions)
-	return applySortAndLimit(deduped, limit), nil
+	return applySortLimitOffset(deduped, limit, offset), nil
 }
 
 // readSessionFile finds and reads a session JSONL file.
@@ -796,6 +864,83 @@ func readSessionFile(sessionID, directory string) (string, error) {
 	}
 
 	return "", nil
+}
+
+// GetSessionInfoOptions contains options for getting single session metadata.
+type GetSessionInfoOptions struct {
+	// SessionID is the UUID of the session to look up.
+	SessionID string
+	// Directory is the project directory path. When omitted, all project directories are searched.
+	Directory *string
+}
+
+// GetSessionInfo reads metadata for a single session by ID.
+// Wraps readSessionLite for one file — no O(n) directory scan.
+func GetSessionInfo(opts *GetSessionInfoOptions) (*SDKSessionInfo, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("options cannot be nil")
+	}
+
+	if !validateUUID(opts.SessionID) {
+		return nil, fmt.Errorf("invalid session ID: %s", opts.SessionID)
+	}
+
+	fileName := opts.SessionID + ".jsonl"
+
+	if opts.Directory != nil {
+		canonical, err := canonicalizePath(*opts.Directory)
+		if err != nil {
+			return nil, nil
+		}
+
+		projectDir, err := findProjectDir(canonical)
+		if err == nil {
+			lite := readSessionLite(filepath.Join(projectDir, fileName))
+			if lite != nil {
+				return parseSessionInfoFromLite(opts.SessionID, lite, canonical), nil
+			}
+		}
+
+		// Worktree fallback
+		worktreePaths, _ := getWorktreePaths(canonical)
+		for _, wt := range worktreePaths {
+			if wt == canonical {
+				continue
+			}
+			wtProjectDir, err := findProjectDir(wt)
+			if err == nil {
+				lite := readSessionLite(filepath.Join(wtProjectDir, fileName))
+				if lite != nil {
+					return parseSessionInfoFromLite(opts.SessionID, lite, wt), nil
+				}
+			}
+		}
+
+		return nil, nil
+	}
+
+	// No directory — search all project directories for the session file.
+	projectsDir, err := getProjectsDir()
+	if err != nil {
+		return nil, nil
+	}
+
+	entries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return nil, nil
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		lite := readSessionLite(filepath.Join(projectsDir, entry.Name(), fileName))
+		if lite != nil {
+			return parseSessionInfoFromLite(opts.SessionID, lite, ""), nil
+		}
+	}
+
+	return nil, nil
 }
 
 // transcriptEntry represents a parsed JSONL transcript entry.

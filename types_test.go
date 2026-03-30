@@ -500,3 +500,154 @@ func TestHookOutputTypes(t *testing.T) {
 		t.Errorf("Expected updatedMCPToolOutput result='modified'")
 	}
 }
+
+// TestClaudeAgentOptionsWithSystemPromptFile tests SystemPromptFile on options.
+func TestClaudeAgentOptionsWithSystemPromptFile(t *testing.T) {
+	opts := ClaudeAgentOptions{
+		SystemPromptFile: &SystemPromptFile{
+			Type: "file",
+			Path: "/path/to/prompt.md",
+		},
+	}
+
+	if opts.SystemPromptFile == nil {
+		t.Fatal("Expected SystemPromptFile to be set")
+	}
+	if opts.SystemPromptFile.Type != "file" {
+		t.Errorf("Expected type 'file', got %v", opts.SystemPromptFile.Type)
+	}
+	if opts.SystemPromptFile.Path != "/path/to/prompt.md" {
+		t.Errorf("Expected path, got %v", opts.SystemPromptFile.Path)
+	}
+}
+
+// TestAgentDefinitionMinimal tests minimal AgentDefinition serialization.
+func TestAgentDefinitionMinimal(t *testing.T) {
+	agent := AgentDefinition{
+		Description: "research agent",
+	}
+	data, err := json.Marshal(agent)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var result map[string]interface{}
+	json.Unmarshal(data, &result)
+
+	if result["description"] != "research agent" {
+		t.Errorf("Expected description 'research agent', got %v", result["description"])
+	}
+	// Empty fields should be omitted
+	if _, ok := result["disallowedTools"]; ok {
+		t.Error("Expected disallowedTools to be omitted when empty")
+	}
+}
+
+// TestAgentDefinitionFull tests AgentDefinition with all fields.
+func TestAgentDefinitionFull(t *testing.T) {
+	maxTurns := 5
+	agent := AgentDefinition{
+		Description:     "coder agent",
+		Prompt:          "You are a coder",
+		Model:           "claude-sonnet-4-5-20250929",
+		DisallowedTools: []string{"Bash"},
+		MaxTurns:        &maxTurns,
+		InitialPrompt:   "Start coding",
+		McpServers:      []interface{}{"server1"},
+		Skills:          []string{"coding"},
+		Memory:          "user",
+	}
+	data, err := json.Marshal(agent)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var result map[string]interface{}
+	json.Unmarshal(data, &result)
+
+	if result["model"] != "claude-sonnet-4-5-20250929" {
+		t.Errorf("Expected model, got %v", result["model"])
+	}
+	tools := result["disallowedTools"].([]interface{})
+	if len(tools) != 1 || tools[0] != "Bash" {
+		t.Errorf("Expected disallowedTools=['Bash'], got %v", tools)
+	}
+	if result["maxTurns"] != float64(5) {
+		t.Errorf("Expected maxTurns=5, got %v", result["maxTurns"])
+	}
+	if result["initialPrompt"] != "Start coding" {
+		t.Errorf("Expected initialPrompt, got %v", result["initialPrompt"])
+	}
+}
+
+// TestRateLimitEventTypes tests RateLimitEvent type constants.
+func TestRateLimitEventTypes(t *testing.T) {
+	if RateLimitStatusAllowed != "allowed" {
+		t.Errorf("Expected 'allowed', got '%s'", RateLimitStatusAllowed)
+	}
+	if RateLimitStatusAllowedWarning != "allowed_warning" {
+		t.Errorf("Expected 'allowed_warning', got '%s'", RateLimitStatusAllowedWarning)
+	}
+	if RateLimitStatusRejected != "rejected" {
+		t.Errorf("Expected 'rejected', got '%s'", RateLimitStatusRejected)
+	}
+	if RateLimitTypeFiveHour != "five_hour" {
+		t.Errorf("Expected 'five_hour', got '%s'", RateLimitTypeFiveHour)
+	}
+	if RateLimitTypeSevenDay != "seven_day" {
+		t.Errorf("Expected 'seven_day', got '%s'", RateLimitTypeSevenDay)
+	}
+}
+
+// TestContextUsageResponse tests ContextUsageResponse struct.
+func TestContextUsageResponse(t *testing.T) {
+	resp := ContextUsageResponse{
+		Categories: []ContextUsageCategory{
+			{Name: "system_prompt", Tokens: 100, Color: "blue"},
+			{Name: "conversation", Tokens: 900, Color: "green"},
+		},
+		TotalTokens: 1000,
+		MaxTokens:   4096,
+		Percentage:  24.4,
+		Model:       "claude-sonnet-4-5",
+	}
+
+	if len(resp.Categories) != 2 {
+		t.Errorf("Expected 2 categories, got %d", len(resp.Categories))
+	}
+	if resp.TotalTokens != 1000 {
+		t.Errorf("Expected TotalTokens=1000, got %d", resp.TotalTokens)
+	}
+	if resp.Model != "claude-sonnet-4-5" {
+		t.Errorf("Expected model, got %s", resp.Model)
+	}
+}
+
+// TestSDKSessionInfoNewFields tests new fields on SDKSessionInfo.
+func TestSDKSessionInfoNewFields(t *testing.T) {
+	tag := "important"
+	createdAt := int64(1700000000)
+	customTitle := "AI Generated Title"
+	firstPrompt := "Last user message"
+
+	info := SDKSessionInfo{
+		SessionID:    "550e8400-e29b-41d4-a716-446655440000",
+		Summary:      "Test",
+		LastModified: 1700000000,
+		Tag:          &tag,
+		CreatedAt:    &createdAt,
+		CustomTitle:  &customTitle,
+		FirstPrompt:  &firstPrompt,
+	}
+
+	if info.Tag == nil || *info.Tag != "important" {
+		t.Errorf("Tag mismatch")
+	}
+	if info.CreatedAt == nil || *info.CreatedAt != 1700000000 {
+		t.Errorf("CreatedAt mismatch")
+	}
+	if info.CustomTitle == nil || *info.CustomTitle != "AI Generated Title" {
+		t.Errorf("CustomTitle mismatch")
+	}
+	if info.FirstPrompt == nil || *info.FirstPrompt != "Last user message" {
+		t.Errorf("FirstPrompt mismatch")
+	}
+}
