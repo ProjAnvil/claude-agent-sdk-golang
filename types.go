@@ -30,6 +30,13 @@ const (
 	SettingSourceLocal   SettingSource = "local"
 )
 
+// SdkBeta defines known beta feature identifiers.
+type SdkBeta = string
+
+const (
+	SdkBetaContext1M SdkBeta = "context-1m-2025-08-07"
+)
+
 // HookEvent defines the type of hook event.
 type HookEvent string
 
@@ -133,11 +140,11 @@ const (
 type RateLimitType string
 
 const (
-	RateLimitTypeFiveHour      RateLimitType = "five_hour"
-	RateLimitTypeSevenDay      RateLimitType = "seven_day"
-	RateLimitTypeSevenDayOpus  RateLimitType = "seven_day_opus"
+	RateLimitTypeFiveHour       RateLimitType = "five_hour"
+	RateLimitTypeSevenDay       RateLimitType = "seven_day"
+	RateLimitTypeSevenDayOpus   RateLimitType = "seven_day_opus"
 	RateLimitTypeSevenDaySonnet RateLimitType = "seven_day_sonnet"
-	RateLimitTypeOverage       RateLimitType = "overage"
+	RateLimitTypeOverage        RateLimitType = "overage"
 )
 
 // RateLimitInfo contains rate limit status details.
@@ -171,17 +178,25 @@ type ContextUsageCategory struct {
 
 // ContextUsageResponse represents the response from GetContextUsage.
 type ContextUsageResponse struct {
-	Categories           []ContextUsageCategory   `json:"categories"`
-	TotalTokens          int                      `json:"totalTokens"`
-	MaxTokens            int                      `json:"maxTokens"`
-	RawMaxTokens         int                      `json:"rawMaxTokens"`
-	Percentage           float64                  `json:"percentage"`
-	Model                string                   `json:"model"`
-	IsAutoCompactEnabled bool                     `json:"isAutoCompactEnabled"`
-	MemoryFiles          []map[string]interface{} `json:"memoryFiles"`
-	McpTools             []map[string]interface{} `json:"mcpTools"`
-	Agents               []map[string]interface{} `json:"agents"`
+	Categories           []ContextUsageCategory     `json:"categories"`
+	TotalTokens          int                        `json:"totalTokens"`
+	MaxTokens            int                        `json:"maxTokens"`
+	RawMaxTokens         int                        `json:"rawMaxTokens"`
+	Percentage           float64                    `json:"percentage"`
+	Model                string                     `json:"model"`
+	IsAutoCompactEnabled bool                       `json:"isAutoCompactEnabled"`
+	MemoryFiles          []map[string]interface{}   `json:"memoryFiles"`
+	McpTools             []map[string]interface{}   `json:"mcpTools"`
+	Agents               []map[string]interface{}   `json:"agents"`
 	GridRows             [][]map[string]interface{} `json:"gridRows"`
+	AutoCompactThreshold *int                       `json:"autoCompactThreshold,omitempty"`
+	DeferredBuiltinTools []map[string]interface{}   `json:"deferredBuiltinTools,omitempty"`
+	SystemTools          []map[string]interface{}   `json:"systemTools,omitempty"`
+	SystemPromptSections []map[string]interface{}   `json:"systemPromptSections,omitempty"`
+	SlashCommands        map[string]interface{}     `json:"slashCommands,omitempty"`
+	Skills               map[string]interface{}     `json:"skills,omitempty"`
+	MessageBreakdown     map[string]interface{}     `json:"messageBreakdown,omitempty"`
+	APIUsage             map[string]interface{}     `json:"apiUsage,omitempty"`
 }
 
 // TaskUsage represents usage statistics reported in task_progress and task_notification messages.
@@ -227,14 +242,14 @@ func (m *TaskProgressMessage) messageMarker() {}
 
 // TaskNotificationMessage represents a task notification system message.
 type TaskNotificationMessage struct {
-	TaskID     string                `json:"task_id"`
+	TaskID     string                 `json:"task_id"`
 	Status     TaskNotificationStatus `json:"status"`
-	OutputFile string                `json:"output_file"`
-	Summary    string                `json:"summary"`
-	UUID       string                `json:"uuid"`
-	SessionID  string                `json:"session_id"`
-	ToolUseID  string                `json:"tool_use_id,omitempty"`
-	Usage      *TaskUsage            `json:"usage,omitempty"`
+	OutputFile string                 `json:"output_file"`
+	Summary    string                 `json:"summary"`
+	UUID       string                 `json:"uuid"`
+	SessionID  string                 `json:"session_id"`
+	ToolUseID  string                 `json:"tool_use_id,omitempty"`
+	Usage      *TaskUsage             `json:"usage,omitempty"`
 }
 
 func (m *TaskNotificationMessage) messageMarker() {}
@@ -605,11 +620,11 @@ type HookOutput struct {
 type McpServerConnectionStatus string
 
 const (
-	McpServerStatusConnected  McpServerConnectionStatus = "connected"
-	McpServerStatusFailed     McpServerConnectionStatus = "failed"
-	McpServerStatusNeedsAuth  McpServerConnectionStatus = "needs-auth"
-	McpServerStatusPending    McpServerConnectionStatus = "pending"
-	McpServerStatusDisabled   McpServerConnectionStatus = "disabled"
+	McpServerStatusConnected McpServerConnectionStatus = "connected"
+	McpServerStatusFailed    McpServerConnectionStatus = "failed"
+	McpServerStatusNeedsAuth McpServerConnectionStatus = "needs-auth"
+	McpServerStatusPending   McpServerConnectionStatus = "pending"
+	McpServerStatusDisabled  McpServerConnectionStatus = "disabled"
 )
 
 // McpToolAnnotations represents optional hints for tool usage.
@@ -621,9 +636,9 @@ type McpToolAnnotations struct {
 
 // McpToolInfo represents information about an MCP tool.
 type McpToolInfo struct {
-	Name        string                `json:"name"`
-	Description string                `json:"description,omitempty"`
-	Annotations *McpToolAnnotations   `json:"annotations,omitempty"`
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	Annotations *McpToolAnnotations `json:"annotations,omitempty"`
 }
 
 // McpServerInfo represents server information from an MCP server.
@@ -650,7 +665,7 @@ type McpServerStatusConfig interface {
 	mcpServerStatusConfigMarker()
 }
 
-func (c *McpSdkServerConfigStatus) mcpServerStatusConfigMarker() {}
+func (c *McpSdkServerConfigStatus) mcpServerStatusConfigMarker()     {}
 func (c *McpClaudeAIProxyServerConfig) mcpServerStatusConfigMarker() {}
 
 // McpServerStatus represents the status of an MCP server.
@@ -673,13 +688,13 @@ type McpStatusResponse struct {
 
 // SDKControlMcpReconnectRequest requests reconnection to an MCP server.
 type SDKControlMcpReconnectRequest struct {
-	Subtype    string `json:"subtype"`    // "mcp_reconnect"
+	Subtype    string `json:"subtype"` // "mcp_reconnect"
 	ServerName string `json:"serverName"`
 }
 
 // SDKControlMcpToggleRequest requests toggling an MCP server on/off.
 type SDKControlMcpToggleRequest struct {
-	Subtype    string `json:"subtype"`    // "mcp_toggle"
+	Subtype    string `json:"subtype"` // "mcp_toggle"
 	ServerName string `json:"serverName"`
 	Enabled    bool   `json:"enabled"`
 }

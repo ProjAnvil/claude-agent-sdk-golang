@@ -29,8 +29,8 @@ var (
 		`\s*<ide_opened_file>[\s\S]*</ide_opened_file>\s*$|` +
 		`\s*<ide_selection>[\s\S]*</ide_selection>\s*$)`)
 
-	commandNameRE   = regexp.MustCompile(`<command-name>(.*?)</command-name>`)
-	sanitizeRE      = regexp.MustCompile(`[^a-zA-Z0-9]`)
+	commandNameRE = regexp.MustCompile(`<command-name>(.*?)</command-name>`)
+	sanitizeRE    = regexp.MustCompile(`[^a-zA-Z0-9]`)
 )
 
 // liteSessionFile represents the result of reading a session file's head, tail, mtime and size.
@@ -945,15 +945,15 @@ func GetSessionInfo(opts *GetSessionInfoOptions) (*SDKSessionInfo, error) {
 
 // transcriptEntry represents a parsed JSONL transcript entry.
 type transcriptEntry struct {
-	Type         string                 `json:"type"`
-	UUID         string                 `json:"uuid"`
-	ParentUUID   *string                `json:"parentUuid,omitempty"`
-	SessionID    string                 `json:"sessionId,omitempty"`
-	Message      map[string]interface{} `json:"message,omitempty"`
-	IsSidechain  bool                   `json:"isSidechain,omitempty"`
-	IsMeta       bool                   `json:"isMeta,omitempty"`
-	IsCompactSummary bool               `json:"isCompactSummary,omitempty"`
-	TeamName     string                 `json:"teamName,omitempty"`
+	Type             string                 `json:"type"`
+	UUID             string                 `json:"uuid"`
+	ParentUUID       *string                `json:"parentUuid,omitempty"`
+	SessionID        string                 `json:"sessionId,omitempty"`
+	Message          map[string]interface{} `json:"message,omitempty"`
+	IsSidechain      bool                   `json:"isSidechain,omitempty"`
+	IsMeta           bool                   `json:"isMeta,omitempty"`
+	IsCompactSummary bool                   `json:"isCompactSummary,omitempty"`
+	TeamName         string                 `json:"teamName,omitempty"`
 }
 
 // parseTranscriptEntries parses JSONL content into transcript entries.

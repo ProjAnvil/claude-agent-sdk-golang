@@ -35,7 +35,7 @@ type ClaudeAgentOptions struct {
 	// FallbackModel specifies a fallback model.
 	FallbackModel string
 	// Betas enables beta features.
-	Betas []string
+	Betas []SdkBeta
 	// PermissionPromptToolName sets the tool for permission prompts.
 	PermissionPromptToolName string
 	// CWD sets the working directory for the CLI.

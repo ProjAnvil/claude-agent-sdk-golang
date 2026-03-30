@@ -572,7 +572,7 @@ func TestToolPermissionCallback_ReceivesToolUseIDAndAgentID(t *testing.T) {
 			"input":                  map[string]interface{}{"command": "ls"},
 			"permission_suggestions": []interface{}{},
 			"tool_use_id":            "toolu_abc123",
-			"agent_id":              "agent_def456",
+			"agent_id":               "agent_def456",
 		},
 	}
 

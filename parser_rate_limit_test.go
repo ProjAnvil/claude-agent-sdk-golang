@@ -19,11 +19,11 @@ func TestRateLimitEventReturnsNil(t *testing.T) {
 	data := map[string]interface{}{
 		"type": "rate_limit_event",
 		"rate_limit_info": map[string]interface{}{
-			"status":           "allowed_warning",
-			"resetsAt":         1700000000.0,
-			"rateLimitType":    "five_hour",
-			"utilization":      0.85,
-			"isUsingOverage":   false,
+			"status":         "allowed_warning",
+			"resetsAt":       1700000000.0,
+			"rateLimitType":  "five_hour",
+			"utilization":    0.85,
+			"isUsingOverage": false,
 		},
 		"uuid":       "550e8400-e29b-41d4-a716-446655440000",
 		"session_id": "test-session-id",

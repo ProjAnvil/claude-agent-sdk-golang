@@ -668,15 +668,15 @@ func TestParseResultMessageWithStopReason(t *testing.T) {
 	// The stop_reason field mirrors the Anthropic API's stop_reason on the
 	// final assistant turn (e.g., "end_turn", "max_tokens", "tool_use").
 	data := map[string]interface{}{
-		"type":           "result",
-		"subtype":        "success",
-		"duration_ms":    float64(1000),
+		"type":            "result",
+		"subtype":         "success",
+		"duration_ms":     float64(1000),
 		"duration_api_ms": float64(500),
-		"is_error":       false,
-		"num_turns":      float64(2),
-		"session_id":     "session_123",
-		"stop_reason":    "end_turn",
-		"result":         "Done",
+		"is_error":        false,
+		"num_turns":       float64(2),
+		"session_id":      "session_123",
+		"stop_reason":     "end_turn",
+		"result":          "Done",
 	}
 
 	msg, err := ParseMessage(data)
@@ -702,14 +702,14 @@ func TestParseResultMessageWithNullStopReason(t *testing.T) {
 	// Test parsing a result message with explicit null stop_reason.
 	// When stop_reason is null/missing, it should be an empty string.
 	data := map[string]interface{}{
-		"type":           "result",
-		"subtype":        "error_max_turns",
-		"duration_ms":    float64(1000),
+		"type":            "result",
+		"subtype":         "error_max_turns",
+		"duration_ms":     float64(1000),
 		"duration_api_ms": float64(500),
-		"is_error":       true,
-		"num_turns":      float64(10),
-		"session_id":     "session_123",
-		"stop_reason":    nil,
+		"is_error":        true,
+		"num_turns":       float64(10),
+		"session_id":      "session_123",
+		"stop_reason":     nil,
 	}
 
 	msg, err := ParseMessage(data)
@@ -731,13 +731,13 @@ func TestParseResultMessageWithoutStopReason(t *testing.T) {
 	// Test backward compatibility: parsing a result message without stop_reason field.
 	// Older CLI output without the field should produce empty string.
 	data := map[string]interface{}{
-		"type":           "result",
-		"subtype":        "success",
-		"duration_ms":    float64(1000),
+		"type":            "result",
+		"subtype":         "success",
+		"duration_ms":     float64(1000),
 		"duration_api_ms": float64(500),
-		"is_error":       false,
-		"num_turns":      float64(2),
-		"session_id":     "session_123",
+		"is_error":        false,
+		"num_turns":       float64(2),
+		"session_id":      "session_123",
 	}
 
 	msg, err := ParseMessage(data)
@@ -765,8 +765,8 @@ func TestParseAssistantMessageWithUsage(t *testing.T) {
 			"usage": map[string]interface{}{
 				"input_tokens":                float64(100),
 				"output_tokens":               float64(50),
-				"cache_read_input_tokens":      float64(2000),
-				"cache_creation_input_tokens":  float64(500),
+				"cache_read_input_tokens":     float64(2000),
+				"cache_creation_input_tokens": float64(500),
 			},
 		},
 	}

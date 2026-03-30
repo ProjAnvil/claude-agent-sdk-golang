@@ -748,3 +748,235 @@ func TestGetContextUsageNotConnected(t *testing.T) {
 		t.Errorf("Expected CLIConnectionError, got %T: %v", err, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// MCP control methods
+// ---------------------------------------------------------------------------
+
+// handleControlRequest is a helper that intercepts writes to respond to
+// control requests matching a given subtype.
+func handleControlRequest(mockT *MockTransport, subtype string, respPayload map[string]interface{}) {
+	origWrite := mockT.WriteFunc
+	mockT.WriteFunc = func(data string) error {
+		var msg map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &msg); err == nil {
+			if msg["type"] == "control_request" {
+				req, _ := msg["request"].(map[string]interface{})
+				reqSubtype, _ := req["subtype"].(string)
+				reqID, _ := msg["request_id"].(string)
+
+				if reqSubtype == subtype && reqID != "" {
+					go func() {
+						mockT.readCh <- map[string]interface{}{
+							"type": "control_response",
+							"response": map[string]interface{}{
+								"subtype":    "success",
+								"request_id": reqID,
+								"response":   respPayload,
+							},
+						}
+					}()
+				}
+			}
+		}
+		if origWrite != nil {
+			return origWrite(data)
+		}
+		return nil
+	}
+}
+
+func TestReconnectMCPServer(t *testing.T) {
+	mockT := createMockTransport()
+	handleControlRequest(mockT, "mcp_reconnect", map[string]interface{}{"ok": true})
+
+	client := NewClient(nil)
+	client.transportFactory = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+		return mockT, nil
+	}
+
+	ctx := context.Background()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := client.ReconnectMCPServer(ctxWithTimeout, "test-server"); err != nil {
+		t.Fatalf("ReconnectMCPServer: %v", err)
+	}
+}
+
+func TestReconnectMCPServerNotConnected(t *testing.T) {
+	client := NewClient(nil)
+	err := client.ReconnectMCPServer(context.Background(), "test")
+	if err == nil {
+		t.Fatal("Expected error when not connected")
+	}
+	if _, ok := err.(*CLIConnectionError); !ok {
+		t.Errorf("Expected CLIConnectionError, got %T", err)
+	}
+}
+
+func TestToggleMCPServer_Enable(t *testing.T) {
+	mockT := createMockTransport()
+	handleControlRequest(mockT, "mcp_toggle", map[string]interface{}{"ok": true})
+
+	client := NewClient(nil)
+	client.transportFactory = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+		return mockT, nil
+	}
+
+	ctx := context.Background()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := client.ToggleMCPServer(ctxWithTimeout, "my-server", true); err != nil {
+		t.Fatalf("ToggleMCPServer(enable): %v", err)
+	}
+}
+
+func TestToggleMCPServer_Disable(t *testing.T) {
+	mockT := createMockTransport()
+	handleControlRequest(mockT, "mcp_toggle", map[string]interface{}{"ok": true})
+
+	client := NewClient(nil)
+	client.transportFactory = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+		return mockT, nil
+	}
+
+	ctx := context.Background()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := client.ToggleMCPServer(ctxWithTimeout, "my-server", false); err != nil {
+		t.Fatalf("ToggleMCPServer(disable): %v", err)
+	}
+}
+
+func TestToggleMCPServerNotConnected(t *testing.T) {
+	client := NewClient(nil)
+	err := client.ToggleMCPServer(context.Background(), "test", true)
+	if err == nil {
+		t.Fatal("Expected error when not connected")
+	}
+	if _, ok := err.(*CLIConnectionError); !ok {
+		t.Errorf("Expected CLIConnectionError, got %T", err)
+	}
+}
+
+func TestStopTask(t *testing.T) {
+	mockT := createMockTransport()
+	handleControlRequest(mockT, "stop_task", map[string]interface{}{"ok": true})
+
+	client := NewClient(nil)
+	client.transportFactory = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+		return mockT, nil
+	}
+
+	ctx := context.Background()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := client.StopTask(ctxWithTimeout, "task-123"); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+}
+
+func TestStopTaskNotConnected(t *testing.T) {
+	client := NewClient(nil)
+	err := client.StopTask(context.Background(), "task-123")
+	if err == nil {
+		t.Fatal("Expected error when not connected")
+	}
+	if _, ok := err.(*CLIConnectionError); !ok {
+		t.Errorf("Expected CLIConnectionError, got %T", err)
+	}
+}
+
+func TestGetMCPStatus(t *testing.T) {
+	mockT := createMockTransport()
+	handleControlRequest(mockT, "mcp_status", map[string]interface{}{
+		"mcpServers": []interface{}{
+			map[string]interface{}{
+				"name":   "test-server",
+				"status": "connected",
+				"error":  "",
+				"scope":  "project",
+				"serverInfo": map[string]interface{}{
+					"name":    "TestServer",
+					"version": "1.0.0",
+				},
+				"tools": []interface{}{
+					map[string]interface{}{
+						"name":        "test_tool",
+						"description": "A test tool",
+					},
+				},
+			},
+		},
+	})
+
+	client := NewClient(nil)
+	client.transportFactory = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+		return mockT, nil
+	}
+
+	ctx := context.Background()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	status, err := client.GetMCPStatus(ctxWithTimeout)
+	if err != nil {
+		t.Fatalf("GetMCPStatus: %v", err)
+	}
+
+	if status == nil {
+		t.Fatal("Expected non-nil status")
+	}
+	if len(status.MCPServers) != 1 {
+		t.Fatalf("Expected 1 server, got %d", len(status.MCPServers))
+	}
+
+	srv := status.MCPServers[0]
+	if srv.Name != "test-server" {
+		t.Errorf("Expected name='test-server', got '%s'", srv.Name)
+	}
+	if srv.Status != McpServerStatusConnected {
+		t.Errorf("Expected status='connected', got '%s'", srv.Status)
+	}
+	if srv.ServerInfo == nil || srv.ServerInfo.Name != "TestServer" {
+		t.Error("Expected server info")
+	}
+	if len(srv.Tools) != 1 || srv.Tools[0].Name != "test_tool" {
+		t.Error("Expected 1 tool named 'test_tool'")
+	}
+}
+
+func TestGetMCPStatusNotConnected(t *testing.T) {
+	client := NewClient(nil)
+	_, err := client.GetMCPStatus(context.Background())
+	if err == nil {
+		t.Fatal("Expected error when not connected")
+	}
+	if _, ok := err.(*CLIConnectionError); !ok {
+		t.Errorf("Expected CLIConnectionError, got %T", err)
+	}
+}

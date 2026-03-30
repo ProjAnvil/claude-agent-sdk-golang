@@ -23,11 +23,11 @@ type Query struct {
 	initializeTimeout time.Duration
 
 	// Control protocol state
-	pendingResponses  map[string]chan controlResult
-	hookCallbacks     map[string]HookCallback
-	inflightRequests  map[string]context.CancelFunc
-	nextCallbackID    int
-	requestCounter    int
+	pendingResponses map[string]chan controlResult
+	hookCallbacks    map[string]HookCallback
+	inflightRequests map[string]context.CancelFunc
+	nextCallbackID   int
+	requestCounter   int
 
 	// Message channels - raw JSON data
 	rawMessages chan map[string]interface{}

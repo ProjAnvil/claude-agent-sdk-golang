@@ -942,3 +942,909 @@ func TestParseSessionInfoFromLite_Helper(t *testing.T) {
 		t.Errorf("Expected cwd='/workspace', got %v", info.CWD)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test extractFirstPromptFromHead
+// ---------------------------------------------------------------------------
+
+func TestExtractFirstPromptFromHead(t *testing.T) {
+	t.Run("simple prompt", func(t *testing.T) {
+		head := compactJSON(map[string]interface{}{
+			"type":    "user",
+			"message": map[string]interface{}{"content": "Hello!"},
+		}) + "\n"
+		result := extractFirstPromptFromHead(head)
+		if result != "Hello!" {
+			t.Errorf("Expected 'Hello!', got %q", result)
+		}
+	})
+
+	t.Run("skips isMeta", func(t *testing.T) {
+		head := compactJSON(map[string]interface{}{
+			"type":    "user",
+			"isMeta":  true,
+			"message": map[string]interface{}{"content": "meta"},
+		}) + "\n" +
+			compactJSON(map[string]interface{}{
+				"type":    "user",
+				"message": map[string]interface{}{"content": "real prompt"},
+			}) + "\n"
+		result := extractFirstPromptFromHead(head)
+		if result != "real prompt" {
+			t.Errorf("Expected 'real prompt', got %q", result)
+		}
+	})
+
+	t.Run("skips tool_result", func(t *testing.T) {
+		head := compactJSON(map[string]interface{}{
+			"type": "user",
+			"message": map[string]interface{}{
+				"content": []interface{}{
+					map[string]interface{}{"type": "tool_result", "content": "x"},
+				},
+			},
+		}) + "\n" +
+			compactJSON(map[string]interface{}{
+				"type":    "user",
+				"message": map[string]interface{}{"content": "actual prompt"},
+			}) + "\n"
+		result := extractFirstPromptFromHead(head)
+		if result != "actual prompt" {
+			t.Errorf("Expected 'actual prompt', got %q", result)
+		}
+	})
+
+	t.Run("content blocks with text", func(t *testing.T) {
+		head := compactJSON(map[string]interface{}{
+			"type": "user",
+			"message": map[string]interface{}{
+				"content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "block prompt"},
+				},
+			},
+		}) + "\n"
+		result := extractFirstPromptFromHead(head)
+		if result != "block prompt" {
+			t.Errorf("Expected 'block prompt', got %q", result)
+		}
+	})
+
+	t.Run("truncates long prompts", func(t *testing.T) {
+		longPrompt := strings.Repeat("x", 300)
+		head := compactJSON(map[string]interface{}{
+			"type":    "user",
+			"message": map[string]interface{}{"content": longPrompt},
+		}) + "\n"
+		result := extractFirstPromptFromHead(head)
+		// 200 chars + "…" (3 bytes UTF-8)
+		if len([]rune(result)) > 201 {
+			t.Errorf("Expected truncated result (<= 201 runes), got %d", len([]rune(result)))
+		}
+		if !strings.HasSuffix(result, "\u2026") {
+			t.Error("Expected ellipsis suffix for truncated prompt")
+		}
+	})
+
+	t.Run("command fallback", func(t *testing.T) {
+		head := compactJSON(map[string]interface{}{
+			"type":    "user",
+			"message": map[string]interface{}{"content": "<command-name>/help</command-name>stuff"},
+		}) + "\n"
+		result := extractFirstPromptFromHead(head)
+		if result != "/help" {
+			t.Errorf("Expected '/help', got %q", result)
+		}
+	})
+
+	t.Run("empty string", func(t *testing.T) {
+		if result := extractFirstPromptFromHead(""); result != "" {
+			t.Errorf("Expected empty string, got %q", result)
+		}
+	})
+
+	t.Run("no user messages", func(t *testing.T) {
+		head := compactJSON(map[string]interface{}{
+			"type":    "assistant",
+			"message": map[string]interface{}{"content": "response"},
+		}) + "\n"
+		if result := extractFirstPromptFromHead(head); result != "" {
+			t.Errorf("Expected empty string, got %q", result)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// TestListSessions integration tests
+// ---------------------------------------------------------------------------
+
+func TestListSessions_EmptyProjectsDir(t *testing.T) {
+	_, projectPath, _ := setupSessionTestProject(t)
+	// No session files created
+
+	sessions, err := ListSessions(&ListSessionsOptions{
+		Directory: &projectPath,
+	})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	// No session files → empty list
+	if len(sessions) != 0 {
+		t.Errorf("Expected 0 sessions, got %d", len(sessions))
+	}
+}
+
+func TestListSessions_NoConfigDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	nonexistent := filepath.Join(tmpDir, "nonexistent")
+	t.Setenv("CLAUDE_CONFIG_DIR", nonexistent)
+
+	_, err := ListSessions(nil)
+	if err == nil {
+		t.Fatal("Expected error for nonexistent config dir")
+	}
+}
+
+func TestListSessions_SingleSession(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	sid, _ := makeTestSessionFile(t, projectDir,
+		withFirstPrompt("What is 2+2?"),
+		withGitBranch("main"),
+	)
+
+	sessions, err := ListSessions(&ListSessionsOptions{
+		Directory: &projectPath,
+	})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("Expected 1 session, got %d", len(sessions))
+	}
+	s := sessions[0]
+	if s.SessionID != sid {
+		t.Errorf("Session ID mismatch")
+	}
+	if s.Summary != "What is 2+2?" {
+		t.Errorf("Expected summary='What is 2+2?', got '%s'", s.Summary)
+	}
+	if s.GitBranch == nil || *s.GitBranch != "main" {
+		t.Errorf("Expected git_branch='main', got %v", s.GitBranch)
+	}
+	if s.FileSize == nil || *s.FileSize <= 0 {
+		t.Error("Expected file_size > 0")
+	}
+	if s.LastModified <= 0 {
+		t.Error("Expected last_modified > 0")
+	}
+}
+
+func TestListSessions_CustomTitleWinsSummary(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	sid := generateUUID()
+	fp := filepath.Join(projectDir, sid+".jsonl")
+	lines := []string{
+		compactJSON(map[string]interface{}{"type": "user", "message": map[string]interface{}{"content": "original question"}}),
+		compactJSON(map[string]interface{}{"type": "assistant", "message": map[string]interface{}{"content": "response"}}),
+		compactJSON(map[string]interface{}{"type": "summary", "summary": "auto summary", "customTitle": "My Custom Title"}),
+	}
+	os.WriteFile(fp, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+
+	sessions, _ := ListSessions(&ListSessionsOptions{Directory: &projectPath})
+	if len(sessions) != 1 {
+		t.Fatalf("Expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Summary != "My Custom Title" {
+		t.Errorf("Expected summary='My Custom Title', got '%s'", sessions[0].Summary)
+	}
+	if sessions[0].CustomTitle == nil || *sessions[0].CustomTitle != "My Custom Title" {
+		t.Errorf("Expected custom_title='My Custom Title'")
+	}
+}
+
+func TestListSessions_SummaryWinsFirstPrompt(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	sid := generateUUID()
+	fp := filepath.Join(projectDir, sid+".jsonl")
+	lines := []string{
+		compactJSON(map[string]interface{}{"type": "user", "message": map[string]interface{}{"content": "question"}}),
+		compactJSON(map[string]interface{}{"type": "summary", "summary": "better summary"}),
+	}
+	os.WriteFile(fp, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+
+	sessions, _ := ListSessions(&ListSessionsOptions{Directory: &projectPath})
+	if len(sessions) != 1 {
+		t.Fatalf("Expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Summary != "better summary" {
+		t.Errorf("Expected summary='better summary', got '%s'", sessions[0].Summary)
+	}
+	if sessions[0].CustomTitle != nil {
+		t.Errorf("Expected nil custom_title, got %v", *sessions[0].CustomTitle)
+	}
+}
+
+func TestListSessions_MultipleSessions_SortedByMtime(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	sidOld, _ := makeTestSessionFile(t, projectDir, withFirstPrompt("old"), withMtime(1000))
+	sidNew, _ := makeTestSessionFile(t, projectDir, withFirstPrompt("new"), withMtime(3000))
+	sidMid, _ := makeTestSessionFile(t, projectDir, withFirstPrompt("mid"), withMtime(2000))
+
+	sessions, _ := ListSessions(&ListSessionsOptions{Directory: &projectPath})
+	if len(sessions) != 3 {
+		t.Fatalf("Expected 3 sessions, got %d", len(sessions))
+	}
+	ids := []string{sessions[0].SessionID, sessions[1].SessionID, sessions[2].SessionID}
+	if ids[0] != sidNew || ids[1] != sidMid || ids[2] != sidOld {
+		t.Errorf("Expected order [new, mid, old], got %v", ids)
+	}
+}
+
+func TestListSessions_FiltersSidechainSessions(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	makeTestSessionFile(t, projectDir, withFirstPrompt("normal"))
+	makeTestSessionFile(t, projectDir, withFirstPrompt("sidechain"), withSidechain())
+
+	sessions, _ := ListSessions(&ListSessionsOptions{Directory: &projectPath})
+	if len(sessions) != 1 {
+		t.Fatalf("Expected 1 session (sidechain filtered), got %d", len(sessions))
+	}
+	if sessions[0].Summary != "normal" {
+		t.Errorf("Expected normal session, got '%s'", sessions[0].Summary)
+	}
+}
+
+func TestListSessions_IgnoresNonJsonlFiles(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	os.WriteFile(filepath.Join(projectDir, "README.md"), []byte("not a session"), 0644)
+	makeTestSessionFile(t, projectDir, withFirstPrompt("session"))
+
+	sessions, _ := ListSessions(&ListSessionsOptions{Directory: &projectPath})
+	if len(sessions) != 1 {
+		t.Errorf("Expected 1 session, got %d", len(sessions))
+	}
+}
+
+func TestListSessions_FiltersNonUUIDFilenames(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	os.WriteFile(filepath.Join(projectDir, "not-a-uuid.jsonl"),
+		[]byte(compactJSON(map[string]interface{}{"type": "user", "message": map[string]interface{}{"content": "x"}})+"\n"), 0644)
+	makeTestSessionFile(t, projectDir, withFirstPrompt("valid session"))
+
+	sessions, _ := ListSessions(&ListSessionsOptions{Directory: &projectPath})
+	if len(sessions) != 1 {
+		t.Errorf("Expected 1 session, got %d", len(sessions))
+	}
+}
+
+func TestListSessions_ListAllSessions(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+	configDir := filepath.Join(tmpDir, ".claude")
+	projectsDir := filepath.Join(configDir, "projects")
+	os.MkdirAll(projectsDir, 0755)
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	proj1 := filepath.Join(projectsDir, sanitizePath("/some/path/one"))
+	proj2 := filepath.Join(projectsDir, sanitizePath("/some/path/two"))
+	os.MkdirAll(proj1, 0755)
+	os.MkdirAll(proj2, 0755)
+
+	makeTestSessionFile(t, proj1, withFirstPrompt("from proj1"), withMtime(1000))
+	makeTestSessionFile(t, proj2, withFirstPrompt("from proj2"), withMtime(2000))
+
+	sessions, err := ListSessions(nil)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("Expected 2 sessions, got %d", len(sessions))
+	}
+	if sessions[0].Summary != "from proj2" {
+		t.Errorf("Expected newest first ('from proj2'), got '%s'", sessions[0].Summary)
+	}
+}
+
+func TestListSessions_DeduplicatesBySessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+	configDir := filepath.Join(tmpDir, ".claude")
+	projectsDir := filepath.Join(configDir, "projects")
+	os.MkdirAll(projectsDir, 0755)
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	proj1 := filepath.Join(projectsDir, sanitizePath("/path/one"))
+	proj2 := filepath.Join(projectsDir, sanitizePath("/path/two"))
+	os.MkdirAll(proj1, 0755)
+	os.MkdirAll(proj2, 0755)
+
+	sharedSID := generateUUID()
+
+	// Older copy in proj1
+	fp1 := filepath.Join(proj1, sharedSID+".jsonl")
+	os.WriteFile(fp1, []byte(compactJSON(map[string]interface{}{
+		"type": "user", "message": map[string]interface{}{"content": "older"},
+	})+"\n"), 0644)
+	os.Chtimes(fp1, time.Unix(1000, 0), time.Unix(1000, 0))
+
+	// Newer copy in proj2
+	fp2 := filepath.Join(proj2, sharedSID+".jsonl")
+	os.WriteFile(fp2, []byte(compactJSON(map[string]interface{}{
+		"type": "user", "message": map[string]interface{}{"content": "newer"},
+	})+"\n"), 0644)
+	os.Chtimes(fp2, time.Unix(2000, 0), time.Unix(2000, 0))
+
+	sessions, _ := ListSessions(nil)
+	if len(sessions) != 1 {
+		t.Fatalf("Expected 1 session (deduped), got %d", len(sessions))
+	}
+	if sessions[0].Summary != "newer" {
+		t.Errorf("Expected newer session summary, got '%s'", sessions[0].Summary)
+	}
+}
+
+func TestListSessions_EmptyFileFiltered(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	sid := generateUUID()
+	os.WriteFile(filepath.Join(projectDir, sid+".jsonl"), []byte(""), 0644)
+
+	sessions, _ := ListSessions(&ListSessionsOptions{Directory: &projectPath})
+	if len(sessions) != 0 {
+		t.Errorf("Expected 0 sessions for empty file, got %d", len(sessions))
+	}
+}
+
+func TestListSessions_CwdFallbackToProjectPath(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	// Session without cwd field
+	makeTestSessionFile(t, projectDir, withFirstPrompt("no cwd field"))
+
+	sessions, _ := ListSessions(&ListSessionsOptions{Directory: &projectPath})
+	if len(sessions) != 1 {
+		t.Fatalf("Expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].CWD == nil {
+		t.Fatal("Expected non-nil CWD")
+	}
+	// CWD should fall back to the project path
+	if *sessions[0].CWD != projectPath {
+		t.Errorf("Expected cwd='%s', got '%s'", projectPath, *sessions[0].CWD)
+	}
+}
+
+func TestListSessions_GitBranchFromTailPreferred(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	sid := generateUUID()
+	fp := filepath.Join(projectDir, sid+".jsonl")
+	lines := []string{
+		compactJSON(map[string]interface{}{
+			"type":      "user",
+			"message":   map[string]interface{}{"content": "hello"},
+			"gitBranch": "old-branch",
+		}),
+		compactJSON(map[string]interface{}{
+			"type":      "summary",
+			"gitBranch": "new-branch",
+		}),
+	}
+	os.WriteFile(fp, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+
+	sessions, _ := ListSessions(&ListSessionsOptions{Directory: &projectPath})
+	if len(sessions) != 1 {
+		t.Fatalf("Expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].GitBranch == nil || *sessions[0].GitBranch != "new-branch" {
+		t.Errorf("Expected git_branch='new-branch', got %v", sessions[0].GitBranch)
+	}
+}
+
+func TestListSessions_Limit(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	for i := 0; i < 5; i++ {
+		makeTestSessionFile(t, projectDir,
+			withFirstPrompt(fmt.Sprintf("prompt %d", i)),
+			withMtime(1000+float64(i)),
+		)
+	}
+
+	limit2 := 2
+	sessions, _ := ListSessions(&ListSessionsOptions{
+		Directory: &projectPath,
+		Limit:     &limit2,
+	})
+	if len(sessions) != 2 {
+		t.Errorf("Expected 2 sessions with limit=2, got %d", len(sessions))
+	}
+	// Should be the 2 newest
+	if sessions[0].LastModified < sessions[1].LastModified {
+		t.Error("Expected sessions sorted newest first")
+	}
+}
+
+func TestListSessions_LimitZeroReturnsAll(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	for i := 0; i < 3; i++ {
+		makeTestSessionFile(t, projectDir, withFirstPrompt(fmt.Sprintf("p%d", i)))
+	}
+
+	limit0 := 0
+	sessions, _ := ListSessions(&ListSessionsOptions{
+		Directory: &projectPath,
+		Limit:     &limit0,
+	})
+	if len(sessions) != 3 {
+		t.Errorf("Expected 3 sessions with limit=0, got %d", len(sessions))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestGetSessionMessages
+// ---------------------------------------------------------------------------
+
+func makeTranscriptEntry(entryType, uuid string, parentUUID *string, sessionID, content string) map[string]interface{} {
+	entry := map[string]interface{}{
+		"type":       entryType,
+		"uuid":       uuid,
+		"parentUuid": parentUUID,
+		"sessionId":  sessionID,
+	}
+	if content != "" {
+		role := entryType
+		if role != "user" && role != "assistant" {
+			role = "user"
+		}
+		entry["message"] = map[string]interface{}{"role": role, "content": content}
+	}
+	return entry
+}
+
+func writeTranscript(t *testing.T, dir, sessionID string, entries []map[string]interface{}) {
+	t.Helper()
+	lines := []string{}
+	for _, e := range entries {
+		b, _ := json.Marshal(e)
+		lines = append(lines, string(b))
+	}
+	fp := filepath.Join(dir, sessionID+".jsonl")
+	os.WriteFile(fp, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+}
+
+func strPtr(s string) *string { return &s }
+
+func TestGetSessionMessages_InvalidSessionID(t *testing.T) {
+	setupSessionTestProject(t)
+	_, err := GetSessionMessages(&GetSessionMessagesOptions{SessionID: "not-a-uuid"})
+	if err == nil {
+		t.Fatal("Expected error for invalid session ID")
+	}
+}
+
+func TestGetSessionMessages_NonexistentSession(t *testing.T) {
+	setupSessionTestProject(t)
+	sid := generateUUID()
+	msgs, err := GetSessionMessages(&GetSessionMessagesOptions{SessionID: sid})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("Expected 0 messages, got %d", len(msgs))
+	}
+}
+
+func TestGetSessionMessages_SimpleChain(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+	u1, a1, u2, a2 := generateUUID(), generateUUID(), generateUUID(), generateUUID()
+
+	entries := []map[string]interface{}{
+		makeTranscriptEntry("user", u1, nil, sid, "hello"),
+		makeTranscriptEntry("assistant", a1, &u1, sid, "hi!"),
+		makeTranscriptEntry("user", u2, &a1, sid, "thanks"),
+		makeTranscriptEntry("assistant", a2, &u2, sid, "welcome"),
+	}
+	writeTranscript(t, projectDir, sid, entries)
+
+	msgs, err := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	if err != nil {
+		t.Fatalf("GetSessionMessages: %v", err)
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("Expected 4 messages, got %d", len(msgs))
+	}
+	if msgs[0].UUID != u1 || msgs[0].Type != "user" {
+		t.Errorf("Expected first message to be user u1")
+	}
+	if msgs[1].UUID != a1 || msgs[1].Type != "assistant" {
+		t.Errorf("Expected second message to be assistant a1")
+	}
+	if msgs[2].UUID != u2 {
+		t.Errorf("Expected third message to be user u2")
+	}
+	if msgs[3].UUID != a2 {
+		t.Errorf("Expected fourth message to be assistant a2")
+	}
+	// All messages should have the session ID
+	for _, m := range msgs {
+		if m.SessionID != sid {
+			t.Errorf("Expected session_id=%s, got %s", sid, m.SessionID)
+		}
+	}
+}
+
+func TestGetSessionMessages_FiltersMetaMessages(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+	u1, meta, a1 := generateUUID(), generateUUID(), generateUUID()
+
+	entries := []map[string]interface{}{
+		makeTranscriptEntry("user", u1, nil, sid, "hello"),
+		// Meta user message in the chain
+		func() map[string]interface{} {
+			e := makeTranscriptEntry("user", meta, &u1, sid, "meta")
+			e["isMeta"] = true
+			return e
+		}(),
+		makeTranscriptEntry("assistant", a1, &meta, sid, "hi"),
+	}
+	writeTranscript(t, projectDir, sid, entries)
+
+	msgs, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	// Only u1 and a1 visible (meta filtered out)
+	if len(msgs) != 2 {
+		t.Fatalf("Expected 2 messages (meta filtered), got %d", len(msgs))
+	}
+	if msgs[0].UUID != u1 {
+		t.Errorf("Expected first message uuid=%s, got %s", u1, msgs[0].UUID)
+	}
+	if msgs[1].UUID != a1 {
+		t.Errorf("Expected second message uuid=%s, got %s", a1, msgs[1].UUID)
+	}
+}
+
+func TestGetSessionMessages_FiltersNonUserAssistant(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+	u1, prog, a1 := generateUUID(), generateUUID(), generateUUID()
+
+	entries := []map[string]interface{}{
+		makeTranscriptEntry("user", u1, nil, sid, "hello"),
+		makeTranscriptEntry("progress", prog, &u1, sid, ""),
+		makeTranscriptEntry("assistant", a1, &prog, sid, "hi"),
+	}
+	writeTranscript(t, projectDir, sid, entries)
+
+	msgs, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	if len(msgs) != 2 {
+		t.Fatalf("Expected 2 messages (progress filtered), got %d", len(msgs))
+	}
+	if msgs[0].UUID != u1 || msgs[1].UUID != a1 {
+		t.Error("Expected user and assistant only")
+	}
+}
+
+func TestGetSessionMessages_PicksMainChainOverSidechain(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+	root, mainLeaf, sideLeaf := generateUUID(), generateUUID(), generateUUID()
+
+	entries := []map[string]interface{}{
+		makeTranscriptEntry("user", root, nil, sid, "root"),
+		makeTranscriptEntry("assistant", mainLeaf, &root, sid, "main"),
+		func() map[string]interface{} {
+			e := makeTranscriptEntry("assistant", sideLeaf, &root, sid, "side")
+			e["isSidechain"] = true
+			return e
+		}(),
+	}
+	writeTranscript(t, projectDir, sid, entries)
+
+	msgs, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	if len(msgs) != 2 {
+		t.Fatalf("Expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[1].UUID != mainLeaf {
+		t.Errorf("Expected main leaf, not sidechain")
+	}
+}
+
+func TestGetSessionMessages_PicksLatestLeafByFilePosition(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+	root, oldLeaf, newLeaf := generateUUID(), generateUUID(), generateUUID()
+
+	entries := []map[string]interface{}{
+		makeTranscriptEntry("user", root, nil, sid, "root"),
+		makeTranscriptEntry("assistant", oldLeaf, &root, sid, "old"),
+		makeTranscriptEntry("assistant", newLeaf, &root, sid, "new"),
+	}
+	writeTranscript(t, projectDir, sid, entries)
+
+	msgs, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	if len(msgs) != 2 {
+		t.Fatalf("Expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[1].UUID != newLeaf {
+		t.Errorf("Expected new leaf (higher file position), got %s", msgs[1].UUID)
+	}
+}
+
+func TestGetSessionMessages_TerminalNonMessageWalkedBack(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+	u1, a1, prog := generateUUID(), generateUUID(), generateUUID()
+
+	entries := []map[string]interface{}{
+		makeTranscriptEntry("user", u1, nil, sid, "hi"),
+		makeTranscriptEntry("assistant", a1, &u1, sid, "hello"),
+		makeTranscriptEntry("progress", prog, &a1, sid, ""),
+	}
+	writeTranscript(t, projectDir, sid, entries)
+
+	msgs, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	if len(msgs) != 2 {
+		t.Fatalf("Expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].UUID != u1 || msgs[1].UUID != a1 {
+		t.Error("Expected terminal progress walked back to user/assistant")
+	}
+}
+
+func TestGetSessionMessages_CorruptLinesSkipped(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+	u1, a1 := generateUUID(), generateUUID()
+
+	lines := []string{
+		compactJSON(makeTranscriptEntry("user", u1, nil, sid, "hi")),
+		"not valid json {{{",
+		"",
+		compactJSON(makeTranscriptEntry("assistant", a1, &u1, sid, "hello")),
+	}
+	fp := filepath.Join(projectDir, sid+".jsonl")
+	os.WriteFile(fp, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+
+	msgs, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	if len(msgs) != 2 {
+		t.Errorf("Expected 2 messages (corrupt lines skipped), got %d", len(msgs))
+	}
+}
+
+func TestGetSessionMessages_CycleDetection(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+	u1, a1 := generateUUID(), generateUUID()
+
+	// Cyclic: a1 → u1 → a1
+	entries := []map[string]interface{}{
+		makeTranscriptEntry("user", u1, &a1, sid, "hi"),
+		makeTranscriptEntry("assistant", a1, &u1, sid, "hello"),
+	}
+	writeTranscript(t, projectDir, sid, entries)
+
+	msgs, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	// Both are parents of each other → no terminals → empty
+	if len(msgs) != 0 {
+		t.Errorf("Expected 0 messages for cyclic chain, got %d", len(msgs))
+	}
+}
+
+func TestGetSessionMessages_EmptyTranscript(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+	fp := filepath.Join(projectDir, sid+".jsonl")
+	os.WriteFile(fp, []byte(""), 0644)
+
+	msgs, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	if len(msgs) != 0 {
+		t.Errorf("Expected 0 messages for empty file, got %d", len(msgs))
+	}
+}
+
+func TestGetSessionMessages_IgnoresNonTranscriptTypes(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+	u1, a1 := generateUUID(), generateUUID()
+
+	lines := []string{
+		compactJSON(makeTranscriptEntry("user", u1, nil, sid, "hi")),
+		compactJSON(map[string]interface{}{"type": "summary", "summary": "A nice chat"}),
+		compactJSON(makeTranscriptEntry("assistant", a1, &u1, sid, "hello")),
+	}
+	fp := filepath.Join(projectDir, sid+".jsonl")
+	os.WriteFile(fp, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+
+	msgs, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	if len(msgs) != 2 {
+		t.Errorf("Expected 2 messages (summary ignored), got %d", len(msgs))
+	}
+}
+
+func TestGetSessionMessages_LimitAndOffset(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+	sid := generateUUID()
+
+	// Build chain of 6: u→a→u→a→u→a
+	uuids := make([]string, 6)
+	for i := range uuids {
+		uuids[i] = generateUUID()
+	}
+	entries := []map[string]interface{}{}
+	for i, uid := range uuids {
+		var parentUUID *string
+		if i > 0 {
+			parentUUID = &uuids[i-1]
+		}
+		entryType := "user"
+		if i%2 != 0 {
+			entryType = "assistant"
+		}
+		entries = append(entries, makeTranscriptEntry(entryType, uid, parentUUID, sid, fmt.Sprintf("m%d", i)))
+	}
+	writeTranscript(t, projectDir, sid, entries)
+
+	// No limit/offset
+	allMsgs, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	if len(allMsgs) != 6 {
+		t.Fatalf("Expected 6 messages, got %d", len(allMsgs))
+	}
+
+	// limit=2
+	limit2 := 2
+	page, _ := GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+		Limit:     &limit2,
+	})
+	if len(page) != 2 {
+		t.Errorf("Expected 2 messages with limit=2, got %d", len(page))
+	}
+	if page[0].UUID != uuids[0] || page[1].UUID != uuids[1] {
+		t.Error("Expected first 2 messages")
+	}
+
+	// offset=2, limit=2
+	page, _ = GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+		Limit:     &limit2,
+		Offset:    2,
+	})
+	if len(page) != 2 {
+		t.Errorf("Expected 2 messages with offset=2 limit=2, got %d", len(page))
+	}
+	if page[0].UUID != uuids[2] || page[1].UUID != uuids[3] {
+		t.Error("Expected messages 2-3")
+	}
+
+	// offset beyond end
+	page, _ = GetSessionMessages(&GetSessionMessagesOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+		Offset:    100,
+	})
+	if len(page) != 0 {
+		t.Errorf("Expected 0 messages for large offset, got %d", len(page))
+	}
+}
+
+func TestGetSessionMessages_SearchAllProjects(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+	configDir := filepath.Join(tmpDir, ".claude")
+	projectsDir := filepath.Join(configDir, "projects")
+	os.MkdirAll(projectsDir, 0755)
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	proj2 := filepath.Join(projectsDir, sanitizePath("/path/two"))
+	os.MkdirAll(proj2, 0755)
+
+	sid := generateUUID()
+	u1, a1 := generateUUID(), generateUUID()
+	entries := []map[string]interface{}{
+		makeTranscriptEntry("user", u1, nil, sid, "hi"),
+		makeTranscriptEntry("assistant", a1, &u1, sid, "hello"),
+	}
+	writeTranscript(t, proj2, sid, entries)
+
+	msgs, _ := GetSessionMessages(&GetSessionMessagesOptions{SessionID: sid})
+	if len(msgs) != 2 {
+		t.Errorf("Expected 2 messages from search-all, got %d", len(msgs))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestBuildConversationChain
+// ---------------------------------------------------------------------------
+
+func TestBuildConversationChain(t *testing.T) {
+	t.Run("empty input", func(t *testing.T) {
+		result := buildConversationChain(nil)
+		if len(result) != 0 {
+			t.Errorf("Expected empty, got %d", len(result))
+		}
+	})
+
+	t.Run("single entry", func(t *testing.T) {
+		entries := []transcriptEntry{
+			{Type: "user", UUID: "a"},
+		}
+		result := buildConversationChain(entries)
+		if len(result) != 1 || result[0].UUID != "a" {
+			t.Errorf("Expected single entry 'a', got %v", result)
+		}
+	})
+
+	t.Run("linear chain", func(t *testing.T) {
+		bPtr := strPtr("a")
+		cPtr := strPtr("b")
+		entries := []transcriptEntry{
+			{Type: "user", UUID: "a"},
+			{Type: "assistant", UUID: "b", ParentUUID: bPtr},
+			{Type: "user", UUID: "c", ParentUUID: cPtr},
+		}
+		result := buildConversationChain(entries)
+		if len(result) != 3 {
+			t.Fatalf("Expected 3, got %d", len(result))
+		}
+		ids := []string{result[0].UUID, result[1].UUID, result[2].UUID}
+		if ids[0] != "a" || ids[1] != "b" || ids[2] != "c" {
+			t.Errorf("Expected [a,b,c], got %v", ids)
+		}
+	})
+
+	t.Run("only progress returns empty", func(t *testing.T) {
+		aPtr := strPtr("a")
+		entries := []transcriptEntry{
+			{Type: "progress", UUID: "a"},
+			{Type: "progress", UUID: "b", ParentUUID: aPtr},
+		}
+		result := buildConversationChain(entries)
+		if len(result) != 0 {
+			t.Errorf("Expected empty for progress-only entries, got %d", len(result))
+		}
+	})
+}

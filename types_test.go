@@ -651,3 +651,324 @@ func TestSDKSessionInfoNewFields(t *testing.T) {
 		t.Errorf("FirstPrompt mismatch")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestPermissionModeAllConstants
+// ---------------------------------------------------------------------------
+
+func TestPermissionModeAllConstants(t *testing.T) {
+	modes := []PermissionMode{
+		PermissionModeDefault,
+		PermissionModeAcceptEdits,
+		PermissionModeDontAsk,
+		PermissionModePlan,
+		PermissionModeBypassPermissions,
+	}
+	expected := []string{"default", "acceptEdits", "dontAsk", "plan", "bypassPermissions"}
+	for i, m := range modes {
+		if string(m) != expected[i] {
+			t.Errorf("PermissionMode %d: expected %q, got %q", i, expected[i], m)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestMcpServerStatusTypes
+// ---------------------------------------------------------------------------
+
+func TestMcpServerStatus_Connected(t *testing.T) {
+	status := McpServerStatus{
+		Name:   "my-server",
+		Status: McpServerStatusConnected,
+		ServerInfo: &McpServerInfo{
+			Name:    "my-server",
+			Version: "1.2.3",
+		},
+		Scope: "project",
+		Tools: []McpToolInfo{
+			{
+				Name:        "greet",
+				Description: "Greet a user",
+				Annotations: &McpToolAnnotations{
+					ReadOnly:    true,
+					Destructive: false,
+					OpenWorld:   false,
+				},
+			},
+		},
+	}
+
+	if status.Name != "my-server" {
+		t.Errorf("Name mismatch")
+	}
+	if status.Status != McpServerStatusConnected {
+		t.Errorf("Status mismatch")
+	}
+	if status.ServerInfo.Version != "1.2.3" {
+		t.Errorf("ServerInfo version mismatch")
+	}
+	if !status.Tools[0].Annotations.ReadOnly {
+		t.Error("Expected ReadOnly=true")
+	}
+}
+
+func TestMcpServerStatus_Minimal(t *testing.T) {
+	status := McpServerStatus{
+		Name:   "pending-server",
+		Status: McpServerStatusPending,
+	}
+	if status.Name != "pending-server" {
+		t.Error("Name mismatch")
+	}
+	if status.Error != "" {
+		t.Error("Expected empty error")
+	}
+}
+
+func TestMcpServerStatus_FailedWithError(t *testing.T) {
+	status := McpServerStatus{
+		Name:   "broken-server",
+		Status: McpServerStatusFailed,
+		Error:  "Connection refused",
+	}
+	if status.Status != McpServerStatusFailed {
+		t.Error("Status mismatch")
+	}
+	if status.Error != "Connection refused" {
+		t.Error("Error mismatch")
+	}
+}
+
+func TestMcpServerStatus_ClaudeAIProxy(t *testing.T) {
+	status := McpServerStatus{
+		Name:   "proxy-server",
+		Status: McpServerStatusNeedsAuth,
+		Config: map[string]interface{}{
+			"type": "claudeai-proxy",
+			"url":  "https://claude.ai/proxy",
+			"id":   "proxy-abc",
+		},
+	}
+	if status.Config["type"] != "claudeai-proxy" {
+		t.Error("Config type mismatch")
+	}
+	if status.Config["id"] != "proxy-abc" {
+		t.Error("Config id mismatch")
+	}
+}
+
+func TestMcpStatusResponse_WrapsServers(t *testing.T) {
+	resp := McpStatusResponse{
+		MCPServers: []McpServerStatus{
+			{Name: "a", Status: McpServerStatusConnected},
+			{Name: "b", Status: McpServerStatusDisabled},
+		},
+	}
+	if len(resp.MCPServers) != 2 {
+		t.Fatalf("Expected 2 servers, got %d", len(resp.MCPServers))
+	}
+	if resp.MCPServers[0].Status != McpServerStatusConnected {
+		t.Error("First server status mismatch")
+	}
+	if resp.MCPServers[1].Status != McpServerStatusDisabled {
+		t.Error("Second server status mismatch")
+	}
+}
+
+func TestMcpStatusResponse_JSONRoundTrip(t *testing.T) {
+	resp := McpStatusResponse{
+		MCPServers: []McpServerStatus{
+			{
+				Name:   "srv",
+				Status: McpServerStatusConnected,
+				Tools:  []McpToolInfo{{Name: "tool1", Description: "desc1"}},
+			},
+		},
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var parsed McpStatusResponse
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(parsed.MCPServers) != 1 || parsed.MCPServers[0].Name != "srv" {
+		t.Error("Round-trip mismatch")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAgentDefinition serialization
+// ---------------------------------------------------------------------------
+
+func TestAgentDefinition_MinimalOmitsUnset(t *testing.T) {
+	agent := AgentDefinition{Description: "test", Prompt: "You are a test"}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if m["description"] != "test" || m["prompt"] != "You are a test" {
+		t.Error("Required fields mismatch")
+	}
+	// Optional fields should be omitted
+	for _, key := range []string{"tools", "disallowedTools", "model", "skills", "memory", "mcpServers", "initialPrompt", "maxTurns"} {
+		if _, ok := m[key]; ok {
+			t.Errorf("Expected %q to be omitted", key)
+		}
+	}
+}
+
+func TestAgentDefinition_SkillsAndMemory(t *testing.T) {
+	agent := AgentDefinition{
+		Description: "test",
+		Prompt:      "p",
+		Skills:      []string{"skill-a", "skill-b"},
+		Memory:      "project",
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	skills, ok := m["skills"].([]interface{})
+	if !ok || len(skills) != 2 {
+		t.Fatalf("Expected 2 skills, got %v", m["skills"])
+	}
+	if m["memory"] != "project" {
+		t.Errorf("Expected memory='project', got %v", m["memory"])
+	}
+}
+
+func TestAgentDefinition_McpServersCamelCase(t *testing.T) {
+	agent := AgentDefinition{
+		Description: "test",
+		Prompt:      "p",
+		McpServers: []interface{}{
+			"slack",
+			map[string]interface{}{
+				"local": map[string]interface{}{"command": "python", "args": []string{"server.py"}},
+			},
+		},
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if _, ok := m["mcpServers"]; !ok {
+		t.Error("Expected mcpServers key (camelCase)")
+	}
+	if _, ok := m["mcp_servers"]; ok {
+		t.Error("Should not have snake_case mcp_servers")
+	}
+}
+
+func TestAgentDefinition_DisallowedToolsAndMaxTurnsCamelCase(t *testing.T) {
+	maxTurns := 10
+	agent := AgentDefinition{
+		Description:     "test",
+		Prompt:          "p",
+		DisallowedTools: []string{"Bash", "Write"},
+		MaxTurns:        &maxTurns,
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if _, ok := m["disallowedTools"]; !ok {
+		t.Error("Expected disallowedTools key")
+	}
+	if _, ok := m["disallowed_tools"]; ok {
+		t.Error("Should not have snake_case disallowed_tools")
+	}
+	if m["maxTurns"] != float64(10) {
+		t.Errorf("Expected maxTurns=10, got %v", m["maxTurns"])
+	}
+	if _, ok := m["max_turns"]; ok {
+		t.Error("Should not have snake_case max_turns")
+	}
+}
+
+func TestAgentDefinition_InitialPromptCamelCase(t *testing.T) {
+	agent := AgentDefinition{
+		Description:   "test",
+		Prompt:        "p",
+		InitialPrompt: "/review-pr 123",
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if m["initialPrompt"] != "/review-pr 123" {
+		t.Errorf("Expected initialPrompt='/review-pr 123', got %v", m["initialPrompt"])
+	}
+	if _, ok := m["initial_prompt"]; ok {
+		t.Error("Should not have snake_case initial_prompt")
+	}
+}
+
+func TestAgentDefinition_ModelFullID(t *testing.T) {
+	agent := AgentDefinition{
+		Description: "test",
+		Prompt:      "p",
+		Model:       "claude-opus-4-5",
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if m["model"] != "claude-opus-4-5" {
+		t.Errorf("Expected model='claude-opus-4-5', got %v", m["model"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestContextUsageResponse serialization with new fields
+// ---------------------------------------------------------------------------
+
+func TestContextUsageResponse_WithNewFields(t *testing.T) {
+	threshold := 90
+	resp := ContextUsageResponse{
+		TotalTokens:          5000,
+		MaxTokens:            10000,
+		Percentage:           50.0,
+		Model:                "claude-sonnet-4-5",
+		AutoCompactThreshold: &threshold,
+		MessageBreakdown:     map[string]interface{}{"user": 2000, "assistant": 3000},
+		APIUsage:             map[string]interface{}{"inputTokens": 4000, "outputTokens": 1000},
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if m["autoCompactThreshold"] != float64(90) {
+		t.Errorf("Expected autoCompactThreshold=90, got %v", m["autoCompactThreshold"])
+	}
+	if mb, ok := m["messageBreakdown"].(map[string]interface{}); !ok || mb["user"] != float64(2000) {
+		t.Errorf("messageBreakdown mismatch")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SdkBeta
+// ---------------------------------------------------------------------------
+
+func TestSdkBeta_Constants(t *testing.T) {
+	// SdkBeta is a type alias for string
+	var beta SdkBeta = SdkBetaContext1M
+	if beta != "context-1m-2025-08-07" {
+		t.Errorf("Expected SdkBetaContext1M='context-1m-2025-08-07', got %q", beta)
+	}
+
+	// Should be usable as plain string
+	opts := &ClaudeAgentOptions{
+		Betas: []SdkBeta{"context-1m", "other-beta"},
+	}
+	if len(opts.Betas) != 2 {
+		t.Errorf("Expected 2 betas, got %d", len(opts.Betas))
+	}
+}
