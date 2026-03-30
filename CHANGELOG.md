@@ -5,20 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.48] - 2025-03-12
+## [0.1.52] - 2025-03-30
 
 ### Added
 
-- **Effort option**: Added `Effort` field to `ClaudeAgentOptions` for controlling thinking depth. Valid values are `"low"`, `"medium"`, `"high"`, and `"max"`. This option maps to the `--effort` CLI flag.
+- **Context usage fields**: Added 8 new fields to `ContextUsageResponse`: `AutoCompactThreshold`, `DeferredBuiltinTools`, `SystemTools`, `SystemPromptSections`, `SlashCommands`, `Skills`, `MessageBreakdown`, `APIUsage` — aligned with Python SDK v0.1.52 (#764)
+- **SdkBeta type**: Added `SdkBeta` type alias and `SdkBetaContext1M` constant for typed beta feature flags. Changed `Betas` field in `ClaudeAgentOptions` from `[]string` to `[]SdkBeta` (backward-compatible type alias)
+- **Session mutations**: Added `ForkSession()`, `DeleteSession()`, `TagSession()`, `RenameSession()` functions with full Unicode sanitization support — ported from Python SDK v0.1.49–v0.1.51 (#668, #670, #744)
+- **AgentDefinition fields**: Added `Skills`, `Memory`, `McpServers` (v0.1.49), `DisallowedTools`, `MaxTurns`, `InitialPrompt` (v0.1.51) fields with camelCase JSON tags (#684, #759)
+- **SDKSessionInfo fields**: Added `Tag`, `CreatedAt`, and `FirstPrompt` fields to `SDKSessionInfo` — ported from Python SDK v0.1.50 (#667)
+- **RateLimitEvent**: Added typed `RateLimitEvent` message with all rate-limit fields — ported from Python SDK v0.1.49 (#648)
+- **AssistantMessage usage**: Preserved per-turn `Usage` on `AssistantMessage` for token tracking — ported from Python SDK v0.1.49 (#685)
+- **ResultMessage fields**: Added `Errors` field and preserved dropped fields for forward compatibility — ported from Python SDK v0.1.51 (#718, #749)
+- **SystemPromptFile**: Added `SystemPromptFile` option to `ClaudeAgentOptions` for `--system-prompt-file` CLI flag — ported from Python SDK v0.1.51 (#591)
+- **Effort option**: Added `Effort` field to `ClaudeAgentOptions` for controlling thinking depth — ported from Python SDK v0.1.48
 
 ### Bug Fixes
 
-- **Fine-grained tool streaming**: Fixed `IncludePartialMessages=true` not delivering `input_json_delta` events by enabling the `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` environment variable in the subprocess. User-supplied values in `Env` take precedence over the SDK default. This regression affected versions 0.1.36 through 0.1.47 for users without the server-side feature flag.
+- **Fine-grained tool streaming**: Fixed `IncludePartialMessages=true` not delivering `input_json_delta` events by enabling the `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` environment variable in the subprocess
+- **Forward-compatible message parsing**: Unknown message types are silently skipped instead of causing errors
 
-### Changed
+### Test Coverage
 
-- Synced with Python SDK v0.1.48 changes
-- Updated transport layer to support the new `--effort` CLI flag
+- **types_test.go**: +16 tests — PermissionMode constants, McpServerStatus (connected/minimal/failed/proxy/wrapper/round-trip), AgentDefinition JSON serialization with camelCase verification, ContextUsageResponse new fields, SdkBeta constants
+- **sessions_test.go**: +35 tests — `extractFirstPromptFromHead`, `ListSessions` (15 scenarios), `GetSessionMessages` (14 scenarios), `BuildConversationChain`
+- **session_mutations_test.go**: +25 tests — `appendToSession`, `RenameSession`, `TagSession`, `SanitizeUnicode`, `DeleteSession`, `ForkSession` (10 scenarios)
+- **client_streaming_test.go**: +9 tests — MCP reconnect/toggle/stop/status control requests
+- Total: 313 tests passing across all packages
 
 ## [0.1.46] - 2025-03-05
 
