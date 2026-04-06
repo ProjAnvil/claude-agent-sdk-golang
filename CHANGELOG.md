@@ -5,11 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.55] - 2025-04-06
+
+### Added
+
+- **AgentDefinition fields**: Added `Background` (`*bool`), `Effort` (`string`: "low"/"medium"/"high"/"max"), and `PermissionMode` (`PermissionMode`) fields to `AgentDefinition` — ported from Python SDK v0.1.54 (#782)
+- **MCP MaxResultSizeChars**: Added `MaxResultSizeChars` field to `ToolAnnotations`. When set, the SDK forwards it as `_meta["anthropic/maxResultSizeChars"]` in `tools/list` responses to bypass Zod annotation stripping in the CLI — ported from Python SDK v0.1.55 (#756)
+
+### Bug Fixes
+
+- **Deadlock in standalone Query/QuerySync**: Fixed a deadlock where the `Query()` goroutine would hang indefinitely after receiving a `ResultMessage`. The circular dependency was: goroutine exit → `q.Close()` → stdin EOF → CLI exits → stdout EOF → channels close → goroutine exit. The fix calls `q.EndInput()` after forwarding a `ResultMessage`, breaking the cycle by closing stdin immediately so the CLI can exit gracefully — equivalent to Python SDK v0.1.53 (#780)
+- **Setting sources empty string**: Fixed `--setting-sources` being passed as an empty string when not configured, which caused the CLI to misparse subsequent flags. The flag is now omitted entirely when `SettingSources` is nil or empty — ported from Python SDK v0.1.53 (#778)
+
+### Test Coverage
+
+- **query_test.go**: +2 tests — `TestQueryDeadlockRegression`, `TestQuerySyncDeadlockRegression`
+- **types_test.go**: +7 tests — `TestAgentDefinition_BackgroundField`, `TestAgentDefinition_BackgroundOmittedWhenNil`, `TestAgentDefinition_EffortField`, `TestAgentDefinition_EffortOmittedWhenEmpty`, `TestAgentDefinition_PermissionModeField`, `TestAgentDefinition_AllNewFieldsCombined`
+- **internal/transport/subprocess_test.go**: +3 tests — `TestSettingSourcesOmittedWhenNil`, `TestSettingSourcesOmittedWhenEmpty`, `TestSettingSourcesPassedWhenPopulated`
+- **internal/sdk_mcp_integration_test.go**: +1 test — `TestToolAnnotations_MaxResultSizeChars`
+- Total: 438 tests passing across all packages
+
 ## [0.1.52] - 2025-03-30
 
 ### Added
 
 - **Context usage fields**: Added 8 new fields to `ContextUsageResponse`: `AutoCompactThreshold`, `DeferredBuiltinTools`, `SystemTools`, `SystemPromptSections`, `SlashCommands`, `Skills`, `MessageBreakdown`, `APIUsage` — aligned with Python SDK v0.1.52 (#764)
+- **Typed GetContextUsage return**: Changed `ClaudeSDKClient.GetContextUsage()` return type from `map[string]interface{}` to `*ContextUsageResponse` for type-safe access to context usage data — aligned with Python SDK v0.1.52 (#764)
 - **SdkBeta type**: Added `SdkBeta` type alias and `SdkBetaContext1M` constant for typed beta feature flags. Changed `Betas` field in `ClaudeAgentOptions` from `[]string` to `[]SdkBeta` (backward-compatible type alias)
 - **Session mutations**: Added `ForkSession()`, `DeleteSession()`, `TagSession()`, `RenameSession()` functions with full Unicode sanitization support — ported from Python SDK v0.1.49–v0.1.51 (#668, #670, #744)
 - **AgentDefinition fields**: Added `Skills`, `Memory`, `McpServers` (v0.1.49), `DisallowedTools`, `MaxTurns`, `InitialPrompt` (v0.1.51) fields with camelCase JSON tags (#684, #759)
@@ -24,14 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Fine-grained tool streaming**: Fixed `IncludePartialMessages=true` not delivering `input_json_delta` events by enabling the `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` environment variable in the subprocess
 - **Forward-compatible message parsing**: Unknown message types are silently skipped instead of causing errors
+- **Context cancellation in control handlers**: `handleCanUseTool` and `handleHookCallback` now properly check context cancellation before executing callbacks, ensuring `control_cancel_request` messages from the CLI actually interrupt in-flight operations — ported from Python SDK v0.1.52 (#751)
 
 ### Test Coverage
 
 - **types_test.go**: +16 tests — PermissionMode constants, McpServerStatus (connected/minimal/failed/proxy/wrapper/round-trip), AgentDefinition JSON serialization with camelCase verification, ContextUsageResponse new fields, SdkBeta constants
 - **sessions_test.go**: +35 tests — `extractFirstPromptFromHead`, `ListSessions` (15 scenarios), `GetSessionMessages` (14 scenarios), `BuildConversationChain`
 - **session_mutations_test.go**: +25 tests — `appendToSession`, `RenameSession`, `TagSession`, `SanitizeUnicode`, `DeleteSession`, `ForkSession` (10 scenarios)
-- **client_streaming_test.go**: +9 tests — MCP reconnect/toggle/stop/status control requests
-- Total: 313 tests passing across all packages
+- **client_streaming_test.go**: +9 tests — MCP reconnect/toggle/stop/status control requests, typed `GetContextUsage` response validation
+- **internal/query_test.go**: +6 tests — `TestCancelRequestCancelsInflightHook`, `TestCancelRequestForUnknownIDIsNoop`, `TestCompletedRequestRemovedFromInflight`, `TestCancelRequestPreventsResponse`, `TestHandleCanUseToolWithCancelledContext`, `TestHandleHookCallbackWithCancelledContext`
+- Total: 426 tests passing across all packages
 
 ## [0.1.46] - 2025-03-05
 

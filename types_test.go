@@ -972,3 +972,113 @@ func TestSdkBeta_Constants(t *testing.T) {
 		t.Errorf("Expected 2 betas, got %d", len(opts.Betas))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// AgentDefinition new fields: Background, Effort, PermissionMode (v0.1.54)
+// ---------------------------------------------------------------------------
+
+func TestAgentDefinition_BackgroundField(t *testing.T) {
+	bg := true
+	agent := AgentDefinition{
+		Description: "bg agent",
+		Prompt:      "Do work in background",
+		Background:  &bg,
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if m["background"] != true {
+		t.Errorf("Expected background=true, got %v", m["background"])
+	}
+}
+
+func TestAgentDefinition_BackgroundOmittedWhenNil(t *testing.T) {
+	agent := AgentDefinition{
+		Description: "test",
+		Prompt:      "p",
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if _, ok := m["background"]; ok {
+		t.Error("Expected background to be omitted when nil")
+	}
+}
+
+func TestAgentDefinition_EffortField(t *testing.T) {
+	agent := AgentDefinition{
+		Description: "high effort agent",
+		Prompt:      "Think hard",
+		Effort:      "high",
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if m["effort"] != "high" {
+		t.Errorf("Expected effort='high', got %v", m["effort"])
+	}
+}
+
+func TestAgentDefinition_EffortOmittedWhenEmpty(t *testing.T) {
+	agent := AgentDefinition{
+		Description: "test",
+		Prompt:      "p",
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if _, ok := m["effort"]; ok {
+		t.Error("Expected effort to be omitted when empty")
+	}
+}
+
+func TestAgentDefinition_PermissionModeField(t *testing.T) {
+	agent := AgentDefinition{
+		Description:    "safe agent",
+		Prompt:         "Be safe",
+		PermissionMode: PermissionModeAcceptEdits,
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if m["permissionMode"] != string(PermissionModeAcceptEdits) {
+		t.Errorf("Expected permissionMode='acceptEdits', got %v", m["permissionMode"])
+	}
+	if _, ok := m["permission_mode"]; ok {
+		t.Error("Should not have snake_case permission_mode")
+	}
+}
+
+func TestAgentDefinition_AllNewFieldsCombined(t *testing.T) {
+	bg := false
+	maxTurns := 5
+	agent := AgentDefinition{
+		Description:    "full agent",
+		Prompt:         "Do everything",
+		MaxTurns:       &maxTurns,
+		Background:     &bg,
+		Effort:         "max",
+		PermissionMode: PermissionModeBypassPermissions,
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if m["background"] != false {
+		t.Errorf("Expected background=false, got %v", m["background"])
+	}
+	if m["effort"] != "max" {
+		t.Errorf("Expected effort='max', got %v", m["effort"])
+	}
+	if m["permissionMode"] != string(PermissionModeBypassPermissions) {
+		t.Errorf("Expected permissionMode='bypassPermissions', got %v", m["permissionMode"])
+	}
+	if m["maxTurns"] != float64(5) {
+		t.Errorf("Expected maxTurns=5, got %v", m["maxTurns"])
+	}
+}

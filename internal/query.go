@@ -397,15 +397,20 @@ func (q *Query) readMessages() {
 
 		// Send raw data to be parsed by caller
 		q.mu.Lock()
-		if !q.closed {
+		closed := q.closed
+		q.mu.Unlock()
+		if !closed {
 			q.rawMessages <- data
 		}
-		q.mu.Unlock()
 	}
 
-	// Forward transport errors
+	// Forward transport errors (non-blocking to prevent deadlock
+	// when the consumer goroutine has stopped reading).
 	for err := range q.transport.Errors() {
-		q.errors <- err
+		select {
+		case q.errors <- err:
+		default:
+		}
 	}
 }
 
@@ -475,13 +480,19 @@ func (q *Query) handleControlRequest(ctx context.Context, data map[string]interf
 
 	switch subtype {
 	case "can_use_tool":
-		responseData, err = q.handleCanUseTool(request)
+		responseData, err = q.handleCanUseTool(ctx, request)
 	case "hook_callback":
-		responseData, err = q.handleHookCallback(request)
+		responseData, err = q.handleHookCallback(ctx, request)
 	case "mcp_message":
 		responseData, err = q.handleMCPMessage(request)
 	default:
 		err = fmt.Errorf("unsupported control request subtype: %s", subtype)
+	}
+
+	// If the context was cancelled (via control_cancel_request), don't send
+	// a response — the CLI already knows the request was abandoned.
+	if ctx.Err() != nil {
+		return
 	}
 
 	if err != nil {
@@ -493,7 +504,10 @@ func (q *Query) handleControlRequest(ctx context.Context, data map[string]interf
 }
 
 // handleCanUseTool handles tool permission requests.
-func (q *Query) handleCanUseTool(request map[string]interface{}) (map[string]interface{}, error) {
+func (q *Query) handleCanUseTool(ctx context.Context, request map[string]interface{}) (map[string]interface{}, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if q.canUseTool == nil {
 		return nil, fmt.Errorf("canUseTool callback is not provided")
 	}
@@ -515,13 +529,13 @@ func (q *Query) handleCanUseTool(request map[string]interface{}) (map[string]int
 		}
 	}
 
-	ctx := ToolPermissionContext{
+	permCtx := ToolPermissionContext{
 		Suggestions: permSuggestions,
 		ToolUseID:   toolUseID,
 		AgentID:     agentID,
 	}
 
-	result, err := q.canUseTool(toolName, input, ctx)
+	result, err := q.canUseTool(toolName, input, permCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -554,7 +568,10 @@ func (q *Query) handleCanUseTool(request map[string]interface{}) (map[string]int
 }
 
 // handleHookCallback handles hook callback requests.
-func (q *Query) handleHookCallback(request map[string]interface{}) (map[string]interface{}, error) {
+func (q *Query) handleHookCallback(ctx context.Context, request map[string]interface{}) (map[string]interface{}, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	callbackID, _ := request["callback_id"].(string)
 	callback, exists := q.hookCallbacks[callbackID]
 	if !exists {
@@ -632,9 +649,9 @@ func (q *Query) handleHookCallback(request map[string]interface{}) (map[string]i
 		hookInput.PermissionSuggestions = permissionSuggestions
 	}
 
-	ctx := HookContext{}
+	hookCtx := HookContext{}
 
-	output, err := callback(hookInput, toolUseID, ctx)
+	output, err := callback(hookInput, toolUseID, hookCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -725,6 +742,14 @@ func (q *Query) handleMCPMessage(request map[string]interface{}) (map[string]int
 			}
 			if tool.Annotations != nil {
 				tools[i]["annotations"] = tool.Annotations
+			}
+			// Forward maxResultSizeChars via _meta to bypass Zod annotation
+			// stripping in the CLI (#756). The CLI's toolResultStorage uses
+			// this to control large-result spill thresholds.
+			if ann, ok := tool.Annotations.(ToolAnnotations); ok && ann.MaxResultSizeChars != nil {
+				tools[i]["_meta"] = map[string]interface{}{
+					"anthropic/maxResultSizeChars": *ann.MaxResultSizeChars,
+				}
 			}
 		}
 		mcpResponse = map[string]interface{}{
@@ -890,8 +915,9 @@ type MCPTool struct {
 
 // ToolAnnotations represents hints for tool usage.
 type ToolAnnotations struct {
-	ReadOnlyHint    *bool `json:"readOnlyHint,omitempty"`
-	DestructiveHint *bool `json:"destructiveHint,omitempty"`
-	IdempotentHint  *bool `json:"idempotentHint,omitempty"`
-	OpenWorldHint   *bool `json:"openWorldHint,omitempty"`
+	ReadOnlyHint       *bool `json:"readOnlyHint,omitempty"`
+	DestructiveHint    *bool `json:"destructiveHint,omitempty"`
+	IdempotentHint     *bool `json:"idempotentHint,omitempty"`
+	OpenWorldHint      *bool `json:"openWorldHint,omitempty"`
+	MaxResultSizeChars *int  `json:"maxResultSizeChars,omitempty"`
 }

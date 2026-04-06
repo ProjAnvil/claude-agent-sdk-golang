@@ -400,7 +400,7 @@ func TestHandleCanUseTool(t *testing.T) {
 		},
 	}
 
-	response, err := query.handleCanUseTool(request)
+	response, err := query.handleCanUseTool(context.Background(), request)
 	if err != nil {
 		t.Errorf("handleCanUseTool failed: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestHandleCanUseTool(t *testing.T) {
 		"input":     map[string]interface{}{},
 	}
 
-	response, err = query.handleCanUseTool(request)
+	response, err = query.handleCanUseTool(context.Background(), request)
 	if err != nil {
 		t.Errorf("handleCanUseTool failed: %v", err)
 	}
@@ -571,7 +571,7 @@ func TestHandleHookCallback(t *testing.T) {
 		},
 	}
 
-	response, err := query.handleHookCallback(request)
+	response, err := query.handleHookCallback(context.Background(), request)
 	if err != nil {
 		t.Errorf("handleHookCallback failed: %v", err)
 	}
@@ -632,7 +632,7 @@ func TestHandleHookCallbackFields(t *testing.T) {
 		},
 	}
 
-	response, err := query.handleHookCallback(request)
+	response, err := query.handleHookCallback(context.Background(), request)
 	if err != nil {
 		t.Errorf("handleHookCallback failed: %v", err)
 	}
@@ -700,7 +700,7 @@ func TestHandleCanUseToolUpdatedInput(t *testing.T) {
 		},
 	}
 
-	response, err := query.handleCanUseTool(request)
+	response, err := query.handleCanUseTool(context.Background(), request)
 	if err != nil {
 		t.Errorf("handleCanUseTool failed: %v", err)
 	}
@@ -819,5 +819,363 @@ func TestSendControlRequestNonStreaming(t *testing.T) {
 	_, err := query.sendControlRequest(ctx, request)
 	if err == nil {
 		t.Error("Expected error in non-streaming mode, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// control_cancel_request tests (ported from Python SDK v0.1.52 #751)
+// ---------------------------------------------------------------------------
+
+// TestCancelRequestCancelsInflightHook tests that a control_cancel_request
+// message cancels an in-flight hook callback, matching Python test
+// test_cancel_request_cancels_inflight_hook.
+func TestCancelRequestCancelsInflightHook(t *testing.T) {
+	mockTrans := newMockTransport()
+
+	hookStarted := make(chan struct{})
+	hookDone := make(chan error, 1)
+
+	// A slow hook that blocks until its context is cancelled
+	slowHook := func(input HookInput, toolUseID string, ctx HookContext) (HookOutput, error) {
+		close(hookStarted)
+		// Simulate a long-running hook — the caller (handleControlRequest)
+		// doesn't pass the context to the HookCallback signature directly,
+		// but the spawnControlRequestHandler will stop waiting for the
+		// result once the cancel fires by checking ctx.Err() after return.
+		time.Sleep(5 * time.Second)
+		return HookOutput{}, nil
+	}
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+	})
+
+	// Register hook callback
+	callbackID := "cancel_test_hook"
+	query.hookCallbacks[callbackID] = slowHook
+
+	query.Start()
+
+	requestID := "req_cancel_001"
+
+	// Simulate CLI sending a hook_callback control_request
+	go func() {
+		mockTrans.messages <- map[string]interface{}{
+			"type":       "control_request",
+			"request_id": requestID,
+			"request": map[string]interface{}{
+				"subtype":     "hook_callback",
+				"callback_id": callbackID,
+				"tool_use_id": "tool_123",
+				"input": map[string]interface{}{
+					"hook_event_name": "PreToolUse",
+					"tool_name":       "Bash",
+				},
+			},
+		}
+	}()
+
+	// Wait for the hook to be picked up
+	select {
+	case <-hookStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for hook to start")
+	}
+
+	// Verify the request is tracked in inflightRequests
+	query.mu.Lock()
+	_, tracked := query.inflightRequests[requestID]
+	query.mu.Unlock()
+	if !tracked {
+		t.Fatal("Expected request to be tracked in inflightRequests")
+	}
+
+	// Simulate CLI sending control_cancel_request
+	mockTrans.messages <- map[string]interface{}{
+		"type":       "control_cancel_request",
+		"request_id": requestID,
+	}
+
+	// Give a moment for the cancel to propagate
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify the request was removed from inflightRequests
+	query.mu.Lock()
+	_, stillTracked := query.inflightRequests[requestID]
+	query.mu.Unlock()
+	if stillTracked {
+		t.Error("Expected request to be removed from inflightRequests after cancel")
+	}
+
+	select {
+	case err := <-hookDone:
+		if err != nil {
+			t.Errorf("Unexpected hook error: %v", err)
+		}
+	default:
+		// Hook may still be sleeping — that's fine, the important thing
+		// is that inflightRequests was cleaned up and no response is sent
+	}
+
+	// Clean up
+	mockTrans.Close()
+}
+
+// TestCancelRequestForUnknownIDIsNoop tests that cancelling a non-existent
+// request_id is a graceful no-op, matching Python test
+// test_cancel_request_for_unknown_id_is_noop.
+func TestCancelRequestForUnknownIDIsNoop(t *testing.T) {
+	mockTrans := newMockTransport()
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+	})
+
+	query.Start()
+
+	// Send cancel for a request that never existed
+	mockTrans.messages <- map[string]interface{}{
+		"type":       "control_cancel_request",
+		"request_id": "nonexistent_req_999",
+	}
+
+	// Give time for the message to be processed
+	time.Sleep(50 * time.Millisecond)
+
+	// Should not panic or error — verify query is still functional
+	query.mu.Lock()
+	inflightCount := len(query.inflightRequests)
+	query.mu.Unlock()
+
+	if inflightCount != 0 {
+		t.Errorf("Expected 0 inflight requests, got %d", inflightCount)
+	}
+
+	// Clean up
+	mockTrans.Close()
+}
+
+// TestCompletedRequestRemovedFromInflight tests that completed requests are
+// properly removed from inflight tracking, so late cancels become no-ops,
+// matching Python test test_completed_request_is_removed_from_inflight.
+func TestCompletedRequestRemovedFromInflight(t *testing.T) {
+	mockTrans := newMockTransport()
+
+	// A fast hook that returns immediately
+	fastHook := func(input HookInput, toolUseID string, ctx HookContext) (HookOutput, error) {
+		return HookOutput{
+			Decision: "allow",
+		}, nil
+	}
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+	})
+
+	callbackID := "fast_hook"
+	query.hookCallbacks[callbackID] = fastHook
+
+	query.Start()
+
+	requestID := "req_fast_001"
+
+	// Simulate CLI sending a hook_callback control_request
+	mockTrans.messages <- map[string]interface{}{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request": map[string]interface{}{
+			"subtype":     "hook_callback",
+			"callback_id": callbackID,
+			"tool_use_id": "tool_456",
+			"input": map[string]interface{}{
+				"hook_event_name": "PostToolUse",
+				"tool_name":       "Read",
+			},
+		},
+	}
+
+	// Wait for the hook to complete and response to be sent
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify the request was cleaned up from inflightRequests after completion
+	query.mu.Lock()
+	_, stillTracked := query.inflightRequests[requestID]
+	query.mu.Unlock()
+	if stillTracked {
+		t.Error("Expected completed request to be removed from inflightRequests")
+	}
+
+	// Now send a late cancel — should be a no-op
+	mockTrans.messages <- map[string]interface{}{
+		"type":       "control_cancel_request",
+		"request_id": requestID,
+	}
+
+	// Give time for the cancel to be processed
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify no crash or unexpected state
+	query.mu.Lock()
+	inflightCount := len(query.inflightRequests)
+	query.mu.Unlock()
+	if inflightCount != 0 {
+		t.Errorf("Expected 0 inflight requests after late cancel, got %d", inflightCount)
+	}
+
+	// Clean up
+	mockTrans.Close()
+}
+
+// TestCancelRequestPreventsResponse tests that after a cancel, no
+// control_response is sent back to the CLI.
+func TestCancelRequestPreventsResponse(t *testing.T) {
+	mockTrans := newMockTransport()
+
+	hookStarted := make(chan struct{})
+
+	// Hook that blocks until signalled
+	blockingHook := func(input HookInput, toolUseID string, ctx HookContext) (HookOutput, error) {
+		close(hookStarted)
+		// Simulate blocking work for a short time
+		time.Sleep(500 * time.Millisecond)
+		return HookOutput{Decision: "allow"}, nil
+	}
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+	})
+
+	callbackID := "blocking_hook"
+	query.hookCallbacks[callbackID] = blockingHook
+
+	query.Start()
+
+	requestID := "req_noresponse_001"
+
+	// Send hook callback request
+	mockTrans.messages <- map[string]interface{}{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request": map[string]interface{}{
+			"subtype":     "hook_callback",
+			"callback_id": callbackID,
+			"tool_use_id": "tool_789",
+			"input": map[string]interface{}{
+				"hook_event_name": "PreToolUse",
+				"tool_name":       "Write",
+			},
+		},
+	}
+
+	// Wait for hook to start
+	select {
+	case <-hookStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for hook to start")
+	}
+
+	// Cancel the request before the hook completes
+	mockTrans.messages <- map[string]interface{}{
+		"type":       "control_cancel_request",
+		"request_id": requestID,
+	}
+
+	// Wait for the hook to finish and check if a response was sent
+	time.Sleep(1 * time.Second)
+
+	// Check written messages — should NOT contain a control_response for this request
+	written := mockTrans.getWritten()
+	for _, w := range written {
+		var msg map[string]interface{}
+		if err := json.Unmarshal([]byte(w), &msg); err != nil {
+			continue
+		}
+		if msg["type"] == "control_response" {
+			resp, _ := msg["response"].(map[string]interface{})
+			if resp != nil {
+				if respID, _ := resp["request_id"].(string); respID == requestID {
+					t.Error("Expected no control_response for cancelled request, but found one")
+				}
+			}
+		}
+	}
+
+	mockTrans.Close()
+}
+
+// TestHandleCanUseToolWithCancelledContext tests that handleCanUseTool returns
+// early when its context is already cancelled.
+func TestHandleCanUseToolWithCancelledContext(t *testing.T) {
+	mockTrans := newMockTransport()
+
+	callbackInvoked := false
+	canUseTool := func(toolName string, input map[string]interface{}, ctx ToolPermissionContext) (PermissionResult, error) {
+		callbackInvoked = true
+		return &PermissionResultAllow{}, nil
+	}
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+		CanUseTool:      canUseTool,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	request := map[string]interface{}{
+		"tool_name": "some_tool",
+		"input":     map[string]interface{}{},
+	}
+
+	_, err := query.handleCanUseTool(ctx, request)
+	if err == nil {
+		t.Error("Expected error from cancelled context")
+	}
+	if callbackInvoked {
+		t.Error("Callback should not have been invoked with cancelled context")
+	}
+}
+
+// TestHandleHookCallbackWithCancelledContext tests that handleHookCallback
+// returns early when its context is already cancelled.
+func TestHandleHookCallbackWithCancelledContext(t *testing.T) {
+	mockTrans := newMockTransport()
+
+	callbackInvoked := false
+	hookCallback := func(input HookInput, toolUseID string, ctx HookContext) (HookOutput, error) {
+		callbackInvoked = true
+		return HookOutput{}, nil
+	}
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+	})
+
+	callbackID := "cancelled_ctx_hook"
+	query.hookCallbacks[callbackID] = hookCallback
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	request := map[string]interface{}{
+		"callback_id": callbackID,
+		"tool_use_id": "tool_cancelled",
+		"input": map[string]interface{}{
+			"hook_event_name": "PreToolUse",
+		},
+	}
+
+	_, err := query.handleHookCallback(ctx, request)
+	if err == nil {
+		t.Error("Expected error from cancelled context")
+	}
+	if callbackInvoked {
+		t.Error("Callback should not have been invoked with cancelled context")
 	}
 }

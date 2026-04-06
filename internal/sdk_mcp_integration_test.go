@@ -461,3 +461,92 @@ func TestToolAnnotations(t *testing.T) {
 		t.Error("Expected no annotations for plain_tool")
 	}
 }
+
+// TestToolAnnotations_MaxResultSizeChars tests that maxResultSizeChars is
+// forwarded as _meta["anthropic/maxResultSizeChars"] in tools/list responses,
+// bypassing Zod annotation stripping in the CLI (#756).
+func TestToolAnnotations_MaxResultSizeChars(t *testing.T) {
+	tTrue := true
+	maxSize := 100000
+
+	toolWithMax := MCPTool{
+		Name:        "large_output_tool",
+		Description: "Returns large results",
+		Annotations: ToolAnnotations{
+			ReadOnlyHint:       &tTrue,
+			MaxResultSizeChars: &maxSize,
+		},
+	}
+
+	toolWithoutMax := MCPTool{
+		Name:        "normal_tool",
+		Description: "Normal results",
+		Annotations: ToolAnnotations{
+			ReadOnlyHint: &tTrue,
+		},
+	}
+
+	toolNoAnnotations := MCPTool{
+		Name:        "plain",
+		Description: "No annotations at all",
+	}
+
+	server := &MCPServer{
+		Name:  "meta-test",
+		Tools: []MCPTool{toolWithMax, toolWithoutMax, toolNoAnnotations},
+	}
+
+	mt := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       mt,
+		IsStreamingMode: true,
+		SdkMCPServers: map[string]*MCPServer{
+			"meta-test": server,
+		},
+	})
+
+	request := map[string]interface{}{
+		"server_name": "meta-test",
+		"message": map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "tools/list",
+		},
+	}
+
+	response, err := q.handleMCPMessage(request)
+	if err != nil {
+		t.Fatalf("handleMCPMessage failed: %v", err)
+	}
+
+	mcpResp := response["mcp_response"].(map[string]interface{})
+	result := mcpResp["result"].(map[string]interface{})
+	tools := result["tools"].([]map[string]interface{})
+
+	toolsByName := make(map[string]map[string]interface{})
+	for _, tool := range tools {
+		toolsByName[tool["name"].(string)] = tool
+	}
+
+	// Tool with MaxResultSizeChars should have _meta
+	largeTool := toolsByName["large_output_tool"]
+	meta, ok := largeTool["_meta"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected _meta on tool with MaxResultSizeChars")
+	}
+	if meta["anthropic/maxResultSizeChars"] != 100000 {
+		t.Errorf("Expected anthropic/maxResultSizeChars=100000, got %v", meta["anthropic/maxResultSizeChars"])
+	}
+
+	// Tool without MaxResultSizeChars should NOT have _meta
+	normalTool := toolsByName["normal_tool"]
+	if _, ok := normalTool["_meta"]; ok {
+		t.Error("Expected no _meta on tool without MaxResultSizeChars")
+	}
+
+	// Tool with no annotations should NOT have _meta
+	plainTool := toolsByName["plain"]
+	if _, ok := plainTool["_meta"]; ok {
+		t.Error("Expected no _meta on tool with no annotations")
+	}
+}

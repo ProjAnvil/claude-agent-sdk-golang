@@ -470,6 +470,9 @@ type AgentDefinition struct {
 	McpServers      []interface{} `json:"mcpServers,omitempty"`
 	InitialPrompt   string        `json:"initialPrompt,omitempty"`
 	MaxTurns        *int          `json:"maxTurns,omitempty"`
+	Background      *bool          `json:"background,omitempty"`
+	Effort          string         `json:"effort,omitempty"`         // "low", "medium", "high", "max"
+	PermissionMode  PermissionMode `json:"permissionMode,omitempty"` // e.g. PermissionModeDefault
 }
 
 // SandboxSettings configures bash command sandboxing.

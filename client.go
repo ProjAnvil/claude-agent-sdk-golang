@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/ProjAnvil/claude-agent-sdk-golang/internal"
@@ -525,7 +526,10 @@ func (c *ClaudeSDKClient) GetMCPStatus(ctx context.Context) (*McpStatusResponse,
 }
 
 // GetContextUsage returns a breakdown of current context window usage by category.
-func (c *ClaudeSDKClient) GetContextUsage(ctx context.Context) (map[string]interface{}, error) {
+// Returns the same data shown by the `/context` command in the CLI,
+// including token counts per category, total usage, and detailed
+// breakdowns of MCP tools, memory files, and agents.
+func (c *ClaudeSDKClient) GetContextUsage(ctx context.Context) (*ContextUsageResponse, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -533,7 +537,23 @@ func (c *ClaudeSDKClient) GetContextUsage(ctx context.Context) (map[string]inter
 		return nil, NewCLIConnectionError("not connected", nil)
 	}
 
-	return c.query.GetContextUsage(ctx)
+	raw, err := c.query.GetContextUsage(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Marshal raw map back to JSON, then unmarshal into typed struct
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal context usage response: %w", err)
+	}
+
+	var resp ContextUsageResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse context usage response: %w", err)
+	}
+
+	return &resp, nil
 }
 
 // toString is a helper to convert interface{} to string.

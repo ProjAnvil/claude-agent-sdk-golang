@@ -719,21 +719,41 @@ func TestGetContextUsage(t *testing.T) {
 		t.Fatalf("GetContextUsage: %v", err)
 	}
 
-	if usage["model"] != "claude-sonnet-4-5" {
-		t.Errorf("Expected model='claude-sonnet-4-5', got %v", usage["model"])
+	if usage.Model != "claude-sonnet-4-5" {
+		t.Errorf("Expected model='claude-sonnet-4-5', got %v", usage.Model)
 	}
-	if usage["totalTokens"] != float64(98200) {
-		t.Errorf("Expected totalTokens=98200, got %v", usage["totalTokens"])
+	if usage.TotalTokens != 98200 {
+		t.Errorf("Expected totalTokens=98200, got %v", usage.TotalTokens)
 	}
-	if usage["maxTokens"] != float64(155000) {
-		t.Errorf("Expected maxTokens=155000, got %v", usage["maxTokens"])
+	if usage.MaxTokens != 155000 {
+		t.Errorf("Expected maxTokens=155000, got %v", usage.MaxTokens)
 	}
-	if usage["percentage"] != 49.1 {
-		t.Errorf("Expected percentage=49.1, got %v", usage["percentage"])
+	if usage.Percentage != 49.1 {
+		t.Errorf("Expected percentage=49.1, got %v", usage.Percentage)
 	}
-	categories, ok := usage["categories"].([]interface{})
-	if !ok || len(categories) != 2 {
-		t.Fatalf("Expected 2 categories, got %v", usage["categories"])
+	if usage.RawMaxTokens != 200000 {
+		t.Errorf("Expected rawMaxTokens=200000, got %v", usage.RawMaxTokens)
+	}
+	if !usage.IsAutoCompactEnabled {
+		t.Error("Expected isAutoCompactEnabled=true")
+	}
+	if len(usage.Categories) != 2 {
+		t.Fatalf("Expected 2 categories, got %d", len(usage.Categories))
+	}
+	if usage.Categories[0].Name != "System prompt" {
+		t.Errorf("Expected first category name='System prompt', got %v", usage.Categories[0].Name)
+	}
+	if usage.Categories[0].Tokens != 3200 {
+		t.Errorf("Expected first category tokens=3200, got %v", usage.Categories[0].Tokens)
+	}
+	if len(usage.MemoryFiles) != 1 {
+		t.Errorf("Expected 1 memory file, got %d", len(usage.MemoryFiles))
+	}
+	if len(usage.McpTools) != 1 {
+		t.Errorf("Expected 1 MCP tool, got %d", len(usage.McpTools))
+	}
+	if len(usage.Agents) != 1 {
+		t.Errorf("Expected 1 agent, got %d", len(usage.Agents))
 	}
 }
 

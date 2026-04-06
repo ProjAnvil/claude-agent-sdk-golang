@@ -259,8 +259,10 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 }
 
 // streamInput reads messages from the channel and writes them to stdin.
+// NOTE: Does NOT close stdin when the channel is drained. Stdin must remain
+// open so the SDK can write MCP control_response messages back to the CLI.
+// Stdin will be closed when Transport.Close() is called.
 func (t *SubprocessTransport) streamInput(ch chan map[string]interface{}) {
-	defer t.stdin.Close()
 
 	for msg := range ch {
 		data, err := json.Marshal(msg)
@@ -277,7 +279,10 @@ func (t *SubprocessTransport) streamInput(ch chan map[string]interface{}) {
 
 // buildCommand constructs the CLI command with arguments.
 func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
-	args := []string{"--output-format", "stream-json", "--verbose"}
+	// -p "" enables print mode (non-interactive). Claude CLI v2.x requires
+	// --print for --output-format and --input-format flags to take effect;
+	// without it the CLI enters interactive TUI mode.
+	args := []string{"-p", "", "--output-format", "stream-json", "--verbose"}
 
 	// System prompt
 	if t.options.SystemPromptFile != nil && t.options.SystemPromptFile.Path != "" {
@@ -379,11 +384,10 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		args = append(args, "--agents", string(agentsJSON))
 	}
 
-	// Setting sources
-	if t.options.SettingSources != nil {
+	// Setting sources — only pass the flag when there are actual sources;
+	// passing an empty string causes the CLI to misparse subsequent flags (#778).
+	if len(t.options.SettingSources) > 0 {
 		args = append(args, "--setting-sources", strings.Join(t.options.SettingSources, ","))
-	} else {
-		args = append(args, "--setting-sources", "")
 	}
 
 	// Plugins
@@ -537,10 +541,11 @@ func (t *SubprocessTransport) readStdout() {
 		jsonBuffer.Reset()
 
 		t.closeMu.Lock()
-		if !t.closed {
+		closed := t.closed
+		t.closeMu.Unlock()
+		if !closed {
 			t.messages <- data
 		}
-		t.closeMu.Unlock()
 	}
 
 	if err := scanner.Err(); err != nil {

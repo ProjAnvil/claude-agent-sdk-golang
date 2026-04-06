@@ -123,19 +123,25 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 				errs <- wrapTransportError(err)
 				return
 			}
-			// End input to signal no more messages (matching Python SDK)
-			if err := q.EndInput(); err != nil {
-				errs <- wrapTransportError(err)
-				return
-			}
+			// NOTE: Do NOT call EndInput() here. Closing stdin prevents
+			// the SDK from writing MCP control_response messages back to
+			// the CLI when SDK MCP servers are configured. The CLI
+			// processes user messages from stream-json stdin immediately;
+			// it does not require an EOF to begin. Stdin will be closed
+			// when q.Close() is called via defer above.
 		}
 
 		// Read messages
-		// q.RawMessages() gives us raw JSON
+		// q.RawMessages() gives us raw JSON.
+		// All channel sends use select with ctx.Done() to prevent
+		// goroutine leaks when QuerySync returns early on timeout.
 		for {
 			select {
 			case <-ctx.Done():
-				errs <- ctx.Err()
+				select {
+				case errs <- ctx.Err():
+				default:
+				}
 				return
 			case rawMsg, ok := <-q.RawMessages():
 				if !ok {
@@ -145,17 +151,43 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 				msg, err := ParseMessage(rawMsg)
 				if err != nil || msg == nil {
 					if err != nil {
-						errs <- err
+						select {
+						case errs <- err:
+						case <-ctx.Done():
+							return
+						}
 					}
 					continue
 				}
-				messages <- msg
+				select {
+				case messages <- msg:
+				case <-ctx.Done():
+					return
+				}
+
+				// After forwarding a ResultMessage, close stdin so the
+				// CLI process can exit. This breaks the deadlock where
+				// the goroutine waits for rawMessages to close, but
+				// rawMessages only closes when the CLI exits, and the
+				// CLI only exits when stdin closes (via defer q.Close),
+				// which only fires when the goroutine exits.
+				//
+				// EndInput() only closes stdin; the CLI can still flush
+				// remaining output before it exits, so we keep reading
+				// until the channels close naturally.
+				if _, isResult := msg.(*ResultMessage); isResult {
+					q.EndInput()
+				}
 			case err, ok := <-q.Errors():
 				if !ok {
 					// Error channel closed (usually happens when transport closes)
 					goto End
 				}
-				errs <- wrapTransportError(err)
+				select {
+				case errs <- wrapTransportError(err):
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 

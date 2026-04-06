@@ -37,7 +37,6 @@ func TestBuildCommand(t *testing.T) {
 				"--output-format", "stream-json",
 				"--verbose",
 				"--system-prompt", "",
-				"--setting-sources", "",
 				"--input-format", "stream-json",
 			},
 		},
@@ -628,5 +627,59 @@ func TestSystemPromptFileFlag(t *testing.T) {
 	// Should NOT have --system-prompt when --system-prompt-file is set
 	if strings.Contains(args, "--system-prompt \"\"") || strings.Contains(args, "--system-prompt  ") {
 		t.Errorf("Should not have --system-prompt when --system-prompt-file is set: %s", args)
+	}
+}
+
+// TestSettingSourcesOmittedWhenNil tests that --setting-sources is NOT passed
+// when SettingSources is nil (fixing the bug where an empty string was passed,
+// causing the CLI to misparse subsequent flags).
+func TestSettingSourcesOmittedWhenNil(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if strings.Contains(args, "--setting-sources") {
+		t.Errorf("Expected no --setting-sources flag when nil, got: %s", args)
+	}
+}
+
+// TestSettingSourcesOmittedWhenEmpty tests that --setting-sources is NOT passed
+// when SettingSources is an empty slice.
+func TestSettingSourcesOmittedWhenEmpty(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:        "/fake/path/claude",
+		SettingSources: []string{},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if strings.Contains(args, "--setting-sources") {
+		t.Errorf("Expected no --setting-sources flag when empty, got: %s", args)
+	}
+}
+
+// TestSettingSourcesPassedWhenPopulated tests that --setting-sources is passed
+// correctly when SettingSources has values.
+func TestSettingSourcesPassedWhenPopulated(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:        "/fake/path/claude",
+		SettingSources: []string{"local", "project"},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--setting-sources local,project") {
+		t.Errorf("Expected --setting-sources local,project in args: %s", args)
 	}
 }
