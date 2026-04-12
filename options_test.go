@@ -100,6 +100,28 @@ func TestOptionsWithSystemPromptPresetAndAppend(t *testing.T) {
 	}
 }
 
+// TestOptionsWithSystemPromptPresetExcludeDynamicSections tests Options with preset and exclude_dynamic_sections.
+func TestOptionsWithSystemPromptPresetExcludeDynamicSections(t *testing.T) {
+	enabled := true
+	opts := &ClaudeAgentOptions{
+		SystemPromptPreset: &SystemPromptPreset{
+			Type:                   "preset",
+			Preset:                 "claude_code",
+			ExcludeDynamicSections: &enabled,
+		},
+	}
+	if opts.SystemPromptPreset.ExcludeDynamicSections == nil || *opts.SystemPromptPreset.ExcludeDynamicSections != true {
+		t.Errorf("Expected ExcludeDynamicSections=true")
+	}
+}
+
+// TestPermissionModeAuto tests the auto permission mode constant.
+func TestPermissionModeAuto(t *testing.T) {
+	if PermissionModeAuto != "auto" {
+		t.Errorf("Expected PermissionModeAuto='auto', got '%s'", PermissionModeAuto)
+	}
+}
+
 // TestOptionsWithSessionContinuation tests Options with session continuation.
 func TestOptionsWithSessionContinuation(t *testing.T) {
 	opts := &ClaudeAgentOptions{

@@ -19,6 +19,8 @@ const (
 	PermissionModeBypassPermissions PermissionMode = "bypassPermissions"
 	// PermissionModeDontAsk allows all tools without prompting.
 	PermissionModeDontAsk PermissionMode = "dontAsk"
+	// PermissionModeAuto automatically decides tool permissions.
+	PermissionModeAuto PermissionMode = "auto"
 )
 
 // SettingSource specifies which setting sources to load.
@@ -394,9 +396,10 @@ func ParseContentBlocks(rawBlocks []interface{}) ([]ContentBlock, error) {
 
 // SystemPromptPreset represents a system prompt preset configuration.
 type SystemPromptPreset struct {
-	Type   string `json:"type"`   // "preset"
-	Preset string `json:"preset"` // "claude_code"
-	Append string `json:"append,omitempty"`
+	Type                   string `json:"type"`                              // "preset"
+	Preset                 string `json:"preset"`                            // "claude_code"
+	Append                 string `json:"append,omitempty"`
+	ExcludeDynamicSections *bool  `json:"exclude_dynamic_sections,omitempty"` // strip per-user dynamic sections for cross-user prompt caching
 }
 
 // ToolsPreset represents a tools preset configuration.

@@ -14,13 +14,14 @@ import (
 
 // Query handles bidirectional control protocol on top of Transport.
 type Query struct {
-	transport         transport.Transport
-	isStreamingMode   bool
-	canUseTool        CanUseToolFunc
-	hooks             map[string][]HookMatcherInternal
-	sdkMCPServers     map[string]*MCPServer
-	agents            map[string]interface{}
-	initializeTimeout time.Duration
+	transport                transport.Transport
+	isStreamingMode          bool
+	canUseTool               CanUseToolFunc
+	hooks                    map[string][]HookMatcherInternal
+	sdkMCPServers            map[string]*MCPServer
+	agents                   map[string]interface{}
+	initializeTimeout        time.Duration
+	excludeDynamicSections   *bool
 
 	// Control protocol state
 	pendingResponses map[string]chan controlResult
@@ -140,13 +141,14 @@ type controlResult struct {
 
 // QueryConfig configures a Query instance.
 type QueryConfig struct {
-	Transport         transport.Transport
-	IsStreamingMode   bool
-	CanUseTool        CanUseToolFunc
-	Hooks             map[string][]HookMatcherInternal
-	SdkMCPServers     map[string]*MCPServer
-	Agents            map[string]interface{}
-	InitializeTimeout time.Duration
+	Transport                transport.Transport
+	IsStreamingMode          bool
+	CanUseTool               CanUseToolFunc
+	Hooks                    map[string][]HookMatcherInternal
+	SdkMCPServers            map[string]*MCPServer
+	Agents                   map[string]interface{}
+	InitializeTimeout        time.Duration
+	ExcludeDynamicSections   *bool
 }
 
 // NewQuery creates a new Query instance.
@@ -156,13 +158,14 @@ func NewQuery(cfg QueryConfig) *Query {
 	}
 
 	return &Query{
-		transport:         cfg.Transport,
-		isStreamingMode:   cfg.IsStreamingMode,
-		canUseTool:        cfg.CanUseTool,
-		hooks:             cfg.Hooks,
-		sdkMCPServers:     cfg.SdkMCPServers,
-		agents:            cfg.Agents,
-		initializeTimeout: cfg.InitializeTimeout,
+		transport:              cfg.Transport,
+		isStreamingMode:        cfg.IsStreamingMode,
+		canUseTool:             cfg.CanUseTool,
+		hooks:                  cfg.Hooks,
+		sdkMCPServers:          cfg.SdkMCPServers,
+		agents:                 cfg.Agents,
+		initializeTimeout:      cfg.InitializeTimeout,
+		excludeDynamicSections: cfg.ExcludeDynamicSections,
 		pendingResponses:  make(map[string]chan controlResult),
 		hookCallbacks:     make(map[string]HookCallback),
 		inflightRequests:  make(map[string]context.CancelFunc),
@@ -219,6 +222,9 @@ func (q *Query) Initialize(ctx context.Context) (map[string]interface{}, error) 
 	}
 	if q.agents != nil {
 		request["agents"] = q.agents
+	}
+	if q.excludeDynamicSections != nil {
+		request["excludeDynamicSections"] = *q.excludeDynamicSections
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, q.initializeTimeout)

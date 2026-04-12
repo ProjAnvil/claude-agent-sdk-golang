@@ -55,9 +55,10 @@ type SystemPromptFile struct {
 
 // SystemPromptPreset represents a system prompt preset.
 type SystemPromptPreset struct {
-	Type   string
-	Preset string
-	Append string
+	Type                   string
+	Preset                 string
+	Append                 string
+	ExcludeDynamicSections *bool
 }
 
 // ToolsPreset represents a tools preset.

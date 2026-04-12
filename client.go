@@ -193,14 +193,21 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 		}
 	}
 
+	// Extract exclude_dynamic_sections from preset system prompt
+	var excludeDynamicSections *bool
+	if c.options.SystemPromptPreset != nil && c.options.SystemPromptPreset.ExcludeDynamicSections != nil {
+		excludeDynamicSections = c.options.SystemPromptPreset.ExcludeDynamicSections
+	}
+
 	// Create query handler
 	c.query = internal.NewQuery(internal.QueryConfig{
-		Transport:       t,
-		IsStreamingMode: true,
-		CanUseTool:      canUseTool,
-		Hooks:           internalHooks,
-		SdkMCPServers:   sdkServers,
-		Agents:          internalAgents,
+		Transport:              t,
+		IsStreamingMode:        true,
+		CanUseTool:             canUseTool,
+		Hooks:                  internalHooks,
+		SdkMCPServers:          sdkServers,
+		Agents:                 internalAgents,
+		ExcludeDynamicSections: excludeDynamicSections,
 	})
 
 	c.query.Start()

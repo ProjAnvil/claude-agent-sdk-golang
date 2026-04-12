@@ -54,14 +54,32 @@ func TestBuildCommand_Extended(t *testing.T) {
 			expected: []string{"--max-thinking-tokens", "5000"},
 		},
 		{
-			name: "thinking config",
+			name: "thinking config adaptive",
 			opts: &TransportOptions{
 				Thinking: &ThinkingConfig{
-					Type:         "adaptive",
+					Type: "adaptive",
+				},
+			},
+			expected: []string{"--thinking", "adaptive"},
+		},
+		{
+			name: "thinking config enabled",
+			opts: &TransportOptions{
+				Thinking: &ThinkingConfig{
+					Type:         "enabled",
 					BudgetTokens: 10000,
 				},
 			},
-			expected: []string{"--thinking-mode", "adaptive", "--thinking-budget-tokens", "10000"},
+			expected: []string{"--max-thinking-tokens", "10000"},
+		},
+		{
+			name: "thinking config disabled",
+			opts: &TransportOptions{
+				Thinking: &ThinkingConfig{
+					Type: "disabled",
+				},
+			},
+			expected: []string{"--thinking", "disabled"},
 		},
 		{
 			name: "add dirs",

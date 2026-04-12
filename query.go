@@ -329,13 +329,20 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 		}
 	}
 
+	// Extract exclude_dynamic_sections from preset system prompt
+	var excludeDynamicSections *bool
+	if opts.SystemPromptPreset != nil && opts.SystemPromptPreset.ExcludeDynamicSections != nil {
+		excludeDynamicSections = opts.SystemPromptPreset.ExcludeDynamicSections
+	}
+
 	return internal.QueryConfig{
-		Transport:       t,
-		IsStreamingMode: true,
-		CanUseTool:      canUseTool,
-		Hooks:           internalHooks,
-		SdkMCPServers:   sdkServers,
-		Agents:          internalAgents,
+		Transport:              t,
+		IsStreamingMode:        true,
+		CanUseTool:             canUseTool,
+		Hooks:                  internalHooks,
+		SdkMCPServers:          sdkServers,
+		Agents:                 internalAgents,
+		ExcludeDynamicSections: excludeDynamicSections,
 	}, nil
 }
 
@@ -397,9 +404,10 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 
 	if opts.SystemPromptPreset != nil {
 		transportOpts.SystemPromptPreset = &transport.SystemPromptPreset{
-			Type:   opts.SystemPromptPreset.Type,
-			Preset: opts.SystemPromptPreset.Preset,
-			Append: opts.SystemPromptPreset.Append,
+			Type:                   opts.SystemPromptPreset.Type,
+			Preset:                 opts.SystemPromptPreset.Preset,
+			Append:                 opts.SystemPromptPreset.Append,
+			ExcludeDynamicSections: opts.SystemPromptPreset.ExcludeDynamicSections,
 		}
 	}
 
