@@ -60,6 +60,11 @@ func TestOptionsWithPermissionMode(t *testing.T) {
 	if opts.PermissionMode != PermissionModeAcceptEdits {
 		t.Errorf("Expected %v, got %v", PermissionModeAcceptEdits, opts.PermissionMode)
 	}
+
+	opts = &ClaudeAgentOptions{PermissionMode: PermissionModeAuto}
+	if opts.PermissionMode != PermissionModeAuto {
+		t.Errorf("Expected %v, got %v", PermissionModeAuto, opts.PermissionMode)
+	}
 }
 
 // TestOptionsWithSystemPromptString tests Options with system prompt as string.
@@ -97,6 +102,25 @@ func TestOptionsWithSystemPromptPresetAndAppend(t *testing.T) {
 	}
 	if opts.SystemPromptPreset.Append != "Be concise." {
 		t.Errorf("Expected Append='Be concise.'")
+	}
+}
+
+// TestOptionsWithSystemPromptPresetAndExcludeDynamicSections tests Options with
+// preset and exclude_dynamic_sections (v0.1.57).
+func TestOptionsWithSystemPromptPresetAndExcludeDynamicSections(t *testing.T) {
+	trueVal := true
+	opts := &ClaudeAgentOptions{
+		SystemPromptPreset: &SystemPromptPreset{
+			Type:                   "preset",
+			Preset:                 "claude_code",
+			ExcludeDynamicSections: &trueVal,
+		},
+	}
+	if opts.SystemPromptPreset.ExcludeDynamicSections == nil {
+		t.Fatal("Expected ExcludeDynamicSections to be non-nil")
+	}
+	if *opts.SystemPromptPreset.ExcludeDynamicSections != true {
+		t.Errorf("Expected ExcludeDynamicSections=true, got %v", *opts.SystemPromptPreset.ExcludeDynamicSections)
 	}
 }
 

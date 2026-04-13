@@ -663,8 +663,9 @@ func TestPermissionModeAllConstants(t *testing.T) {
 		PermissionModeDontAsk,
 		PermissionModePlan,
 		PermissionModeBypassPermissions,
+		PermissionModeAuto,
 	}
-	expected := []string{"default", "acceptEdits", "dontAsk", "plan", "bypassPermissions"}
+	expected := []string{"default", "acceptEdits", "dontAsk", "plan", "bypassPermissions", "auto"}
 	for i, m := range modes {
 		if string(m) != expected[i] {
 			t.Errorf("PermissionMode %d: expected %q, got %q", i, expected[i], m)

@@ -19,6 +19,8 @@ const (
 	PermissionModeBypassPermissions PermissionMode = "bypassPermissions"
 	// PermissionModeDontAsk allows all tools without prompting.
 	PermissionModeDontAsk PermissionMode = "dontAsk"
+        // PermissionModeAuto lets the CLI decide the appropriate permission mode.
+        PermissionModeAuto PermissionMode = "auto"
 )
 
 // SettingSource specifies which setting sources to load.
@@ -397,6 +399,17 @@ type SystemPromptPreset struct {
 	Type   string `json:"type"`   // "preset"
 	Preset string `json:"preset"` // "claude_code"
 	Append string `json:"append,omitempty"`
+        // ExcludeDynamicSections strips per-user dynamic sections (working directory,
+        // auto-memory, git status) from the system prompt so it stays static and
+        // cacheable across users. The stripped content is re-injected into the first
+        // user message so the model still has access to it.
+        //
+        // Use this when many users share the same preset system prompt and you
+        // want the prompt-caching prefix to hit cross-user.
+        //
+        // Requires a Claude Code CLI version that supports this option; older
+        // CLIs silently ignore it.
+        ExcludeDynamicSections *bool `json:"excludeDynamicSections,omitempty"`
 }
 
 // ToolsPreset represents a tools preset configuration.

@@ -172,6 +172,132 @@ func TestQueryInitializeNonStreaming(t *testing.T) {
 	}
 }
 
+// TestQueryInitializeSendsExcludeDynamicSections tests that excludeDynamicSections
+// is included in the initialize request when configured (v0.1.57).
+func TestQueryInitializeSendsExcludeDynamicSections(t *testing.T) {
+	mockTrans := newMockTransport()
+	trueVal := true
+
+	query := NewQuery(QueryConfig{
+		Transport:              mockTrans,
+		IsStreamingMode:        true,
+		ExcludeDynamicSections: &trueVal,
+	})
+
+	query.Start()
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		written := mockTrans.getWritten()
+		if len(written) > 0 {
+			var req map[string]interface{}
+			json.Unmarshal([]byte(written[0]), &req)
+			if reqID, ok := req["request_id"].(string); ok {
+				mockTrans.messages <- map[string]interface{}{
+					"type": "control_response",
+					"response": map[string]interface{}{
+						"subtype":    "success",
+						"request_id": reqID,
+						"response": map[string]interface{}{
+							"status": "initialized",
+						},
+					},
+				}
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	_, err := query.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+
+	written := mockTrans.getWritten()
+	if len(written) == 0 {
+		t.Fatal("Expected a written message")
+	}
+
+	var req map[string]interface{}
+	if err := json.Unmarshal([]byte(written[0]), &req); err != nil {
+		t.Fatalf("Failed to parse written message: %v", err)
+	}
+
+	// The control request is wrapped: {"type":"control_request","request_id":"...","request":{...}}
+	inner, ok := req["request"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected request wrapper, got: %v", req)
+	}
+	if inner["subtype"] != "initialize" {
+		t.Errorf("Expected subtype=initialize, got %v", inner["subtype"])
+	}
+	if val, ok := inner["excludeDynamicSections"]; !ok || val != true {
+		t.Errorf("Expected excludeDynamicSections=true in initialize request, got %v (ok=%v)", val, ok)
+	}
+}
+
+// TestQueryInitializeOmitsExcludeDynamicSectionsWhenUnset tests that
+// excludeDynamicSections is absent when not configured (v0.1.57).
+func TestQueryInitializeOmitsExcludeDynamicSectionsWhenUnset(t *testing.T) {
+	mockTrans := newMockTransport()
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+	})
+
+	query.Start()
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		written := mockTrans.getWritten()
+		if len(written) > 0 {
+			var req map[string]interface{}
+			json.Unmarshal([]byte(written[0]), &req)
+			if reqID, ok := req["request_id"].(string); ok {
+				mockTrans.messages <- map[string]interface{}{
+					"type": "control_response",
+					"response": map[string]interface{}{
+						"subtype":    "success",
+						"request_id": reqID,
+						"response": map[string]interface{}{
+							"status": "initialized",
+						},
+					},
+				}
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	_, err := query.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+
+	written := mockTrans.getWritten()
+	if len(written) == 0 {
+		t.Fatal("Expected a written message")
+	}
+
+	var req map[string]interface{}
+	if err := json.Unmarshal([]byte(written[0]), &req); err != nil {
+		t.Fatalf("Failed to parse written message: %v", err)
+	}
+
+	inner, ok := req["request"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected request wrapper, got: %v", req)
+	}
+	if _, ok := inner["excludeDynamicSections"]; ok {
+		t.Errorf("Expected excludeDynamicSections to be absent in initialize request, but it was present")
+	}
+}
+
 // TestQueryWrite tests writing to transport.
 func TestQueryWrite(t *testing.T) {
 	mockTrans := newMockTransport()

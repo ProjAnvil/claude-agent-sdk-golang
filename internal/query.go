@@ -20,6 +20,7 @@ type Query struct {
 	hooks             map[string][]HookMatcherInternal
 	sdkMCPServers     map[string]*MCPServer
 	agents            map[string]interface{}
+	excludeDynamicSections *bool
 	initializeTimeout time.Duration
 
 	// Control protocol state
@@ -144,9 +145,10 @@ type QueryConfig struct {
 	IsStreamingMode   bool
 	CanUseTool        CanUseToolFunc
 	Hooks             map[string][]HookMatcherInternal
-	SdkMCPServers     map[string]*MCPServer
-	Agents            map[string]interface{}
-	InitializeTimeout time.Duration
+	SdkMCPServers          map[string]*MCPServer
+	Agents                 map[string]interface{}
+	ExcludeDynamicSections *bool
+	InitializeTimeout      time.Duration
 }
 
 // NewQuery creates a new Query instance.
@@ -162,6 +164,7 @@ func NewQuery(cfg QueryConfig) *Query {
 		hooks:             cfg.Hooks,
 		sdkMCPServers:     cfg.SdkMCPServers,
 		agents:            cfg.Agents,
+		excludeDynamicSections: cfg.ExcludeDynamicSections,
 		initializeTimeout: cfg.InitializeTimeout,
 		pendingResponses:  make(map[string]chan controlResult),
 		hookCallbacks:     make(map[string]HookCallback),
@@ -219,6 +222,9 @@ func (q *Query) Initialize(ctx context.Context) (map[string]interface{}, error) 
 	}
 	if q.agents != nil {
 		request["agents"] = q.agents
+	}
+	if q.excludeDynamicSections != nil {
+		request["excludeDynamicSections"] = *q.excludeDynamicSections
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, q.initializeTimeout)

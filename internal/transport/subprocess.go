@@ -406,13 +406,16 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		}
 	}
 
-	// Thinking
-	if t.options.Thinking != nil {
-		if t.options.Thinking.Type != "" {
-			args = append(args, "--thinking-mode", t.options.Thinking.Type)
-		}
-		if t.options.Thinking.BudgetTokens > 0 {
-			args = append(args, "--thinking-budget-tokens", strconv.Itoa(t.options.Thinking.BudgetTokens))
+// Resolve thinking config -> --thinking / --max-thinking-tokens
+        // `thinking` takes precedence over the deprecated `max_thinking_tokens`
+        if t.options.Thinking != nil {
+                switch t.options.Thinking.Type {
+                case "adaptive":
+                        args = append(args, "--thinking", "adaptive")
+                case "enabled":
+                        args = append(args, "--max-thinking-tokens", strconv.Itoa(t.options.Thinking.BudgetTokens))
+                case "disabled":
+                        args = append(args, "--thinking", "disabled")
 		}
 	} else if t.options.MaxThinkingTokens > 0 {
 		// Fallback for deprecated option

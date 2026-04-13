@@ -54,14 +54,35 @@ func TestBuildCommand_Extended(t *testing.T) {
 			expected: []string{"--max-thinking-tokens", "5000"},
 		},
 		{
-			name: "thinking config",
+			name: "thinking config adaptive",
 			opts: &TransportOptions{
 				Thinking: &ThinkingConfig{
-					Type:         "adaptive",
-					BudgetTokens: 10000,
+					Type: "adaptive",
 				},
 			},
-			expected: []string{"--thinking-mode", "adaptive", "--thinking-budget-tokens", "10000"},
+			expected: []string{"--thinking", "adaptive"},
+			missing:  []string{"--max-thinking-tokens", "--thinking-mode", "--thinking-budget-tokens"},
+		},
+		{
+			name: "thinking config enabled",
+			opts: &TransportOptions{
+				Thinking: &ThinkingConfig{
+					Type:         "enabled",
+					BudgetTokens: 5000,
+				},
+			},
+			expected: []string{"--max-thinking-tokens", "5000"},
+			missing:  []string{"--thinking"},
+		},
+		{
+			name: "thinking config disabled",
+			opts: &TransportOptions{
+				Thinking: &ThinkingConfig{
+					Type: "disabled",
+				},
+			},
+			expected: []string{"--thinking", "disabled"},
+			missing:  []string{"--max-thinking-tokens"},
 		},
 		{
 			name: "add dirs",
@@ -139,6 +160,29 @@ func TestBuildCommand_Extended(t *testing.T) {
 }
 
 // TestBuildCommand_Sandbox tests sandbox options.
+// TestBuildCommand_ThinkingPrecedence tests that thinking takes precedence over max_thinking_tokens.
+func TestBuildCommand_ThinkingPrecedence(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		Thinking: &ThinkingConfig{
+			Type: "adaptive",
+		},
+		MaxThinkingTokens: 9999,
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+	args := strings.Join(cmd.Args[1:], " ")
+
+	if !strings.Contains(args, "--thinking adaptive") {
+		t.Errorf("Expected --thinking adaptive in args: %s", args)
+	}
+	if strings.Contains(args, "--max-thinking-tokens") {
+		t.Errorf("Expected --max-thinking-tokens to be absent when thinking is set: %s", args)
+	}
+}
+
 func TestBuildCommand_Sandbox(t *testing.T) {
 	sandbox := &SandboxSettings{
 		Enabled:                  true,

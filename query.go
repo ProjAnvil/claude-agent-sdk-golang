@@ -330,13 +330,14 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 	}
 
 	return internal.QueryConfig{
-		Transport:       t,
-		IsStreamingMode: true,
-		CanUseTool:      canUseTool,
-		Hooks:           internalHooks,
-		SdkMCPServers:   sdkServers,
-		Agents:          internalAgents,
-	}, nil
+                Transport:              t,
+                IsStreamingMode:        true,
+                CanUseTool:             canUseTool,
+                Hooks:                  internalHooks,
+                SdkMCPServers:          sdkServers,
+                Agents:                 internalAgents,
+                ExcludeDynamicSections: excludeDynamicSectionsFromOpts(opts),
+        }, nil
 }
 
 // convertToTransportOptions converts ClaudeAgentOptions to TransportOptions.
@@ -503,4 +504,12 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 	}
 
 	return transportOpts
+}
+// excludeDynamicSectionsFromOpts extracts ExcludeDynamicSections from a
+// SystemPromptPreset option, mirroring the Python SDK's client.py logic.
+func excludeDynamicSectionsFromOpts(opts *ClaudeAgentOptions) *bool {
+        if opts.SystemPromptPreset != nil && opts.SystemPromptPreset.ExcludeDynamicSections != nil {
+                return opts.SystemPromptPreset.ExcludeDynamicSections
+        }
+        return nil
 }
