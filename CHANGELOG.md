@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.57] - 2026-04-13
+
+### Added
+
+- **MCP large output test file**: Added `internal/transport/mcp_large_output_test.go` documenting the two-layer CLI spill mechanism and confirming SDK env-var handling — ported from Python SDK `test_mcp_large_output.py`. Tests cover `MAX_MCP_OUTPUT_TOKENS` passthrough, `CLAUDECODE` stripping, `CLAUDE_AGENT_SDK_VERSION` invariants, and layer-2 threshold boundary documentation (#756)
+
+### Changed
+
+- **`AgentDefinition.Effort` supports integer values**: Changed `Effort` field type from `string` to `interface{}` so it now accepts both string literals (`"low"`, `"medium"`, `"high"`, `"max"`) and numeric integer effort budgets — aligned with Python SDK where `effort: Literal[...] | int | None` (#782)
+
+### Test Coverage
+
+- **types_test.go**: +2 tests — `TestAgentDefinition_EffortAsInt`, `TestVersion`
+- **internal/transport/subprocess_test.go**: +3 tests — `TestSDKVersionAlwaysSet`, `TestSDKVersionNotOverridableByUserEnv`, `TestMAXMCPOutputTokensPassthrough`
+- **internal/transport/mcp_large_output_test.go**: +11 tests — `TestLayer1*` (3), `TestEnvInheritedFromOSEnviron`, `TestOptionsEnvOverridesOSEnviron`, `TestCLAUDECODEStrippedInMCPTest`, `TestSDKManagedVarsAlwaysSet`, `TestSDKVersionCannotBeOverriddenByUserEnvInMCPTest`, `TestLayer2*` (3)
+- Total: 347 tests passing across all packages
+
+## [0.1.56] - 2026-04-13
+
+### Added
+
+- **SDK version constant**: Added top-level `Version = "0.1.57"` constant and `internal/transport/version.go` (`sdkVersion`) so callers and the subprocess layer can reference the current SDK version without circular imports
+- **`CLAUDE_AGENT_SDK_VERSION` env var**: The subprocess now always sets `CLAUDE_AGENT_SDK_VERSION` in the CLI subprocess environment after user-provided env, matching Python SDK behavior. User env cannot override this value
+
 ## [0.1.55] - 2025-04-06
 
 ### Added

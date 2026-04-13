@@ -1082,3 +1082,32 @@ func TestAgentDefinition_AllNewFieldsCombined(t *testing.T) {
 		t.Errorf("Expected maxTurns=5, got %v", m["maxTurns"])
 	}
 }
+
+// TestAgentDefinition_EffortAsInt tests that AgentDefinition.Effort accepts
+// integer values in addition to string literals — ported from Python SDK
+// where effort: Literal["low","medium","high","max"] | int | None.
+func TestAgentDefinition_EffortAsInt(t *testing.T) {
+	agent := AgentDefinition{
+		Description: "numeric effort agent",
+		Prompt:      "Think with numeric budget",
+		Effort:      1000,
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if m["effort"] != float64(1000) {
+		t.Errorf("Expected effort=1000 (numeric), got %v", m["effort"])
+	}
+}
+
+// TestVersion tests that the SDK version constant is defined.
+func TestVersion(t *testing.T) {
+	if Version == "" {
+		t.Error("Version constant must not be empty")
+	}
+	// Verify it matches semver-like pattern
+	if len(Version) < 5 {
+		t.Errorf("Version %q too short to be a valid semver", Version)
+	}
+}

@@ -471,7 +471,7 @@ type AgentDefinition struct {
 	InitialPrompt   string        `json:"initialPrompt,omitempty"`
 	MaxTurns        *int          `json:"maxTurns,omitempty"`
 	Background      *bool          `json:"background,omitempty"`
-	Effort          string         `json:"effort,omitempty"`         // "low", "medium", "high", "max"
+	Effort          interface{}    `json:"effort,omitempty"`         // "low", "medium", "high", "max", or int
 	PermissionMode  PermissionMode `json:"permissionMode,omitempty"` // e.g. PermissionModeDefault
 }
 

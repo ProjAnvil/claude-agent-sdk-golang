@@ -465,6 +465,9 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	if t.options.EnableFileCheckpointing {
 		env = append(env, "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true")
 	}
+	// CLAUDE_AGENT_SDK_VERSION is always set by the SDK and cannot be
+	// overridden by user-provided env (matches Python SDK behavior).
+	env = append(env, fmt.Sprintf("CLAUDE_AGENT_SDK_VERSION=%s", sdkVersion))
 
 	cmd.Env = env
 

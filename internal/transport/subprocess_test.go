@@ -683,3 +683,78 @@ func TestSettingSourcesPassedWhenPopulated(t *testing.T) {
 		t.Errorf("Expected --setting-sources local,project in args: %s", args)
 	}
 }
+
+// TestSDKVersionAlwaysSet tests that CLAUDE_AGENT_SDK_VERSION is always set
+// in the subprocess environment and cannot be overridden by user-provided env —
+// matching Python SDK behavior (#756).
+func TestSDKVersionAlwaysSet(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+
+	var found string
+	for _, env := range cmd.Env {
+		if strings.HasPrefix(env, "CLAUDE_AGENT_SDK_VERSION=") {
+			found = strings.TrimPrefix(env, "CLAUDE_AGENT_SDK_VERSION=")
+		}
+	}
+
+	if found == "" {
+		t.Error("CLAUDE_AGENT_SDK_VERSION must always be set in subprocess env")
+	}
+	if found != sdkVersion {
+		t.Errorf("CLAUDE_AGENT_SDK_VERSION=%q, want %q", found, sdkVersion)
+	}
+}
+
+// TestSDKVersionNotOverridableByUserEnv tests that user-provided env cannot
+// override the SDK version — CLAUDE_AGENT_SDK_VERSION is always the SDK's own
+// value, matching Python SDK behavior (test_options_env_cannot_override_sdk_version).
+func TestSDKVersionNotOverridableByUserEnv(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+		Env:     map[string]string{"CLAUDE_AGENT_SDK_VERSION": "0.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+
+	var lastValue string
+	for _, env := range cmd.Env {
+		if strings.HasPrefix(env, "CLAUDE_AGENT_SDK_VERSION=") {
+			lastValue = strings.TrimPrefix(env, "CLAUDE_AGENT_SDK_VERSION=")
+		}
+	}
+
+	if lastValue != sdkVersion {
+		t.Errorf("User env should not override CLAUDE_AGENT_SDK_VERSION: got %q, want %q", lastValue, sdkVersion)
+	}
+}
+
+// TestMAXMCPOutputTokensPassthrough tests that MAX_MCP_OUTPUT_TOKENS set in
+// options.Env is passed through to the CLI subprocess (layer-1 threshold).
+func TestMAXMCPOutputTokensPassthrough(t *testing.T) {
+	transport, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+		Env:     map[string]string{"MAX_MCP_OUTPUT_TOKENS": "500000"},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+
+	for _, env := range cmd.Env {
+		if env == "MAX_MCP_OUTPUT_TOKENS=500000" {
+			return // pass
+		}
+	}
+	t.Error("MAX_MCP_OUTPUT_TOKENS was not passed to the CLI subprocess")
+}
