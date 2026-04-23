@@ -1305,3 +1305,242 @@ func TestHandleHookCallbackWithCancelledContext(t *testing.T) {
 		t.Error("Callback should not have been invoked with cancelled context")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests for Skills and transcript_mirror — added in v0.1.65
+// ---------------------------------------------------------------------------
+
+// mockMirrorBatcher is a test double for TranscriptMirrorBatcher.
+type mockMirrorBatcher struct {
+	enqueued []string
+	flushed  int
+	closed   int
+	mu       sync.Mutex
+}
+
+func (m *mockMirrorBatcher) Enqueue(filePath string, entries []map[string]interface{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.enqueued = append(m.enqueued, filePath)
+}
+
+func (m *mockMirrorBatcher) Flush(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.flushed++
+	return nil
+}
+
+func (m *mockMirrorBatcher) Close(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closed++
+	return nil
+}
+
+// sendInitializeResponse is a helper that reads the first control_request
+// (Initialize) from transport.written and replies with a success response.
+func sendInitializeResponse(t *testing.T, mockTrans *mockTransport) {
+	t.Helper()
+	go func() {
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+			written := mockTrans.getWritten()
+			if len(written) == 0 {
+				continue
+			}
+			var req map[string]interface{}
+			if err := json.Unmarshal([]byte(written[0]), &req); err != nil {
+				continue
+			}
+			reqID, _ := req["request_id"].(string)
+			if reqID == "" {
+				continue
+			}
+			mockTrans.messages <- map[string]interface{}{
+				"type": "control_response",
+				"response": map[string]interface{}{
+					"subtype":    "success",
+					"request_id": reqID,
+					"response":   map[string]interface{}{"status": "initialized"},
+				},
+			}
+			return
+		}
+	}()
+}
+
+// TestInitializeSendsSkillsListWhenSlice verifies that when Skills is a []string,
+// the "skills" field is included in the initialize request body.
+func TestInitializeSendsSkillsListWhenSlice(t *testing.T) {
+	mockTrans := newMockTransport()
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+		Skills:          []string{"skill-a", "skill-b"},
+	})
+	query.Start()
+	sendInitializeResponse(t, mockTrans)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := query.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+
+	written := mockTrans.getWritten()
+	if len(written) == 0 {
+		t.Fatal("No messages written")
+	}
+
+	var wrapper map[string]interface{}
+	if err := json.Unmarshal([]byte(written[0]), &wrapper); err != nil {
+		t.Fatalf("Parse wrapper: %v", err)
+	}
+	inner, ok := wrapper["request"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected request wrapper, got: %v", wrapper)
+	}
+
+	skillsRaw, found := inner["skills"]
+	if !found {
+		t.Fatalf("Expected 'skills' in initialize request inner body, got keys: %v", inner)
+	}
+	skills, ok := skillsRaw.([]interface{})
+	if !ok {
+		t.Fatalf("Expected skills to be []interface{}, got %T", skillsRaw)
+	}
+	if len(skills) != 2 {
+		t.Errorf("Expected 2 skills, got %d: %v", len(skills), skills)
+	}
+}
+
+// TestInitializeOmitsSkillsForNil verifies that nil Skills omits the "skills"
+// field from the initialize request.
+func TestInitializeOmitsSkillsForNil(t *testing.T) {
+	mockTrans := newMockTransport()
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+		Skills:          nil,
+	})
+	query.Start()
+	sendInitializeResponse(t, mockTrans)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := query.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+
+	written := mockTrans.getWritten()
+	if len(written) == 0 {
+		t.Fatal("No messages written")
+	}
+
+	var wrapper map[string]interface{}
+	json.Unmarshal([]byte(written[0]), &wrapper) //nolint:errcheck
+	inner, _ := wrapper["request"].(map[string]interface{})
+	if _, found := inner["skills"]; found {
+		t.Error("Did not expect 'skills' in initialize request when Skills is nil")
+	}
+}
+
+// TestInitializeOmitsSkillsForAll verifies that Skills="all" omits the "skills"
+// field from the initialize request (transport handles it via --allowedTools).
+func TestInitializeOmitsSkillsForAll(t *testing.T) {
+	mockTrans := newMockTransport()
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+		Skills:          "all",
+	})
+	query.Start()
+	sendInitializeResponse(t, mockTrans)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := query.Initialize(ctx)
+	if err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+
+	written := mockTrans.getWritten()
+	if len(written) == 0 {
+		t.Fatal("No messages written")
+	}
+
+	var wrapper map[string]interface{}
+	json.Unmarshal([]byte(written[0]), &wrapper) //nolint:errcheck
+	inner, _ := wrapper["request"].(map[string]interface{})
+	if _, found := inner["skills"]; found {
+		t.Error("Did not expect 'skills' in initialize request when Skills=\"all\"")
+	}
+}
+
+// TestTranscriptMirrorFramePeeled verifies that a transcript_mirror frame is
+// forwarded to the MirrorBatcher and NOT surfaced to callers via RawMessages.
+func TestTranscriptMirrorFramePeeled(t *testing.T) {
+	mockTrans := newMockTransport()
+	batcher := &mockMirrorBatcher{}
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+		MirrorBatcher:   batcher,
+	})
+	query.Start()
+
+	// Send a transcript_mirror frame (with non-empty entries) followed by a
+	// regular assistant message so we have something to drain from rawMessages.
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mockTrans.messages <- map[string]interface{}{
+			"type":      "transcript_mirror",
+			"file_path": "/some/session.jsonl",
+			"entries": []interface{}{
+				map[string]interface{}{"type": "user"},
+			},
+		}
+		mockTrans.messages <- map[string]interface{}{
+			"type":    "assistant",
+			"content": "hello",
+		}
+		mockTrans.Close()
+	}()
+
+	// Drain rawMessages; transcript_mirror must NOT appear.
+	var received []map[string]interface{}
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case msg, ok := <-query.RawMessages():
+			if !ok {
+				goto done
+			}
+			received = append(received, msg)
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+	for _, m := range received {
+		if m["type"] == "transcript_mirror" {
+			t.Error("transcript_mirror frame should have been peeled off and not returned to caller")
+		}
+	}
+
+	// Batcher must have been called with the file_path.
+	batcher.mu.Lock()
+	enqueued := append([]string(nil), batcher.enqueued...)
+	batcher.mu.Unlock()
+	if len(enqueued) == 0 {
+		t.Error("Expected MirrorBatcher.Enqueue to be called for transcript_mirror frame")
+	}
+}

@@ -330,14 +330,15 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 	}
 
 	return internal.QueryConfig{
-                Transport:              t,
-                IsStreamingMode:        true,
-                CanUseTool:             canUseTool,
-                Hooks:                  internalHooks,
-                SdkMCPServers:          sdkServers,
-                Agents:                 internalAgents,
-                ExcludeDynamicSections: excludeDynamicSectionsFromOpts(opts),
-        }, nil
+		Transport:              t,
+		IsStreamingMode:        true,
+		CanUseTool:             canUseTool,
+		Hooks:                  internalHooks,
+		SdkMCPServers:          sdkServers,
+		Agents:                 internalAgents,
+		ExcludeDynamicSections: excludeDynamicSectionsFromOpts(opts),
+		Skills:                 opts.Skills,
+	}, nil
 }
 
 // convertToTransportOptions converts ClaudeAgentOptions to TransportOptions.
@@ -474,7 +475,18 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 		transportOpts.Thinking = &transport.ThinkingConfig{
 			Type:         opts.Thinking.Type,
 			BudgetTokens: opts.Thinking.BudgetTokens,
+			Display:      opts.Thinking.Display,
 		}
+	}
+
+	// Skills: pass as-is (string or []string).
+	if opts.Skills != nil {
+		transportOpts.Skills = opts.Skills
+	}
+
+	// SessionStore: pass as interface{} to avoid circular import.
+	if opts.SessionStore != nil {
+		transportOpts.SessionStore = opts.SessionStore
 	}
 
 	// Convert Sandbox
@@ -505,11 +517,12 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 
 	return transportOpts
 }
+
 // excludeDynamicSectionsFromOpts extracts ExcludeDynamicSections from a
 // SystemPromptPreset option, mirroring the Python SDK's client.py logic.
 func excludeDynamicSectionsFromOpts(opts *ClaudeAgentOptions) *bool {
-        if opts.SystemPromptPreset != nil && opts.SystemPromptPreset.ExcludeDynamicSections != nil {
-                return opts.SystemPromptPreset.ExcludeDynamicSections
-        }
-        return nil
+	if opts.SystemPromptPreset != nil && opts.SystemPromptPreset.ExcludeDynamicSections != nil {
+		return opts.SystemPromptPreset.ExcludeDynamicSections
+	}
+	return nil
 }

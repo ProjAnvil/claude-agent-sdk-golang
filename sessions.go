@@ -1,7 +1,9 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -1157,4 +1160,807 @@ func toSessionMessages(entries []transcriptEntry) []SessionMessage {
 		result = append(result, msg)
 	}
 	return result
+}
+
+// resolveSubagentsDir returns the subagents directory for a session.
+// The subagent transcripts live at <sessionDir>/<sessionID>/  (e.g.
+// ~/.claude/projects/<projectKey>/<sessionID>/agent-<agentID>.jsonl).
+// Returns empty string when the directory cannot be resolved.
+func resolveSubagentsDir(sessionID string, directory *string) string {
+	var dir string
+	if directory != nil {
+		dir = *directory
+	}
+	filePath := ""
+	if dir != "" {
+		canon, err := canonicalizePath(dir)
+		if err == nil {
+			if pd, err := findProjectDir(canon); err == nil {
+				filePath = filepath.Join(pd, sessionID+".jsonl")
+				if _, statErr := os.Stat(filePath); statErr != nil {
+					filePath = ""
+				}
+				if filePath != "" {
+					return filepath.Join(pd, sessionID)
+				}
+			}
+		}
+	} else {
+		// Search all project directories.
+		projectsDir, err := getProjectsDir()
+		if err == nil {
+			entries, _ := os.ReadDir(projectsDir)
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				candidate := filepath.Join(projectsDir, e.Name(), sessionID+".jsonl")
+				if _, statErr := os.Stat(candidate); statErr == nil {
+					return filepath.Join(projectsDir, e.Name(), sessionID)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// ListSubagentsOptions contains options for listing subagents.
+type ListSubagentsOptions struct {
+	// SessionID is the UUID of the parent session.
+	SessionID string
+	// Directory is the project directory path. When omitted, all project directories are searched.
+	Directory *string
+}
+
+// ListSubagents returns the agent IDs of subagents that ran under a session.
+// Subagent transcripts are stored as agent-<agentID>.jsonl files in the
+// sibling directory <projectDir>/<sessionID>/.
+func ListSubagents(opts *ListSubagentsOptions) ([]string, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("options cannot be nil")
+	}
+	if !validateUUID(opts.SessionID) {
+		return nil, fmt.Errorf("invalid session_id: %s", opts.SessionID)
+	}
+
+	subDir := resolveSubagentsDir(opts.SessionID, opts.Directory)
+	if subDir == "" {
+		return []string{}, nil
+	}
+
+	entries, err := os.ReadDir(subDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+
+	agentPattern := regexp.MustCompile(`^agent-(.+)\.jsonl$`)
+	var ids []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		m := agentPattern.FindStringSubmatch(entry.Name())
+		if m != nil {
+			ids = append(ids, m[1])
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// GetSubagentMessagesOptions contains options for reading subagent messages.
+type GetSubagentMessagesOptions struct {
+	// SessionID is the UUID of the parent session.
+	SessionID string
+	// AgentID is the agent ID returned by ListSubagents.
+	AgentID string
+	// Directory is the project directory path. When omitted, all project directories are searched.
+	Directory *string
+	// Maximum number of messages to return.
+	Limit *int
+	// Number of messages to skip from the start.
+	Offset int
+}
+
+// GetSubagentMessages reads messages from a subagent transcript.
+func GetSubagentMessages(opts *GetSubagentMessagesOptions) ([]SessionMessage, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("options cannot be nil")
+	}
+	if !validateUUID(opts.SessionID) {
+		return nil, fmt.Errorf("invalid session_id: %s", opts.SessionID)
+	}
+	if opts.AgentID == "" {
+		return nil, fmt.Errorf("agent_id must be non-empty")
+	}
+
+	subDir := resolveSubagentsDir(opts.SessionID, opts.Directory)
+	if subDir == "" {
+		return nil, fmt.Errorf("session %s not found", opts.SessionID)
+	}
+
+	filePath := filepath.Join(subDir, "agent-"+opts.AgentID+".jsonl")
+	contentBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("subagent %s not found in session %s", opts.AgentID, opts.SessionID)
+		}
+		return nil, err
+	}
+
+	content := string(contentBytes)
+	if content == "" {
+		return []SessionMessage{}, nil
+	}
+
+	entries := parseTranscriptEntries(content)
+	chain := buildConversationChain(entries)
+	visible := filterVisibleMessages(chain)
+	messages := toSessionMessages(visible)
+
+	offset := opts.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(messages) {
+		return []SessionMessage{}, nil
+	}
+
+	if opts.Limit != nil && *opts.Limit > 0 {
+		end := offset + *opts.Limit
+		if end > len(messages) {
+			end = len(messages)
+		}
+		return messages[offset:end], nil
+	}
+	return messages[offset:], nil
+}
+
+// ---------------------------------------------------------------------------
+// Store-backed listing helpers
+// ---------------------------------------------------------------------------
+
+// storeListLoadConcurrency is the maximum number of concurrent SessionStore.Load
+// calls when deriving SDKSessionInfo from a store listing (one per session).
+const storeListLoadConcurrency = 16
+
+// entriesToJSONL serializes a slice of SessionStoreEntry values to a newline-
+// delimited JSON string, matching the on-disk JSONL format.
+func entriesToJSONL(entries []SessionStoreEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, e := range entries {
+		b, err := json.Marshal(e)
+		if err == nil {
+			sb.Write(b)
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
+}
+
+// mtimeFromJSONLTail derives a synthetic mtime (Unix milliseconds) from the
+// last valid JSON object's timestamp field in a JSONL string.  Falls back to
+// the current time if none is found.
+func mtimeFromJSONLTail(jsonl string) int64 {
+	lines := strings.Split(strings.TrimRight(jsonl, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			continue
+		}
+		// Try "timestamp" (ISO string) then "mtime" (number)
+		if ts, ok := obj["timestamp"].(string); ok && ts != "" {
+			if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+				return t.UnixMilli()
+			}
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				return t.UnixMilli()
+			}
+		}
+		if mt, ok := obj["mtime"].(float64); ok {
+			return int64(mt)
+		}
+	}
+	return time.Now().UnixMilli()
+}
+
+// loadStoreEntriesAsJSONL loads entries from a SessionStore for the given
+// session and serializes them to JSONL.  Returns ("", nil) when the session
+// has no entries in the store.
+func loadStoreEntriesAsJSONL(ctx context.Context, store SessionStore, sessionID, directory string) (string, error) {
+	projectKey := ProjectKeyForDirectory(directory)
+	key := SessionKey{ProjectKey: projectKey, SessionID: sessionID}
+	entries, err := store.Load(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	if len(entries) == 0 {
+		return "", nil
+	}
+	return entriesToJSONL(entries), nil
+}
+
+// deriveInfosViaLoad loads each session's entries from the store and derives
+// SDKSessionInfo via the same lite-parse used by the filesystem path.
+// Loads run concurrently up to storeListLoadConcurrency.
+// Entries with errors degrade to a minimal SDKSessionInfo; entries that parse
+// as sidechain or produce no summary are dropped.
+func deriveInfosViaLoad(
+	ctx context.Context,
+	store SessionStore,
+	listing []SessionStoreListEntry,
+	directory, projectPath string,
+) []SDKSessionInfo {
+	type result struct {
+		idx  int
+		info *SDKSessionInfo
+	}
+
+	sem := make(chan struct{}, storeListLoadConcurrency)
+	results := make([]result, len(listing))
+	var wg sync.WaitGroup
+
+	for i, entry := range listing {
+		i, entry := i, entry
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			jsonl, err := loadStoreEntriesAsJSONL(ctx, store, entry.SessionID, directory)
+			if err != nil {
+				// Degrade to minimal info on error
+				results[i] = result{idx: i, info: &SDKSessionInfo{
+					SessionID:    entry.SessionID,
+					Summary:      "",
+					LastModified: entry.Mtime,
+				}}
+				return
+			}
+			if jsonl == "" {
+				results[i] = result{idx: i, info: nil}
+				return
+			}
+			mtime := entry.Mtime
+			lite := jsonlToLite(jsonl, mtime)
+			info := parseSessionInfoFromLite(entry.SessionID, lite, projectPath)
+			if info == nil {
+				results[i] = result{idx: i, info: nil}
+				return
+			}
+			info.LastModified = mtime
+			results[i] = result{idx: i, info: info}
+		}()
+	}
+	wg.Wait()
+
+	var out []SDKSessionInfo
+	for _, r := range results {
+		if r.info != nil {
+			out = append(out, *r.info)
+		}
+	}
+	return out
+}
+
+// jsonlToLite parses a JSONL string (already in memory) into a liteSessionFile,
+// using mtime as the file modification time.
+func jsonlToLite(jsonl string, mtime int64) *liteSessionFile {
+	if jsonl == "" {
+		return nil
+	}
+	headSize := liteReadBufSize
+	if len(jsonl) < headSize {
+		headSize = len(jsonl)
+	}
+	tailStart := len(jsonl) - liteReadBufSize
+	if tailStart < 0 {
+		tailStart = 0
+	}
+	return &liteSessionFile{
+		head:  jsonl[:headSize],
+		tail:  jsonl[tailStart:],
+		mtime: mtime,
+		size:  int64(len(jsonl)),
+	}
+}
+
+// filterTranscriptEntries returns only entries with a "type" field that is a
+// known transcript event type. Used by store-backed message readers to skip
+// metadata-only entries before building the conversation chain.
+func filterTranscriptEntries(raw []SessionStoreEntry) []transcriptEntry {
+	const maxFieldScan = 512
+	validTypes := map[string]bool{
+		"user": true, "assistant": true, "system": true, "tool_result": true,
+	}
+	var out []transcriptEntry
+	for _, e := range raw {
+		b, err := json.Marshal(e)
+		if err != nil {
+			continue
+		}
+		s := string(b)
+		if len(s) > maxFieldScan {
+			s = s[:maxFieldScan]
+		}
+		var te transcriptEntry
+		if err := json.Unmarshal([]byte(string(b)), &te); err != nil {
+			continue
+		}
+		if !validTypes[te.Type] {
+			continue
+		}
+		out = append(out, te)
+	}
+	return out
+}
+
+// entriesToSessionMessages converts filtered transcript entries to SessionMessage slice.
+// Applies offset/limit if non-nil.
+func entriesToSessionMessages(entries []transcriptEntry, limit *int, offset int) []SessionMessage {
+	chain := buildConversationChain(entries)
+	visible := filterVisibleMessages(chain)
+	messages := toSessionMessages(visible)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(messages) {
+		return []SessionMessage{}
+	}
+	messages = messages[offset:]
+	if limit != nil && *limit > 0 && *limit < len(messages) {
+		messages = messages[:*limit]
+	}
+	return messages
+}
+
+// ---------------------------------------------------------------------------
+// Store-backed listing options
+// ---------------------------------------------------------------------------
+
+// ListSessionsFromStoreOptions contains options for ListSessionsFromStore.
+type ListSessionsFromStoreOptions struct {
+	// Store is the session store to query. Required.
+	Store SessionStore
+	// Directory is the project directory used to compute the project_key.
+	// Defaults to the current working directory.
+	Directory string
+	// Limit caps the number of results returned.
+	Limit *int
+	// Offset skips results from the beginning of the sorted set.
+	Offset int
+}
+
+// GetSessionInfoFromStoreOptions contains options for GetSessionInfoFromStore.
+type GetSessionInfoFromStoreOptions struct {
+	// Store is the session store to query. Required.
+	Store SessionStore
+	// SessionID is the UUID of the session to look up.
+	SessionID string
+	// Directory is the project directory used to compute the project_key.
+	Directory string
+}
+
+// GetSessionMessagesFromStoreOptions contains options for GetSessionMessagesFromStore.
+type GetSessionMessagesFromStoreOptions struct {
+	// Store is the session store to query. Required.
+	Store SessionStore
+	// SessionID is the UUID of the session to read.
+	SessionID string
+	// Directory is the project directory used to compute the project_key.
+	Directory string
+	// Limit caps the number of messages returned.
+	Limit *int
+	// Offset skips messages from the beginning.
+	Offset int
+}
+
+// ListSubagentsFromStoreOptions contains options for ListSubagentsFromStore.
+type ListSubagentsFromStoreOptions struct {
+	// Store is the session store to query. Required.
+	Store SessionStore
+	// SessionID is the UUID of the parent session.
+	SessionID string
+	// Directory is the project directory used to compute the project_key.
+	Directory string
+}
+
+// GetSubagentMessagesFromStoreOptions contains options for GetSubagentMessagesFromStore.
+type GetSubagentMessagesFromStoreOptions struct {
+	// Store is the session store to query. Required.
+	Store SessionStore
+	// SessionID is the UUID of the parent session.
+	SessionID string
+	// AgentID is the ID of the subagent.
+	AgentID string
+	// Directory is the project directory used to compute the project_key.
+	Directory string
+	// Limit caps the number of messages returned.
+	Limit *int
+	// Offset skips messages from the beginning.
+	Offset int
+}
+
+// ---------------------------------------------------------------------------
+// Store-backed listing functions
+// ---------------------------------------------------------------------------
+
+// ListSessionsFromStore lists sessions from a SessionStore.
+//
+// This is the async store-backed counterpart to ListSessions. It loads each
+// session's entries to derive a real summary via the same lite-parse used by
+// the filesystem path, so disk and store paths produce identical results for
+// the same transcript content.
+//
+// If the store implements ListSessionSummaries it is called first (one batch
+// call). Sessions with fresh sidecars are returned immediately; sessions
+// missing a sidecar or with a stale one are gap-filled via Load.
+//
+// Returns an error if the store implements neither ListSessionSummaries nor
+// ListSessions.
+func ListSessionsFromStore(ctx context.Context, opts *ListSessionsFromStoreOptions) ([]SDKSessionInfo, error) {
+	if opts == nil || opts.Store == nil {
+		return nil, fmt.Errorf("opts.Store is required")
+	}
+	store := opts.Store
+
+	dir := opts.Directory
+	projectPath, err := canonicalizePath(func() string {
+		if dir != "" {
+			return dir
+		}
+		return "."
+	}())
+	if err != nil {
+		projectPath = dir
+	}
+	projectKey := sanitizePath(projectPath)
+
+	// Check if store supports ListSessionSummaries
+	summaries, summaryErr := store.ListSessionSummaries(ctx, projectKey)
+	hasSummaries := summaryErr == nil || !errors.Is(summaryErr, ErrNotImplemented)
+
+	// Check if store supports ListSessions
+	listing, listErr := store.ListSessions(ctx, projectKey)
+	hasList := listErr == nil || !errors.Is(listErr, ErrNotImplemented)
+
+	if !hasSummaries && !hasList {
+		return nil, fmt.Errorf(
+			"session_store implements neither ListSessionSummaries() nor " +
+				"ListSessions() — cannot list sessions. Provide a store with at " +
+				"least one of those methods.",
+		)
+	}
+
+	// Fast path: list_session_summaries available
+	if hasSummaries && summaryErr == nil {
+		knownMtimes := map[string]int64{}
+		if hasList && listErr == nil {
+			for _, e := range listing {
+				knownMtimes[e.SessionID] = e.Mtime
+			}
+		}
+
+		type slot struct {
+			mtime     int64
+			sessionID string // set when info is nil (gap-fill needed)
+			info      *SDKSessionInfo
+		}
+
+		var slots []slot
+		freshIDs := map[string]bool{}
+		for _, s := range summaries {
+			sid := s.SessionID
+			if hasList {
+				known, ok := knownMtimes[sid]
+				if !ok {
+					continue // session no longer in list_sessions
+				}
+				if s.Mtime < known {
+					continue // stale sidecar — route through gap-fill
+				}
+			}
+			info := summaryEntryToSDKInfo(s, projectPath)
+			if info == nil {
+				freshIDs[sid] = true
+				continue
+			}
+			slots = append(slots, slot{mtime: s.Mtime, info: info})
+			freshIDs[sid] = true
+		}
+		// Add gap-fill slots for sessions in list but missing/stale sidecar
+		if hasList && listErr == nil {
+			for _, e := range listing {
+				if !freshIDs[e.SessionID] {
+					slots = append(slots, slot{mtime: e.Mtime, sessionID: e.SessionID})
+				}
+			}
+		}
+
+		// Sort by mtime desc, then paginate BEFORE gap-fill
+		sort.Slice(slots, func(i, j int) bool { return slots[i].mtime > slots[j].mtime })
+		if opts.Offset > 0 && opts.Offset < len(slots) {
+			slots = slots[opts.Offset:]
+		} else if opts.Offset >= len(slots) {
+			return []SDKSessionInfo{}, nil
+		}
+		if opts.Limit != nil && *opts.Limit > 0 && *opts.Limit < len(slots) {
+			slots = slots[:*opts.Limit]
+		}
+
+		// Gap-fill
+		var toFill []SessionStoreListEntry
+		for _, sl := range slots {
+			if sl.info == nil {
+				toFill = append(toFill, SessionStoreListEntry{SessionID: sl.sessionID, Mtime: sl.mtime})
+			}
+		}
+		if len(toFill) > 0 {
+			filled := deriveInfosViaLoad(ctx, store, toFill, dir, projectPath)
+			byID := map[string]SDKSessionInfo{}
+			for _, f := range filled {
+				byID[f.SessionID] = f
+			}
+			for i, sl := range slots {
+				if sl.info == nil {
+					if f, ok := byID[sl.sessionID]; ok {
+						slots[i].info = &f
+					}
+				}
+			}
+		}
+
+		var out []SDKSessionInfo
+		for _, sl := range slots {
+			if sl.info != nil {
+				out = append(out, *sl.info)
+			}
+		}
+		return out, nil
+	}
+
+	// Slow path: no summaries, use list_sessions + per-session load
+	if !hasList || listErr != nil {
+		return nil, fmt.Errorf("session_store ListSessions failed: %w", listErr)
+	}
+	results := deriveInfosViaLoad(ctx, store, listing, dir, projectPath)
+	return applySortLimitOffset(results, opts.Limit, opts.Offset), nil
+}
+
+// summaryEntryToSDKInfo converts a SessionSummaryEntry to an SDKSessionInfo.
+// Returns nil if the entry lacks enough information to build a valid info
+// (no summary, no title, or marked as sidechain).
+func summaryEntryToSDKInfo(s SessionSummaryEntry, projectPath string) *SDKSessionInfo {
+	if s.SessionID == "" {
+		return nil
+	}
+	if isSidechain, _ := s.Data["is_sidechain"].(bool); isSidechain {
+		return nil
+	}
+
+	customTitle, _ := s.Data["custom_title"].(string)
+	aiTitle, _ := s.Data["ai_title"].(string)
+	firstPrompt, _ := s.Data["first_prompt"].(string)
+	summaryHint, _ := s.Data["summary_hint"].(string)
+	lastPrompt, _ := s.Data["last_prompt"].(string)
+
+	// Title resolution: custom_title > ai_title
+	title := customTitle
+	if title == "" {
+		title = aiTitle
+	}
+
+	// Summary resolution: title > last_prompt > summary_hint > first_prompt
+	summary := title
+	if summary == "" {
+		summary = lastPrompt
+	}
+	if summary == "" {
+		summary = summaryHint
+	}
+	if summary == "" {
+		summary = firstPrompt
+	}
+	if summary == "" {
+		return nil // no usable summary
+	}
+
+	info := &SDKSessionInfo{
+		SessionID:    s.SessionID,
+		Summary:      summary,
+		LastModified: s.Mtime,
+	}
+	if title != "" {
+		info.CustomTitle = &title
+	}
+	if firstPrompt != "" {
+		info.FirstPrompt = &firstPrompt
+	}
+	if gitBranch, ok := s.Data["git_branch"].(string); ok && gitBranch != "" {
+		info.GitBranch = &gitBranch
+	}
+	sessionCWD, _ := s.Data["cwd"].(string)
+	if sessionCWD == "" {
+		sessionCWD = projectPath
+	}
+	if sessionCWD != "" {
+		info.CWD = &sessionCWD
+	}
+	if tag, ok := s.Data["tag"].(string); ok && tag != "" {
+		info.Tag = &tag
+	}
+	if createdAt, ok := s.Data["created_at"].(string); ok && createdAt != "" {
+		if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
+			ms := t.UnixMilli()
+			info.CreatedAt = &ms
+		} else if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			ms := t.UnixMilli()
+			info.CreatedAt = &ms
+		}
+	}
+	return info
+}
+
+// GetSessionInfoFromStore reads metadata for a single session from a SessionStore.
+//
+// Returns nil if the session is not found, the session_id is invalid, the
+// session is a sidechain session, or it has no extractable summary.
+func GetSessionInfoFromStore(ctx context.Context, opts *GetSessionInfoFromStoreOptions) (*SDKSessionInfo, error) {
+	if opts == nil || opts.Store == nil {
+		return nil, fmt.Errorf("opts.Store is required")
+	}
+	if !validateUUID(opts.SessionID) {
+		return nil, nil
+	}
+	jsonl, err := loadStoreEntriesAsJSONL(ctx, opts.Store, opts.SessionID, opts.Directory)
+	if err != nil {
+		return nil, err
+	}
+	if jsonl == "" {
+		return nil, nil
+	}
+	mtime := mtimeFromJSONLTail(jsonl)
+	lite := jsonlToLite(jsonl, mtime)
+	projectPath, pErr := canonicalizePath(func() string {
+		if opts.Directory != "" {
+			return opts.Directory
+		}
+		return "."
+	}())
+	if pErr != nil {
+		projectPath = opts.Directory
+	}
+	return parseSessionInfoFromLite(opts.SessionID, lite, projectPath), nil
+}
+
+// GetSessionMessagesFromStore reads a session's conversation messages from a SessionStore.
+//
+// This is the store-backed counterpart to GetSessionMessages. It feeds
+// SessionStore.Load() results directly into the chain builder — no JSONL round-trip.
+// Returns an empty slice if the session is not found or the session_id is invalid.
+func GetSessionMessagesFromStore(ctx context.Context, opts *GetSessionMessagesFromStoreOptions) ([]SessionMessage, error) {
+	if opts == nil || opts.Store == nil {
+		return nil, fmt.Errorf("opts.Store is required")
+	}
+	if !validateUUID(opts.SessionID) {
+		return []SessionMessage{}, nil
+	}
+	key := SessionKey{ProjectKey: ProjectKeyForDirectory(opts.Directory), SessionID: opts.SessionID}
+	entries, err := opts.Store.Load(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrNotImplemented) {
+			return nil, fmt.Errorf("session_store does not implement Load()")
+		}
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return []SessionMessage{}, nil
+	}
+	return entriesToSessionMessages(filterTranscriptEntries(entries), opts.Limit, opts.Offset), nil
+}
+
+// ListSubagentsFromStore lists subagent IDs for a session from a SessionStore.
+//
+// This is the store-backed counterpart to ListSubagents. The store must
+// implement ListSubkeys; if it does not, an error is returned.
+// Returns an empty slice if the session_id is invalid or no subagents exist.
+func ListSubagentsFromStore(ctx context.Context, opts *ListSubagentsFromStoreOptions) ([]string, error) {
+	if opts == nil || opts.Store == nil {
+		return nil, fmt.Errorf("opts.Store is required")
+	}
+	if !validateUUID(opts.SessionID) {
+		return []string{}, nil
+	}
+	key := SessionListSubkeysKey{ProjectKey: ProjectKeyForDirectory(opts.Directory), SessionID: opts.SessionID}
+	subkeys, err := opts.Store.ListSubkeys(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrNotImplemented) {
+			return nil, fmt.Errorf(
+				"session_store does not implement ListSubkeys() — cannot list " +
+					"subagents. Provide a store with a ListSubkeys() method.",
+			)
+		}
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var ids []string
+	for _, subpath := range subkeys {
+		if !strings.HasPrefix(subpath, "subagents/") {
+			continue
+		}
+		last := subpath
+		if idx := strings.LastIndex(subpath, "/"); idx >= 0 {
+			last = subpath[idx+1:]
+		}
+		if strings.HasPrefix(last, "agent-") {
+			agentID := last[len("agent-"):]
+			if !seen[agentID] {
+				seen[agentID] = true
+				ids = append(ids, agentID)
+			}
+		}
+	}
+	return ids, nil
+}
+
+// GetSubagentMessagesFromStore reads a subagent's conversation messages from a SessionStore.
+//
+// This is the store-backed counterpart to GetSubagentMessages. Subagents may
+// live at subagents/agent-<id> or nested under subagents/workflows/<runId>/agent-<id>.
+// Scans subkeys when the store implements ListSubkeys; otherwise tries the direct path.
+// Returns an empty slice if not found or the session_id is invalid.
+func GetSubagentMessagesFromStore(ctx context.Context, opts *GetSubagentMessagesFromStoreOptions) ([]SessionMessage, error) {
+	if opts == nil || opts.Store == nil {
+		return nil, fmt.Errorf("opts.Store is required")
+	}
+	if !validateUUID(opts.SessionID) {
+		return []SessionMessage{}, nil
+	}
+	if opts.AgentID == "" {
+		return nil, fmt.Errorf("AgentID must be non-empty")
+	}
+
+	projectKey := ProjectKeyForDirectory(opts.Directory)
+
+	// Try to find the exact subpath by scanning subkeys
+	var subpath string
+	subkeyKey := SessionListSubkeysKey{ProjectKey: projectKey, SessionID: opts.SessionID}
+	subkeys, err := opts.Store.ListSubkeys(ctx, subkeyKey)
+	if err == nil {
+		suffix := "agent-" + opts.AgentID
+		for _, sk := range subkeys {
+			if strings.HasSuffix(sk, "/"+suffix) || sk == "subagents/"+suffix {
+				subpath = sk
+				break
+			}
+		}
+	}
+	if subpath == "" {
+		// Fall back to canonical path
+		subpath = "subagents/agent-" + opts.AgentID
+	}
+
+	key := SessionKey{ProjectKey: projectKey, SessionID: opts.SessionID, Subpath: subpath}
+	entries, err := opts.Store.Load(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrNotImplemented) {
+			return nil, fmt.Errorf("session_store does not implement Load()")
+		}
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return []SessionMessage{}, nil
+	}
+	return entriesToSessionMessages(filterTranscriptEntries(entries), opts.Limit, opts.Offset), nil
 }

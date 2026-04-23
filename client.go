@@ -18,6 +18,7 @@ type ClaudeSDKClient struct {
 	query            *internal.Query
 	mu               sync.RWMutex
 	connected        bool
+	materialized     *MaterializedResume
 }
 
 // NewClient creates a new ClaudeSDKClient.
@@ -45,6 +46,25 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 
 	if c.connected {
 		return nil
+	}
+
+	// Fail fast on invalid session_store option combinations before spawn.
+	if err := validateSessionStoreOptions(c.options); err != nil {
+		return err
+	}
+
+	// resume/continue + session_store: load the session from the store and
+	// materialize it into a temp CLAUDE_CONFIG_DIR the subprocess can read.
+	if c.options != nil && c.options.SessionStore != nil &&
+		(c.options.Resume != "" || c.options.ContinueConversation) {
+		m, err := materializeResumeSession(ctx, c.options)
+		if err != nil {
+			return err
+		}
+		if m != nil {
+			c.materialized = m
+			c.options = applyMaterializedOptions(c.options, m)
+		}
 	}
 
 	// Convert options
@@ -589,6 +609,13 @@ func (c *ClaudeSDKClient) Close() error {
 
 	if c.query != nil {
 		c.query.Close()
+	}
+
+	if c.materialized != nil {
+		if cleanup := c.materialized.Cleanup; cleanup != nil {
+			_ = cleanup()
+		}
+		c.materialized = nil
 	}
 
 	return nil

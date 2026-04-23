@@ -1,8 +1,10 @@
 package claude
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,7 +59,8 @@ func TagSession(sessionID string, tag *string, directory *string) error {
 	return appendToSession(sessionID, string(data)+"\n", directory)
 }
 
-// DeleteSession deletes a session by removing its JSONL file.
+// DeleteSession deletes a session by removing its JSONL file and the sibling
+// subagent transcript directory (if present).
 func DeleteSession(sessionID string, directory *string) error {
 	if !validateUUID(sessionID) {
 		return fmt.Errorf("invalid session_id: %s", sessionID)
@@ -79,6 +82,15 @@ func DeleteSession(sessionID string, directory *string) error {
 		}
 		return err
 	}
+
+	// Cascade: also remove the sibling subagent transcript directory if present.
+	// The directory lives at <projectDir>/<sessionID>/ (same base as the .jsonl).
+	siblingDir := strings.TrimSuffix(path, ".jsonl")
+	if info, statErr := os.Stat(siblingDir); statErr == nil && info.IsDir() {
+		// Best-effort removal; ignore errors.
+		_ = os.RemoveAll(siblingDir)
+	}
+
 	return nil
 }
 
@@ -542,4 +554,359 @@ func sanitizeUnicode(value string) string {
 func isFormatCategory(r rune) bool {
 	return unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Co, r) ||
 		!unicode.IsGraphic(r) && !unicode.IsSpace(r) && r != '\n' && r != '\r' && r != '\t'
+}
+
+// ---------------------------------------------------------------------------
+// Store-backed session mutations
+// ---------------------------------------------------------------------------
+
+// RenameSessionViaStore renames a session by appending a custom-title entry
+// to a SessionStore.
+//
+// This is the store-backed counterpart to RenameSession.
+func RenameSessionViaStore(ctx context.Context, store SessionStore, sessionID, title string, directory *string) error {
+	if !validateUUID(sessionID) {
+		return fmt.Errorf("invalid session_id: %s", sessionID)
+	}
+	stripped := strings.TrimSpace(title)
+	if stripped == "" {
+		return fmt.Errorf("title must be non-empty")
+	}
+	dir := ""
+	if directory != nil {
+		dir = *directory
+	}
+	projectKey := ProjectKeyForDirectory(dir)
+	key := SessionKey{ProjectKey: projectKey, SessionID: sessionID}
+	entry := SessionStoreEntry{
+		"type":        "custom-title",
+		"customTitle": stripped,
+		"sessionId":   sessionID,
+		"uuid":        generateUUID(),
+		"timestamp":   isoNow(),
+	}
+	return store.Append(ctx, key, []SessionStoreEntry{entry})
+}
+
+// TagSessionViaStore tags a session by appending a tag entry to a SessionStore.
+// Pass nil for tag to clear the tag.
+//
+// This is the store-backed counterpart to TagSession.
+func TagSessionViaStore(ctx context.Context, store SessionStore, sessionID string, tag *string, directory *string) error {
+	if !validateUUID(sessionID) {
+		return fmt.Errorf("invalid session_id: %s", sessionID)
+	}
+	dir := ""
+	if directory != nil {
+		dir = *directory
+	}
+	var tagValue string
+	if tag != nil {
+		sanitized := strings.TrimSpace(sanitizeUnicode(*tag))
+		if sanitized == "" {
+			return fmt.Errorf("tag must be non-empty (use nil to clear)")
+		}
+		tagValue = sanitized
+	}
+	projectKey := ProjectKeyForDirectory(dir)
+	key := SessionKey{ProjectKey: projectKey, SessionID: sessionID}
+	entry := SessionStoreEntry{
+		"type":      "tag",
+		"tag":       tagValue, // empty string means clear
+		"sessionId": sessionID,
+		"uuid":      generateUUID(),
+		"timestamp": isoNow(),
+	}
+	return store.Append(ctx, key, []SessionStoreEntry{entry})
+}
+
+// DeleteSessionViaStore deletes a session from a SessionStore.
+//
+// This is the store-backed counterpart to DeleteSession. If the store does not
+// implement Delete (returns ErrNotImplemented), deletion is silently skipped —
+// appropriate for WORM/append-only backends.
+func DeleteSessionViaStore(ctx context.Context, store SessionStore, sessionID string, directory *string) error {
+	if !validateUUID(sessionID) {
+		return fmt.Errorf("invalid session_id: %s", sessionID)
+	}
+	dir := ""
+	if directory != nil {
+		dir = *directory
+	}
+	projectKey := ProjectKeyForDirectory(dir)
+	key := SessionKey{ProjectKey: projectKey, SessionID: sessionID}
+	if err := store.Delete(ctx, key); err != nil {
+		if errors.Is(err, ErrNotImplemented) {
+			return nil // no-op for WORM stores
+		}
+		return err
+	}
+	return nil
+}
+
+// ForkSessionViaStoreOptions contains options for ForkSessionViaStore.
+type ForkSessionViaStoreOptions struct {
+	// Store is the session store to fork from/to. Required.
+	Store SessionStore
+	// SessionID is the UUID of the source session.
+	SessionID string
+	// Directory is the project directory used to compute the project_key.
+	Directory *string
+	// UpToMessageID slices the transcript at this message UUID (inclusive).
+	// If empty, copies the full transcript.
+	UpToMessageID string
+	// Title is the custom title for the fork.
+	// If empty, derives from the original title + " (fork)".
+	Title string
+}
+
+// ForkSessionViaStore forks a session into a new branch with fresh UUIDs via
+// a SessionStore.
+//
+// This is the store-backed counterpart to ForkSession. Runs the fork transform
+// directly over the objects returned by SessionStore.Load — no JSONL round-trip.
+//
+// Returns ForkSessionResult with the new session's UUID, or an error if the
+// source session is not found or has no messages.
+func ForkSessionViaStore(ctx context.Context, opts *ForkSessionViaStoreOptions) (*ForkSessionResult, error) {
+	if opts == nil || opts.Store == nil {
+		return nil, fmt.Errorf("opts.Store is required")
+	}
+	if !validateUUID(opts.SessionID) {
+		return nil, fmt.Errorf("invalid session_id: %s", opts.SessionID)
+	}
+	if opts.UpToMessageID != "" && !validateUUID(opts.UpToMessageID) {
+		return nil, fmt.Errorf("invalid up_to_message_id: %s", opts.UpToMessageID)
+	}
+
+	dir := ""
+	if opts.Directory != nil {
+		dir = *opts.Directory
+	}
+	projectKey := ProjectKeyForDirectory(dir)
+	srcKey := SessionKey{ProjectKey: projectKey, SessionID: opts.SessionID}
+	loaded, err := opts.Store.Load(ctx, srcKey)
+	if err != nil {
+		return nil, err
+	}
+	if len(loaded) == 0 {
+		return nil, fmt.Errorf("session %s not found", opts.SessionID)
+	}
+
+	// Serialize to JSONL and parse using the existing fork machinery.
+	jsonl := entriesToJSONL(loaded)
+	if jsonl == "" {
+		return nil, fmt.Errorf("session %s has no entries", opts.SessionID)
+	}
+
+	// Derive title from entries if not provided.
+	var titlePtr *string
+	if opts.Title != "" {
+		titlePtr = &opts.Title
+	} else {
+		if derived := deriveTitleFromEntries(loaded); derived != "" {
+			t := derived + " (fork)"
+			titlePtr = &t
+		}
+	}
+
+	var upTo *string
+	if opts.UpToMessageID != "" {
+		upTo = &opts.UpToMessageID
+	}
+
+	transcript, contentReplacements := parseForkTranscript([]byte(jsonl), opts.SessionID)
+
+	// Filter sidechains
+	filtered := make([]map[string]interface{}, 0, len(transcript))
+	for _, entry := range transcript {
+		if isSidechain, _ := entry["isSidechain"].(bool); !isSidechain {
+			filtered = append(filtered, entry)
+		}
+	}
+	transcript = filtered
+	if len(transcript) == 0 {
+		return nil, fmt.Errorf("session %s has no messages to fork", opts.SessionID)
+	}
+
+	// Handle upToMessageID slicing
+	if upTo != nil {
+		cutoff := -1
+		for i, entry := range transcript {
+			if uuid, _ := entry["uuid"].(string); uuid == *upTo {
+				cutoff = i
+				break
+			}
+		}
+		if cutoff == -1 {
+			return nil, fmt.Errorf("message %s not found in session %s", *upTo, opts.SessionID)
+		}
+		transcript = transcript[:cutoff+1]
+	}
+
+	// Build UUID mapping
+	uuidMapping := make(map[string]string)
+	for _, entry := range transcript {
+		if uuid, _ := entry["uuid"].(string); uuid != "" {
+			uuidMapping[uuid] = generateUUID()
+		}
+	}
+
+	// Filter progress messages for output
+	writable := make([]map[string]interface{}, 0, len(transcript))
+	for _, entry := range transcript {
+		if entryType, _ := entry["type"].(string); entryType != "progress" {
+			writable = append(writable, entry)
+		}
+	}
+	if len(writable) == 0 {
+		return nil, fmt.Errorf("session %s has no messages to fork", opts.SessionID)
+	}
+
+	// Index for parent resolution
+	byUUID := make(map[string]map[string]interface{})
+	for _, entry := range transcript {
+		if uuid, _ := entry["uuid"].(string); uuid != "" {
+			byUUID[uuid] = entry
+		}
+	}
+
+	forkedSessionID := generateUUID()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now = strings.Replace(now, "+00:00", "Z", 1)
+	if !strings.HasSuffix(now, "Z") {
+		now = strings.TrimRight(now, "0")
+		if strings.HasSuffix(now, ".") {
+			now = now[:len(now)-1]
+		}
+		now += "Z"
+	}
+
+	lines := make([]string, 0, len(writable)+2)
+	for i, original := range writable {
+		origUUID, _ := original["uuid"].(string)
+		newUUID := uuidMapping[origUUID]
+
+		var newParentUUID interface{} = nil
+		parentID, _ := original["parentUuid"].(string)
+		for parentID != "" {
+			parent, ok := byUUID[parentID]
+			if !ok {
+				break
+			}
+			if parentType, _ := parent["type"].(string); parentType != "progress" {
+				if mapped, ok := uuidMapping[parentID]; ok {
+					newParentUUID = mapped
+				}
+				break
+			}
+			parentID, _ = parent["parentUuid"].(string)
+		}
+
+		timestamp := now
+		if i != len(writable)-1 {
+			if ts, ok := original["timestamp"].(string); ok {
+				timestamp = ts
+			}
+		}
+
+		var newLogicalParent interface{} = nil
+		if logical, ok := original["logicalParentUuid"].(string); ok && logical != "" {
+			if mapped, ok := uuidMapping[logical]; ok {
+				newLogicalParent = mapped
+			}
+		} else if original["logicalParentUuid"] != nil {
+			newLogicalParent = original["logicalParentUuid"]
+		}
+
+		forked := make(map[string]interface{})
+		for k, v := range original {
+			forked[k] = v
+		}
+		forked["uuid"] = newUUID
+		forked["parentUuid"] = newParentUUID
+		forked["logicalParentUuid"] = newLogicalParent
+		forked["sessionId"] = forkedSessionID
+		forked["timestamp"] = timestamp
+		forked["isSidechain"] = false
+		forked["forkedFrom"] = map[string]interface{}{
+			"sessionId":   opts.SessionID,
+			"messageUuid": origUUID,
+		}
+		delete(forked, "teamName")
+		delete(forked, "agentName")
+		delete(forked, "slug")
+		delete(forked, "sourceToolAssistantUUID")
+
+		line, _ := json.Marshal(forked)
+		lines = append(lines, string(line))
+	}
+
+	if len(contentReplacements) > 0 {
+		crEntry, _ := json.Marshal(map[string]interface{}{
+			"type":         "content-replacement",
+			"sessionId":    forkedSessionID,
+			"replacements": contentReplacements,
+		})
+		lines = append(lines, string(crEntry))
+	}
+
+	// Title entry
+	var forkTitle string
+	if titlePtr != nil {
+		forkTitle = strings.TrimSpace(*titlePtr)
+	}
+	if forkTitle == "" {
+		forkTitle = "Forked session"
+	}
+	titleEntry, _ := json.Marshal(map[string]interface{}{
+		"type":        "custom-title",
+		"sessionId":   forkedSessionID,
+		"customTitle": forkTitle,
+	})
+	lines = append(lines, string(titleEntry))
+
+	// Parse lines back to entries and write to store
+	var newEntries []SessionStoreEntry
+	for _, line := range lines {
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err == nil {
+			newEntries = append(newEntries, SessionStoreEntry(entry))
+		}
+	}
+	if len(newEntries) == 0 {
+		return nil, fmt.Errorf("session %s has no messages to fork", opts.SessionID)
+	}
+	dstKey := SessionKey{ProjectKey: projectKey, SessionID: forkedSessionID}
+	if err := opts.Store.Append(ctx, dstKey, newEntries); err != nil {
+		return nil, err
+	}
+	return &ForkSessionResult{SessionID: forkedSessionID}, nil
+}
+
+// deriveTitleFromEntries scans SessionStoreEntry values for the last
+// custom-title or ai-title to use as the fork source title.
+func deriveTitleFromEntries(entries []SessionStoreEntry) string {
+	title := ""
+	for _, e := range entries {
+		t, _ := e["type"].(string)
+		switch t {
+		case "custom-title":
+			if ct, ok := e["customTitle"].(string); ok && ct != "" {
+				title = ct
+			}
+		case "ai-title":
+			if at, ok := e["aiTitle"].(string); ok && at != "" {
+				if title == "" {
+					title = at
+				}
+			}
+		}
+	}
+	return title
+}
+
+// isoNow returns the current time as an ISO 8601 / RFC3339 timestamp string.
+func isoNow() string {
+	return time.Now().UTC().Format(time.RFC3339)
 }

@@ -1,9 +1,18 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
+
+// ErrNotImplemented is returned by BaseSessionStore optional methods.
+// Store implementations that do not support an optional capability should
+// return this error. SDK helper functions (e.g. ListSessionsFromStore) check
+// errors.Is(err, ErrNotImplemented) to determine which capabilities the store
+// provides.
+var ErrNotImplemented = errors.New("method not implemented")
 
 // PermissionMode defines security levels for tool execution.
 type PermissionMode string
@@ -17,10 +26,12 @@ const (
 	PermissionModePlan PermissionMode = "plan"
 	// PermissionModeBypassPermissions allows all tools (use with caution).
 	PermissionModeBypassPermissions PermissionMode = "bypassPermissions"
-	// PermissionModeDontAsk allows all tools without prompting.
+	// PermissionModeDontAsk denies any tool not pre-approved by allow rules
+	// (i.e. anything unapproved is silently denied rather than prompted).
 	PermissionModeDontAsk PermissionMode = "dontAsk"
-        // PermissionModeAuto lets the CLI decide the appropriate permission mode.
-        PermissionModeAuto PermissionMode = "auto"
+	// PermissionModeAuto uses a model classifier to decide the appropriate
+	// permission level at runtime.
+	PermissionModeAuto PermissionMode = "auto"
 )
 
 // SettingSource specifies which setting sources to load.
@@ -372,6 +383,17 @@ func ParseContentBlock(raw map[string]interface{}) (ContentBlock, error) {
 		isError, _ := raw["is_error"].(bool)
 		return &ToolResultBlock{ToolUseID: toolUseID, Content: content, IsError: isError}, nil
 
+	case "server_tool_use":
+		id, _ := raw["id"].(string)
+		name, _ := raw["name"].(string)
+		input, _ := raw["input"].(map[string]interface{})
+		return &ServerToolUseBlock{ID: id, Name: name, Input: input}, nil
+
+	case "advisor_tool_result":
+		toolUseID, _ := raw["tool_use_id"].(string)
+		content, _ := raw["content"].(map[string]interface{})
+		return &ServerToolResultBlock{ToolUseID: toolUseID, Content: content}, nil
+
 	default:
 		return nil, NewMessageParseError("unknown content block type: "+blockType, raw)
 	}
@@ -399,17 +421,17 @@ type SystemPromptPreset struct {
 	Type   string `json:"type"`   // "preset"
 	Preset string `json:"preset"` // "claude_code"
 	Append string `json:"append,omitempty"`
-        // ExcludeDynamicSections strips per-user dynamic sections (working directory,
-        // auto-memory, git status) from the system prompt so it stays static and
-        // cacheable across users. The stripped content is re-injected into the first
-        // user message so the model still has access to it.
-        //
-        // Use this when many users share the same preset system prompt and you
-        // want the prompt-caching prefix to hit cross-user.
-        //
-        // Requires a Claude Code CLI version that supports this option; older
-        // CLIs silently ignore it.
-        ExcludeDynamicSections *bool `json:"excludeDynamicSections,omitempty"`
+	// ExcludeDynamicSections strips per-user dynamic sections (working directory,
+	// auto-memory, git status) from the system prompt so it stays static and
+	// cacheable across users. The stripped content is re-injected into the first
+	// user message so the model still has access to it.
+	//
+	// Use this when many users share the same preset system prompt and you
+	// want the prompt-caching prefix to hit cross-user.
+	//
+	// Requires a Claude Code CLI version that supports this option; older
+	// CLIs silently ignore it.
+	ExcludeDynamicSections *bool `json:"excludeDynamicSections,omitempty"`
 }
 
 // ToolsPreset represents a tools preset configuration.
@@ -473,16 +495,16 @@ type TaskBudget struct {
 
 // AgentDefinition defines a custom agent configuration.
 type AgentDefinition struct {
-	Description     string        `json:"description"`
-	Prompt          string        `json:"prompt"`
-	Tools           []string      `json:"tools,omitempty"`
-	DisallowedTools []string      `json:"disallowedTools,omitempty"`
-	Model           string        `json:"model,omitempty"`
-	Skills          []string      `json:"skills,omitempty"`
-	Memory          string        `json:"memory,omitempty"` // "user", "project", "local"
-	McpServers      []interface{} `json:"mcpServers,omitempty"`
-	InitialPrompt   string        `json:"initialPrompt,omitempty"`
-	MaxTurns        *int          `json:"maxTurns,omitempty"`
+	Description     string         `json:"description"`
+	Prompt          string         `json:"prompt"`
+	Tools           []string       `json:"tools,omitempty"`
+	DisallowedTools []string       `json:"disallowedTools,omitempty"`
+	Model           string         `json:"model,omitempty"`
+	Skills          []string       `json:"skills,omitempty"`
+	Memory          string         `json:"memory,omitempty"` // "user", "project", "local"
+	McpServers      []interface{}  `json:"mcpServers,omitempty"`
+	InitialPrompt   string         `json:"initialPrompt,omitempty"`
+	MaxTurns        *int           `json:"maxTurns,omitempty"`
 	Background      *bool          `json:"background,omitempty"`
 	Effort          interface{}    `json:"effort,omitempty"`         // "low", "medium", "high", "max", or int
 	PermissionMode  PermissionMode `json:"permissionMode,omitempty"` // e.g. PermissionModeDefault
@@ -524,6 +546,9 @@ type PluginConfig struct {
 type ThinkingConfig struct {
 	Type         string `json:"type"` // "adaptive", "enabled", "disabled"
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	// Display controls how thinking text is surfaced: "summarized" or "omitted".
+	// Only valid for "adaptive" and "enabled" types.
+	Display string `json:"display,omitempty"` // "summarized" or "omitted"
 }
 
 // CanUseToolFunc is the callback type for tool permission requests.
@@ -752,4 +777,191 @@ type SessionMessage struct {
 	SessionID       string             `json:"session_id"`
 	Message         interface{}        `json:"message"`
 	ParentToolUseID *string            `json:"parent_tool_use_id,omitempty"`
+}
+
+// ServerToolName identifies a server-side tool (e.g. advisor, web_search).
+type ServerToolName = string
+
+const (
+	ServerToolNameAdvisor                 = "advisor"
+	ServerToolNameWebSearch               = "web_search"
+	ServerToolNameWebFetch                = "web_fetch"
+	ServerToolNameCodeExecution           = "code_execution"
+	ServerToolNameBashCodeExecution       = "bash_code_execution"
+	ServerToolNameTextEditorCodeExecution = "text_editor_code_execution"
+	ServerToolNameToolSearchRegex         = "tool_search_tool_regex"
+	ServerToolNameToolSearchBM25          = "tool_search_tool_bm25"
+)
+
+// ServerToolUseBlock represents a server-side tool use content block (e.g. advisor, web_search).
+//
+// These are tools the API executes server-side on the model's behalf, so they
+// appear in the message stream alongside regular tool_use blocks but the
+// caller never needs to return a result. Name is a discriminator — branch on
+// it to know which server tool was invoked.
+type ServerToolUseBlock struct {
+	ID    string                 `json:"id"`
+	Name  ServerToolName         `json:"name"`
+	Input map[string]interface{} `json:"input"`
+}
+
+func (b *ServerToolUseBlock) contentBlockMarker() {}
+
+// MarshalJSON implements json.Marshaler for ServerToolUseBlock.
+func (b *ServerToolUseBlock) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]interface{}{
+		"type":  "server_tool_use",
+		"id":    b.ID,
+		"name":  b.Name,
+		"input": b.Input,
+	})
+}
+
+// ServerToolResultBlock represents the result of a server-side tool call.
+//
+// Content is the raw dict from the API, opaque to this layer — callers that
+// care about a specific server tool's result schema can inspect Content["type"].
+type ServerToolResultBlock struct {
+	ToolUseID string                 `json:"tool_use_id"`
+	Content   map[string]interface{} `json:"content"`
+}
+
+func (b *ServerToolResultBlock) contentBlockMarker() {}
+
+// MarshalJSON implements json.Marshaler for ServerToolResultBlock.
+func (b *ServerToolResultBlock) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]interface{}{
+		"type":        "advisor_tool_result",
+		"tool_use_id": b.ToolUseID,
+		"content":     b.Content,
+	})
+}
+
+// MirrorErrorMessage is a system message emitted when a SessionStore.Append call fails.
+//
+// Non-fatal — the local-disk transcript is already durable, so the session
+// continues unaffected. The mirrored copy in the external store will be
+// missing the failed batch.
+type MirrorErrorMessage struct {
+	Subtype   string      `json:"subtype"` // always "mirror_error"
+	Data      interface{} `json:"data"`
+	Key       *SessionKey `json:"key,omitempty"`
+	Error     string      `json:"error"`
+	UUID      string      `json:"uuid,omitempty"`
+	SessionID string      `json:"session_id,omitempty"`
+}
+
+func (m *MirrorErrorMessage) messageMarker() {}
+
+// ---------------------------------------------------------------------------
+// Session Store Types (ported from Python SDK 0.1.64)
+// ---------------------------------------------------------------------------
+
+// SessionKey identifies a session transcript or subagent transcript in a store.
+//
+// Main transcripts have an empty Subpath; subagent transcripts include a Subpath
+// like "subagents/agent-{id}" that mirrors the on-disk directory structure.
+type SessionKey struct {
+	ProjectKey string `json:"project_key"`
+	SessionID  string `json:"session_id"`
+	// Subpath is empty for the main transcript; set for subagent files.
+	// Opaque to the adapter — just use it as a storage key suffix.
+	Subpath string `json:"subpath,omitempty"`
+}
+
+// SessionStoreEntry is one JSONL transcript line as observed by a SessionStore adapter.
+// Adapters should treat entries as pass-through blobs; round-tripping via JSON
+// is the only required invariant.
+type SessionStoreEntry = map[string]interface{}
+
+// SessionStoreListEntry is an entry returned by SessionStore.ListSessions.
+type SessionStoreListEntry struct {
+	SessionID string `json:"session_id"`
+	// Mtime is the last-modified time in Unix epoch milliseconds.
+	Mtime int64 `json:"mtime"`
+}
+
+// SessionSummaryEntry is an incrementally-maintained session summary.
+//
+// Stores obtain this from FoldSessionSummary inside Append and persist it
+// verbatim; they return the full set from ListSessionSummaries. The Data
+// field is opaque SDK-owned state — stores MUST NOT interpret it.
+type SessionSummaryEntry struct {
+	SessionID string `json:"session_id"`
+	// Mtime is the storage write time of the sidecar, in Unix epoch milliseconds.
+	Mtime int64 `json:"mtime"`
+	// Data is opaque SDK-owned summary state. Persist verbatim; do not interpret.
+	Data map[string]interface{} `json:"data"`
+}
+
+// SessionListSubkeysKey is a key argument to SessionStore.ListSubkeys (no Subpath).
+type SessionListSubkeysKey struct {
+	ProjectKey string `json:"project_key"`
+	SessionID  string `json:"session_id"`
+}
+
+// SessionStore is the interface for adapters that mirror session transcripts to external storage.
+//
+// The subprocess still writes to local disk; the adapter receives a secondary copy.
+// Only Append and Load are required. The remaining methods are optional.
+type SessionStore interface {
+	// Append mirrors a batch of transcript entries.
+	// Called AFTER the subprocess's local write succeeds — durability is
+	// already guaranteed locally.
+	Append(ctx context.Context, key SessionKey, entries []SessionStoreEntry) error
+
+	// Load loads a full session for resume.
+	// Return nil for a key that was never written.
+	Load(ctx context.Context, key SessionKey) ([]SessionStoreEntry, error)
+
+	// ListSessions lists sessions for a project_key. Returns IDs + modification times.
+	// Optional — if unimplemented, list operations raise.
+	ListSessions(ctx context.Context, projectKey string) ([]SessionStoreListEntry, error)
+
+	// ListSessionSummaries returns incrementally-maintained summaries for all
+	// sessions in one call. Optional.
+	ListSessionSummaries(ctx context.Context, projectKey string) ([]SessionSummaryEntry, error)
+
+	// Delete deletes a session. Deleting a main-transcript key (Subpath=="")
+	// must cascade to all subkeys so subagent transcripts aren't orphaned.
+	// Optional.
+	Delete(ctx context.Context, key SessionKey) error
+
+	// ListSubkeys lists the subpath keys for a session (e.g. subagent transcripts).
+	// Optional.
+	ListSubkeys(ctx context.Context, key SessionListSubkeysKey) ([]string, error)
+}
+
+// BaseSessionStore provides default "not implemented" implementations of all
+// SessionStore methods. Embed *BaseSessionStore (or BaseSessionStore) in your
+// custom store struct so you only need to override the methods you support.
+//
+//	type MyStore struct {
+//	    claude.BaseSessionStore
+//	    // ... your fields
+//	}
+//
+//	func (s *MyStore) Append(ctx context.Context, key claude.SessionKey, entries []claude.SessionStoreEntry) error { ... }
+//	func (s *MyStore) Load(ctx context.Context, key claude.SessionKey) ([]claude.SessionStoreEntry, error) { ... }
+//	// ListSessions, ListSessionSummaries, Delete, ListSubkeys are inherited
+//	// from BaseSessionStore and return ErrNotImplemented.
+type BaseSessionStore struct{}
+
+func (*BaseSessionStore) Append(_ context.Context, _ SessionKey, _ []SessionStoreEntry) error {
+	return ErrNotImplemented
+}
+func (*BaseSessionStore) Load(_ context.Context, _ SessionKey) ([]SessionStoreEntry, error) {
+	return nil, ErrNotImplemented
+}
+func (*BaseSessionStore) ListSessions(_ context.Context, _ string) ([]SessionStoreListEntry, error) {
+	return nil, ErrNotImplemented
+}
+func (*BaseSessionStore) ListSessionSummaries(_ context.Context, _ string) ([]SessionSummaryEntry, error) {
+	return nil, ErrNotImplemented
+}
+func (*BaseSessionStore) Delete(_ context.Context, _ SessionKey) error {
+	return ErrNotImplemented
+}
+func (*BaseSessionStore) ListSubkeys(_ context.Context, _ SessionListSubkeysKey) ([]string, error) {
+	return nil, ErrNotImplemented
 }

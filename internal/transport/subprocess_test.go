@@ -648,8 +648,9 @@ func TestSettingSourcesOmittedWhenNil(t *testing.T) {
 	}
 }
 
-// TestSettingSourcesOmittedWhenEmpty tests that --setting-sources is NOT passed
-// when SettingSources is an empty slice.
+// TestSettingSourcesOmittedWhenEmpty tests that --setting-sources= IS passed
+// when SettingSources is explicitly set to an empty slice (clears all sources).
+// This matches Python SDK 0.1.65 behaviour: explicit empty list → --setting-sources=
 func TestSettingSourcesOmittedWhenEmpty(t *testing.T) {
 	transport, err := NewSubprocessTransport("test", &TransportOptions{
 		CLIPath:        "/fake/path/claude",
@@ -661,13 +662,13 @@ func TestSettingSourcesOmittedWhenEmpty(t *testing.T) {
 
 	cmd := transport.buildCommand(context.Background())
 	args := strings.Join(cmd.Args, " ")
-	if strings.Contains(args, "--setting-sources") {
-		t.Errorf("Expected no --setting-sources flag when empty, got: %s", args)
+	if !strings.Contains(args, "--setting-sources=") {
+		t.Errorf("Expected --setting-sources= when SettingSources is explicitly empty, got: %s", args)
 	}
 }
 
-// TestSettingSourcesPassedWhenPopulated tests that --setting-sources is passed
-// correctly when SettingSources has values.
+// TestSettingSourcesPassedWhenPopulated tests that --setting-sources=values is passed
+// using = syntax (Python SDK 0.1.65 format).
 func TestSettingSourcesPassedWhenPopulated(t *testing.T) {
 	transport, err := NewSubprocessTransport("test", &TransportOptions{
 		CLIPath:        "/fake/path/claude",
@@ -679,8 +680,8 @@ func TestSettingSourcesPassedWhenPopulated(t *testing.T) {
 
 	cmd := transport.buildCommand(context.Background())
 	args := strings.Join(cmd.Args, " ")
-	if !strings.Contains(args, "--setting-sources local,project") {
-		t.Errorf("Expected --setting-sources local,project in args: %s", args)
+	if !strings.Contains(args, "--setting-sources=local,project") {
+		t.Errorf("Expected --setting-sources=local,project in args: %s", args)
 	}
 }
 
@@ -757,4 +758,195 @@ func TestMAXMCPOutputTokensPassthrough(t *testing.T) {
 		}
 	}
 	t.Error("MAX_MCP_OUTPUT_TOKENS was not passed to the CLI subprocess")
+}
+
+// ---- Tests for new subprocess behaviour added in v0.1.58–v0.1.65 ----
+
+// TestBuildCommand_ThinkingDisplayForwarded verifies that --thinking-display is
+// emitted when Thinking.Display is set and type is not "disabled".
+func TestBuildCommand_ThinkingDisplayForwarded(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+		Thinking: &ThinkingConfig{
+			Type:    "adaptive",
+			Display: "summarized",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--thinking-display summarized") {
+		t.Errorf("Expected --thinking-display summarized in args: %s", args)
+	}
+}
+
+// TestBuildCommand_ThinkingWithoutDisplay verifies that --thinking-display is
+// NOT emitted when Thinking.Display is empty.
+func TestBuildCommand_ThinkingWithoutDisplay(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+		Thinking: &ThinkingConfig{
+			Type: "adaptive",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if strings.Contains(args, "--thinking-display") {
+		t.Errorf("Did not expect --thinking-display in args: %s", args)
+	}
+}
+
+// TestBuildCommand_ThinkingDisabledNoDisplay verifies that --thinking-display is
+// NOT emitted when Thinking.Type is "disabled" even if Display is set.
+func TestBuildCommand_ThinkingDisabledNoDisplay(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+		Thinking: &ThinkingConfig{
+			Type:    "disabled",
+			Display: "omitted",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if strings.Contains(args, "--thinking-display") {
+		t.Errorf("Did not expect --thinking-display when thinking is disabled: %s", args)
+	}
+}
+
+// TestBuildCommand_SkillsAllInjectsSkillTool verifies that Skills="all" injects
+// "Skill" into AllowedTools and defaults setting_sources to user,project.
+func TestBuildCommand_SkillsAllInjectsSkillTool(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+		Skills:  "all",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "Skill") {
+		t.Errorf("Expected Skill in --allowedTools: %s", args)
+	}
+	if !strings.Contains(args, "--setting-sources=user,project") {
+		t.Errorf("Expected --setting-sources=user,project for skills: %s", args)
+	}
+}
+
+// TestBuildCommand_SkillsListInjectsSkillNameTool verifies that Skills=[]string
+// injects "Skill(name)" entries into AllowedTools.
+func TestBuildCommand_SkillsListInjectsSkillNameTool(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+		Skills:  []string{"my-skill", "other-skill"},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "Skill(my-skill)") {
+		t.Errorf("Expected Skill(my-skill) in --allowedTools: %s", args)
+	}
+	if !strings.Contains(args, "Skill(other-skill)") {
+		t.Errorf("Expected Skill(other-skill) in --allowedTools: %s", args)
+	}
+}
+
+// TestBuildCommand_SkillsNilNoSkillTool verifies that nil Skills does NOT
+// inject any Skill tool or change setting_sources.
+func TestBuildCommand_SkillsNilNoSkillTool(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if strings.Contains(args, "Skill") {
+		t.Errorf("Did not expect Skill tool when Skills is nil: %s", args)
+	}
+	if strings.Contains(args, "--setting-sources") {
+		t.Errorf("Did not expect --setting-sources when Skills is nil and SettingSources unset: %s", args)
+	}
+}
+
+// TestBuildCommand_SkillsUserSettingSourcesNotOverridden verifies that
+// explicit SettingSources is respected even when Skills is set.
+func TestBuildCommand_SkillsUserSettingSourcesNotOverridden(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:        "/fake/path/claude",
+		Skills:         "all",
+		SettingSources: []string{"user"},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--setting-sources=user") {
+		t.Errorf("Expected --setting-sources=user (user-supplied override): %s", args)
+	}
+	// Must not silently override to user,project
+	if strings.Contains(args, "--setting-sources=user,project") {
+		t.Errorf("Expected user-supplied SettingSources to take precedence: %s", args)
+	}
+}
+
+// TestBuildCommand_SessionMirrorFlag verifies that --session-mirror is emitted
+// when SessionStore is set.
+func TestBuildCommand_SessionMirrorFlag(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:      "/fake/path/claude",
+		SessionStore: struct{}{}, // non-nil sentinel
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--session-mirror") {
+		t.Errorf("Expected --session-mirror when SessionStore is set: %s", args)
+	}
+}
+
+// TestBuildCommand_SessionMirrorNotEmittedWhenNil verifies that --session-mirror
+// is NOT emitted when SessionStore is nil.
+func TestBuildCommand_SessionMirrorNotEmittedWhenNil(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if strings.Contains(args, "--session-mirror") {
+		t.Errorf("Did not expect --session-mirror when SessionStore is nil: %s", args)
+	}
+}
+
+// TestSettingSourcesNilOmitted verifies that --setting-sources is NOT emitted
+// when SettingSources is nil and Skills is also nil.
+func TestSettingSourcesNilOmitted(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if strings.Contains(args, "--setting-sources") {
+		t.Errorf("Expected no --setting-sources when SettingSources is nil: %s", args)
+	}
 }

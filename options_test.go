@@ -151,3 +151,57 @@ func TestOptionsWithModelSpecification(t *testing.T) {
 		t.Errorf("Expected PermissionPromptToolName='CustomTool'")
 	}
 }
+
+// ---- Tests for new options added in v0.1.58–v0.1.65 ----
+
+// TestOptionsWithSkillsAll verifies that Skills="all" is stored correctly.
+func TestOptionsWithSkillsAll(t *testing.T) {
+	opts := &ClaudeAgentOptions{Skills: "all"}
+	s, ok := opts.Skills.(string)
+	if !ok || s != "all" {
+		t.Errorf("Expected Skills=\"all\", got %v", opts.Skills)
+	}
+}
+
+// TestOptionsWithSkillsList verifies that Skills=[]string{...} is stored correctly.
+func TestOptionsWithSkillsList(t *testing.T) {
+	skills := []string{"my-skill", "other-skill"}
+	opts := &ClaudeAgentOptions{Skills: skills}
+	got, ok := opts.Skills.([]string)
+	if !ok {
+		t.Fatalf("Expected []string, got %T", opts.Skills)
+	}
+	if len(got) != 2 || got[0] != "my-skill" {
+		t.Errorf("Skills mismatch: %v", got)
+	}
+}
+
+// TestOptionsWithNilSkills verifies nil Skills is the default.
+func TestOptionsWithNilSkills(t *testing.T) {
+	opts := DefaultOptions()
+	if opts.Skills != nil {
+		t.Errorf("Expected nil Skills by default, got %v", opts.Skills)
+	}
+}
+
+// TestOptionsWithSessionStore verifies that SessionStore is stored correctly.
+func TestOptionsWithSessionStore(t *testing.T) {
+	store := NewInMemorySessionStore()
+	opts := &ClaudeAgentOptions{SessionStore: store}
+	if opts.SessionStore == nil {
+		t.Error("Expected non-nil SessionStore")
+	}
+}
+
+// TestOptionsThinkingConfigDisplay verifies the new Display field.
+func TestOptionsThinkingConfigDisplay(t *testing.T) {
+	opts := &ClaudeAgentOptions{
+		Thinking: &ThinkingConfig{
+			Type:    "adaptive",
+			Display: "summarized",
+		},
+	}
+	if opts.Thinking.Display != "summarized" {
+		t.Errorf("Thinking.Display mismatch: %s", opts.Thinking.Display)
+	}
+}

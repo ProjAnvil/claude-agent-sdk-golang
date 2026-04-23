@@ -277,6 +277,70 @@ func (t *SubprocessTransport) streamInput(ch chan map[string]interface{}) {
 	}
 }
 
+// applySkillsDefaults computes the effective allowed_tools and setting_sources
+// after applying any Skills override.
+//
+//   - nil skills → no change (caller's AllowedTools and SettingSources are used as-is)
+//   - "all"      → inject the bare "Skill" tool; default SettingSources to ["user","project"] when nil
+//   - []string   → inject "Skill(name)" for each name; same SettingSources default
+//
+// Does not mutate t.options.
+func (t *SubprocessTransport) applySkillsDefaults() (allowedTools []string, settingSources []string, settingSourcesSet bool) {
+	allowedTools = make([]string, len(t.options.AllowedTools))
+	copy(allowedTools, t.options.AllowedTools)
+
+	// settingSourcesSet tracks whether SettingSources was explicitly set on
+	// the options (nil = not set, even empty slice = set).
+	settingSourcesSet = t.options.SettingSources != nil
+	if settingSourcesSet {
+		settingSources = make([]string, len(t.options.SettingSources))
+		copy(settingSources, t.options.SettingSources)
+	}
+
+	if t.options.Skills == nil {
+		return
+	}
+
+	// Determine the skill entries to inject.
+	switch s := t.options.Skills.(type) {
+	case string:
+		if s == "all" {
+			found := false
+			for _, tool := range allowedTools {
+				if tool == "Skill" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				allowedTools = append(allowedTools, "Skill")
+			}
+		}
+	case []string:
+		for _, name := range s {
+			pattern := fmt.Sprintf("Skill(%s)", name)
+			found := false
+			for _, tool := range allowedTools {
+				if tool == pattern {
+					found = true
+					break
+				}
+			}
+			if !found {
+				allowedTools = append(allowedTools, pattern)
+			}
+		}
+	}
+
+	// Default setting_sources to ["user","project"] when not explicitly set.
+	if !settingSourcesSet {
+		settingSources = []string{"user", "project"}
+		settingSourcesSet = true
+	}
+
+	return
+}
+
 // buildCommand constructs the CLI command with arguments.
 func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	// -p "" enables print mode (non-interactive). Claude CLI v2.x requires
@@ -302,8 +366,12 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		args = append(args, "--tools", "default")
 	}
 
-	if len(t.options.AllowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(t.options.AllowedTools, ","))
+	// Apply skills defaults: merges skills into allowed_tools and
+	// defaults setting_sources when skills are configured.
+	effectiveAllowedTools, effectiveSettingSources, effectiveSettingSourcesSet := t.applySkillsDefaults()
+
+	if len(effectiveAllowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(effectiveAllowedTools, ","))
 	}
 
 	if t.options.MaxTurns > 0 {
@@ -384,10 +452,11 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		args = append(args, "--agents", string(agentsJSON))
 	}
 
-	// Setting sources — only pass the flag when there are actual sources;
-	// passing an empty string causes the CLI to misparse subsequent flags (#778).
-	if len(t.options.SettingSources) > 0 {
-		args = append(args, "--setting-sources", strings.Join(t.options.SettingSources, ","))
+	// Setting sources — use `=` format so an empty value round-trips correctly.
+	// nil SettingSources (and skills == nil) means omit the flag entirely;
+	// an explicitly-set empty slice means `--setting-sources=` (clear all sources).
+	if effectiveSettingSourcesSet {
+		args = append(args, fmt.Sprintf("--setting-sources=%s", strings.Join(effectiveSettingSources, ",")))
 	}
 
 	// Plugins
@@ -406,20 +475,29 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		}
 	}
 
-// Resolve thinking config -> --thinking / --max-thinking-tokens
-        // `thinking` takes precedence over the deprecated `max_thinking_tokens`
-        if t.options.Thinking != nil {
-                switch t.options.Thinking.Type {
-                case "adaptive":
-                        args = append(args, "--thinking", "adaptive")
-                case "enabled":
-                        args = append(args, "--max-thinking-tokens", strconv.Itoa(t.options.Thinking.BudgetTokens))
-                case "disabled":
-                        args = append(args, "--thinking", "disabled")
+	// Resolve thinking config -> --thinking / --max-thinking-tokens
+	// `thinking` takes precedence over the deprecated `max_thinking_tokens`
+	if t.options.Thinking != nil {
+		switch t.options.Thinking.Type {
+		case "adaptive":
+			args = append(args, "--thinking", "adaptive")
+		case "enabled":
+			args = append(args, "--max-thinking-tokens", strconv.Itoa(t.options.Thinking.BudgetTokens))
+		case "disabled":
+			args = append(args, "--thinking", "disabled")
+		}
+		// --thinking-display is valid only when thinking is active.
+		if t.options.Thinking.Type != "disabled" && t.options.Thinking.Display != "" {
+			args = append(args, "--thinking-display", t.options.Thinking.Display)
 		}
 	} else if t.options.MaxThinkingTokens > 0 {
 		// Fallback for deprecated option
 		args = append(args, "--max-thinking-tokens", strconv.Itoa(t.options.MaxThinkingTokens))
+	}
+
+	// Session mirror — enable when a SessionStore is configured.
+	if t.options.SessionStore != nil {
+		args = append(args, "--session-mirror")
 	}
 
 	// Sandbox

@@ -698,6 +698,161 @@ func TestParseResultMessageWithStopReason(t *testing.T) {
 	}
 }
 
+// ---- Tests for new message types added in v0.1.58–v0.1.65 ----
+
+func TestParseMirrorErrorMessage(t *testing.T) {
+	data := map[string]interface{}{
+		"type":       "system",
+		"subtype":    "mirror_error",
+		"error":      "store is unavailable",
+		"uuid":       "uuid-abc",
+		"session_id": "sess-xyz",
+		"key": map[string]interface{}{
+			"project_key": "my-project",
+			"session_id":  "sess-xyz",
+			"subpath":     "sub/1",
+		},
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+
+	me, ok := msg.(*MirrorErrorMessage)
+	if !ok {
+		t.Fatalf("Expected *MirrorErrorMessage, got %T", msg)
+	}
+	if me.Error != "store is unavailable" {
+		t.Errorf("Error mismatch: %s", me.Error)
+	}
+	if me.UUID != "uuid-abc" {
+		t.Errorf("UUID mismatch: %s", me.UUID)
+	}
+	if me.SessionID != "sess-xyz" {
+		t.Errorf("SessionID mismatch: %s", me.SessionID)
+	}
+	if me.Key == nil {
+		t.Fatal("Key is nil")
+	}
+	if me.Key.ProjectKey != "my-project" {
+		t.Errorf("Key.ProjectKey mismatch: %s", me.Key.ProjectKey)
+	}
+	if me.Key.Subpath != "sub/1" {
+		t.Errorf("Key.Subpath mismatch: %s", me.Key.Subpath)
+	}
+}
+
+func TestParseMirrorErrorMessageNoKey(t *testing.T) {
+	data := map[string]interface{}{
+		"type":    "system",
+		"subtype": "mirror_error",
+		"error":   "oops",
+		"uuid":    "u1",
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+	me, ok := msg.(*MirrorErrorMessage)
+	if !ok {
+		t.Fatalf("Expected *MirrorErrorMessage, got %T", msg)
+	}
+	if me.Key != nil {
+		t.Error("Expected Key to be nil when absent from payload")
+	}
+	if me.Error != "oops" {
+		t.Errorf("Error mismatch: %s", me.Error)
+	}
+}
+
+func TestParseAssistantMessageWithServerToolUse(t *testing.T) {
+	data := map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{
+			"id":   "msg_abc",
+			"role": "assistant",
+			"content": []interface{}{
+				map[string]interface{}{
+					"type":  "server_tool_use",
+					"id":    "stu_123",
+					"name":  "web_search",
+					"input": map[string]interface{}{"query": "Go testing"},
+				},
+			},
+			"model":         "claude-opus-4-5",
+			"stop_reason":   "tool_use",
+			"stop_sequence": nil,
+			"usage": map[string]interface{}{
+				"input_tokens":  float64(100),
+				"output_tokens": float64(20),
+			},
+		},
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+	am, ok := msg.(*AssistantMessage)
+	if !ok {
+		t.Fatalf("Expected *AssistantMessage, got %T", msg)
+	}
+	if len(am.Content) != 1 {
+		t.Fatalf("Expected 1 content block, got %d", len(am.Content))
+	}
+	stu, ok := am.Content[0].(*ServerToolUseBlock)
+	if !ok {
+		t.Fatalf("Expected *ServerToolUseBlock, got %T", am.Content[0])
+	}
+	if stu.ID != "stu_123" {
+		t.Errorf("ID mismatch: %s", stu.ID)
+	}
+	if string(stu.Name) != "web_search" {
+		t.Errorf("Name mismatch: %s", stu.Name)
+	}
+}
+
+func TestParseUserMessageWithAdvisorToolResult(t *testing.T) {
+	data := map[string]interface{}{
+		"type": "user",
+		"message": map[string]interface{}{
+			"role": "user",
+			"content": []interface{}{
+				map[string]interface{}{
+					"type":        "advisor_tool_result",
+					"tool_use_id": "stu_123",
+					"content":     map[string]interface{}{"results": []interface{}{"result1"}},
+				},
+			},
+		},
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+	um, ok := msg.(*UserMessage)
+	if !ok {
+		t.Fatalf("Expected *UserMessage, got %T", msg)
+	}
+	contentSlice, ok := um.Content.([]ContentBlock)
+	if !ok {
+		t.Fatalf("Expected um.Content to be []ContentBlock, got %T", um.Content)
+	}
+	if len(contentSlice) != 1 {
+		t.Fatalf("Expected 1 content block, got %d", len(contentSlice))
+	}
+	str, ok := contentSlice[0].(*ServerToolResultBlock)
+	if !ok {
+		t.Fatalf("Expected *ServerToolResultBlock, got %T", contentSlice[0])
+	}
+	if str.ToolUseID != "stu_123" {
+		t.Errorf("ToolUseID mismatch: %s", str.ToolUseID)
+	}
+}
+
 func TestParseResultMessageWithNullStopReason(t *testing.T) {
 	// Test parsing a result message with explicit null stop_reason.
 	// When stop_reason is null/missing, it should be an empty string.

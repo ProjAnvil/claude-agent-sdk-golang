@@ -143,6 +143,8 @@ func parseSystemMessage(data map[string]interface{}) (Message, error) {
 			return parseTaskProgressMessage(data)
 		case "task_notification":
 			return parseTaskNotificationMessage(data)
+		case "mirror_error":
+			return parseMirrorErrorMessage(data)
 		}
 	}
 
@@ -475,6 +477,45 @@ func parseRateLimitEvent(data map[string]interface{}) (*RateLimitEvent, error) {
 		msg.SessionID = sessionID
 	} else {
 		return nil, NewMessageParseError("missing required field in rate_limit_event message: session_id", data)
+	}
+
+	return msg, nil
+}
+
+// parseMirrorErrorMessage parses a mirror_error system message.
+// These are SDK-synthesized messages (never emitted by the CLI) that surface
+// SessionStore.Append failures to consumers.
+func parseMirrorErrorMessage(data map[string]interface{}) (*MirrorErrorMessage, error) {
+	msg := &MirrorErrorMessage{
+		Subtype: "mirror_error",
+		Data:    data,
+	}
+
+	if errStr, ok := data["error"].(string); ok {
+		msg.Error = errStr
+	}
+
+	if uuid, ok := data["uuid"].(string); ok {
+		msg.UUID = uuid
+	}
+
+	if sessionID, ok := data["session_id"].(string); ok {
+		msg.SessionID = sessionID
+	}
+
+	// Parse the SessionKey if present.
+	if keyRaw, ok := data["key"].(map[string]interface{}); ok {
+		key := &SessionKey{}
+		if pk, ok := keyRaw["project_key"].(string); ok {
+			key.ProjectKey = pk
+		}
+		if sid, ok := keyRaw["session_id"].(string); ok {
+			key.SessionID = sid
+		}
+		if subpath, ok := keyRaw["subpath"].(string); ok {
+			key.Subpath = subpath
+		}
+		msg.Key = key
 	}
 
 	return msg, nil

@@ -85,6 +85,23 @@ type ClaudeAgentOptions struct {
 	Effort string
 	// TaskBudget sets an API-side task budget in tokens.
 	TaskBudget *TaskBudget
+	// Skills configures the skills allowlist.
+	// Accepted values:
+	//   nil        → no SDK auto-configuration (CLI defaults apply)
+	//   "all"      → enable every discovered skill ("Skill" tool injected)
+	//   []string   → enable only the named skills ("Skill(name)" entries injected)
+	// When Skills is set and SettingSources is nil, SettingSources defaults to
+	// ["user","project"].
+	Skills interface{}
+	// SessionStore is the transcript-mirror store adapter.
+	// When set, --session-mirror is passed to the CLI subprocess and incoming
+	// transcript_mirror frames are forwarded to the store via the batcher.
+	SessionStore SessionStore
+	// LoadTimeoutMs is the upper bound on SessionStore.Load / ListSubkeys calls
+	// during resume materialization, in milliseconds.
+	// A value of 0 means immediate timeout; use a large value to effectively
+	// disable. Defaults to 60 000 ms (60 seconds).
+	LoadTimeoutMs int
 }
 
 // DefaultOptions returns ClaudeAgentOptions with default values.

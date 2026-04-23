@@ -14,14 +14,19 @@ import (
 
 // Query handles bidirectional control protocol on top of Transport.
 type Query struct {
-	transport         transport.Transport
-	isStreamingMode   bool
-	canUseTool        CanUseToolFunc
-	hooks             map[string][]HookMatcherInternal
-	sdkMCPServers     map[string]*MCPServer
-	agents            map[string]interface{}
+	transport              transport.Transport
+	isStreamingMode        bool
+	canUseTool             CanUseToolFunc
+	hooks                  map[string][]HookMatcherInternal
+	sdkMCPServers          map[string]*MCPServer
+	agents                 map[string]interface{}
 	excludeDynamicSections *bool
-	initializeTimeout time.Duration
+	initializeTimeout      time.Duration
+	// skills is the skills allowlist (nil, "all", or []string).
+	// When it is a []string, the names are sent in the initialize request.
+	skills interface{}
+	// mirrorBatcher handles transcript_mirror frames from the CLI.
+	mirrorBatcher TranscriptMirrorBatcher
 
 	// Control protocol state
 	pendingResponses map[string]chan controlResult
@@ -139,16 +144,34 @@ type controlResult struct {
 	err      error
 }
 
+// TranscriptMirrorBatcher handles asynchronous forwarding of transcript_mirror
+// frames to a session store.
+type TranscriptMirrorBatcher interface {
+	// Enqueue schedules (filePath, entries) for delivery to the session store.
+	Enqueue(filePath string, entries []map[string]interface{})
+	// Flush waits for all currently-enqueued items to be delivered.
+	Flush(ctx context.Context) error
+	// Close flushes and shuts down the batcher.
+	Close(ctx context.Context) error
+}
+
 // QueryConfig configures a Query instance.
 type QueryConfig struct {
-	Transport         transport.Transport
-	IsStreamingMode   bool
-	CanUseTool        CanUseToolFunc
-	Hooks             map[string][]HookMatcherInternal
+	Transport              transport.Transport
+	IsStreamingMode        bool
+	CanUseTool             CanUseToolFunc
+	Hooks                  map[string][]HookMatcherInternal
 	SdkMCPServers          map[string]*MCPServer
 	Agents                 map[string]interface{}
 	ExcludeDynamicSections *bool
 	InitializeTimeout      time.Duration
+	// Skills is the skills allowlist passed to the initialize request.
+	// Accepted: nil, "all", or []string{names...}.
+	Skills interface{}
+	// MirrorBatcher handles transcript_mirror frames from the CLI.
+	// When non-nil, transcript_mirror messages are peeled off the stream and
+	// forwarded to the batcher rather than being yielded to callers.
+	MirrorBatcher TranscriptMirrorBatcher
 }
 
 // NewQuery creates a new Query instance.
@@ -158,20 +181,22 @@ func NewQuery(cfg QueryConfig) *Query {
 	}
 
 	return &Query{
-		transport:         cfg.Transport,
-		isStreamingMode:   cfg.IsStreamingMode,
-		canUseTool:        cfg.CanUseTool,
-		hooks:             cfg.Hooks,
-		sdkMCPServers:     cfg.SdkMCPServers,
-		agents:            cfg.Agents,
+		transport:              cfg.Transport,
+		isStreamingMode:        cfg.IsStreamingMode,
+		canUseTool:             cfg.CanUseTool,
+		hooks:                  cfg.Hooks,
+		sdkMCPServers:          cfg.SdkMCPServers,
+		agents:                 cfg.Agents,
 		excludeDynamicSections: cfg.ExcludeDynamicSections,
-		initializeTimeout: cfg.InitializeTimeout,
-		pendingResponses:  make(map[string]chan controlResult),
-		hookCallbacks:     make(map[string]HookCallback),
-		inflightRequests:  make(map[string]context.CancelFunc),
-		rawMessages:       make(chan map[string]interface{}, 100),
-		errors:            make(chan error, 10),
-		firstResultCh:     make(chan struct{}),
+		initializeTimeout:      cfg.InitializeTimeout,
+		skills:                 cfg.Skills,
+		mirrorBatcher:          cfg.MirrorBatcher,
+		pendingResponses:       make(map[string]chan controlResult),
+		hookCallbacks:          make(map[string]HookCallback),
+		inflightRequests:       make(map[string]context.CancelFunc),
+		rawMessages:            make(chan map[string]interface{}, 100),
+		errors:                 make(chan error, 10),
+		firstResultCh:          make(chan struct{}),
 	}
 }
 
@@ -225,6 +250,10 @@ func (q *Query) Initialize(ctx context.Context) (map[string]interface{}, error) 
 	}
 	if q.excludeDynamicSections != nil {
 		request["excludeDynamicSections"] = *q.excludeDynamicSections
+	}
+	// Skills list is sent only when it's a concrete []string (not nil or "all").
+	if skillsList, ok := q.skills.([]string); ok && skillsList != nil {
+		request["skills"] = skillsList
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, q.initializeTimeout)
@@ -353,6 +382,11 @@ func (q *Query) Close() error {
 	q.closed = true
 	q.mu.Unlock()
 
+	// Close (and flush) mirror batcher before closing the transport.
+	if q.mirrorBatcher != nil {
+		_ = q.mirrorBatcher.Close(context.Background())
+	}
+
 	return q.transport.Close()
 }
 
@@ -391,6 +425,26 @@ func (q *Query) readMessages() {
 			continue
 		}
 
+		// transcript_mirror frames are consumed here and forwarded to the
+		// batcher rather than being surfaced to callers.
+		if msgType == "transcript_mirror" {
+			if q.mirrorBatcher != nil {
+				filePath, _ := data["file_path"].(string)
+				var entries []map[string]interface{}
+				if raw, ok := data["entries"].([]interface{}); ok {
+					for _, e := range raw {
+						if m, ok := e.(map[string]interface{}); ok {
+							entries = append(entries, m)
+						}
+					}
+				}
+				if filePath != "" && len(entries) > 0 {
+					q.mirrorBatcher.Enqueue(filePath, entries)
+				}
+			}
+			continue
+		}
+
 		// Track results for proper stream closure
 		if msgType == "result" {
 			q.mu.Lock()
@@ -399,6 +453,11 @@ func (q *Query) readMessages() {
 				close(q.firstResultCh)
 			}
 			q.mu.Unlock()
+			// Flush mirror batcher before yielding result so all prior frames
+			// have been persisted when callers observe the result message.
+			if q.mirrorBatcher != nil {
+				_ = q.mirrorBatcher.Flush(context.Background())
+			}
 		}
 
 		// Send raw data to be parsed by caller

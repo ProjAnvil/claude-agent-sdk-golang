@@ -932,3 +932,41 @@ func TestForkSession_SearchAllProjects(t *testing.T) {
 		t.Error("Expected non-empty forked session ID")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Cascade delete: subagent directory
+// ---------------------------------------------------------------------------
+
+// TestDeleteSession_CascadingSubagentDir verifies that DeleteSession also
+// removes the sibling subagent directory (same name without .jsonl).
+func TestDeleteSession_CascadingSubagentDir(t *testing.T) {
+	_, projectPath, projectDir := setupTestProject(t)
+
+	sid := generateUUID()
+	// Create the main session file
+	sessionFile := makeSessionFile(t, projectDir, sid)
+
+	// Create the sibling subagent directory with a dummy file inside
+	subagentDir := strings.TrimSuffix(sessionFile, ".jsonl")
+	if err := os.MkdirAll(subagentDir, 0755); err != nil {
+		t.Fatalf("MkdirAll subagentDir: %v", err)
+	}
+	dummyFile := filepath.Join(subagentDir, "agent-abc.jsonl")
+	if err := os.WriteFile(dummyFile, []byte(`{"type":"user"}`+"\n"), 0644); err != nil {
+		t.Fatalf("WriteFile dummy: %v", err)
+	}
+
+	err := DeleteSession(sid, &projectPath)
+	if err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	// Main session file must be gone
+	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
+		t.Error("Expected session file to be deleted")
+	}
+	// Subagent directory must also be gone
+	if _, err := os.Stat(subagentDir); !os.IsNotExist(err) {
+		t.Error("Expected subagent directory to be removed by cascading delete")
+	}
+}

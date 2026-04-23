@@ -758,6 +758,192 @@ func TestMcpServerStatus_ClaudeAIProxy(t *testing.T) {
 	}
 }
 
+// ---- Tests for new types added in v0.1.58–v0.1.65 ----
+
+func TestServerToolUseBlockJSON(t *testing.T) {
+	block := &ServerToolUseBlock{
+		ID:    "stu_abc123",
+		Name:  ServerToolNameWebSearch,
+		Input: map[string]interface{}{"query": "Go generics"},
+	}
+
+	data, err := json.Marshal(block)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if raw["type"] != "server_tool_use" {
+		t.Errorf("Expected type=server_tool_use, got %v", raw["type"])
+	}
+	if raw["id"] != "stu_abc123" {
+		t.Errorf("Unexpected id: %v", raw["id"])
+	}
+	if raw["name"] != string(ServerToolNameWebSearch) {
+		t.Errorf("Unexpected name: %v", raw["name"])
+	}
+}
+
+func TestServerToolUseBlockContentBlockMarker(t *testing.T) {
+	block := &ServerToolUseBlock{ID: "x", Name: ServerToolNameBashCodeExecution}
+	// Just confirm it implements ContentBlock interface.
+	var _ ContentBlock = block
+}
+
+func TestServerToolResultBlockJSON(t *testing.T) {
+	block := &ServerToolResultBlock{
+		ToolUseID: "stu_abc123",
+		Content:   map[string]interface{}{"result": "42"},
+	}
+
+	data, err := json.Marshal(block)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if raw["type"] != "advisor_tool_result" {
+		t.Errorf("Expected type=advisor_tool_result, got %v", raw["type"])
+	}
+	if raw["tool_use_id"] != "stu_abc123" {
+		t.Errorf("Unexpected tool_use_id: %v", raw["tool_use_id"])
+	}
+}
+
+func TestServerToolResultBlockContentBlockMarker(t *testing.T) {
+	block := &ServerToolResultBlock{ToolUseID: "x"}
+	var _ ContentBlock = block
+}
+
+func TestMirrorErrorMessageMarker(t *testing.T) {
+	msg := &MirrorErrorMessage{
+		Subtype:   "mirror_error",
+		Error:     "store unavailable",
+		UUID:      "uuid-1",
+		SessionID: "sess-1",
+		Key:       &SessionKey{ProjectKey: "pk", SessionID: "sid"},
+	}
+
+	// Confirm it implements Message.
+	var _ Message = msg
+
+	if msg.Subtype != "mirror_error" {
+		t.Error("Subtype mismatch")
+	}
+	if msg.Key.ProjectKey != "pk" {
+		t.Error("Key.ProjectKey mismatch")
+	}
+}
+
+func TestServerToolNameConstants(t *testing.T) {
+	// Verify a sample of the defined constants.
+	constants := []ServerToolName{
+		ServerToolNameWebSearch,
+		ServerToolNameWebFetch,
+		ServerToolNameCodeExecution,
+		ServerToolNameBashCodeExecution,
+		ServerToolNameTextEditorCodeExecution,
+	}
+	for _, c := range constants {
+		if c == "" {
+			t.Errorf("ServerToolName constant is empty")
+		}
+	}
+}
+
+func TestParseContentBlockServerToolUse(t *testing.T) {
+	data := map[string]interface{}{
+		"type":  "server_tool_use",
+		"id":    "stu_xyz",
+		"name":  "web_search",
+		"input": map[string]interface{}{"q": "hello"},
+	}
+	block, err := ParseContentBlock(data)
+	if err != nil {
+		t.Fatalf("ParseContentBlock error: %v", err)
+	}
+	stu, ok := block.(*ServerToolUseBlock)
+	if !ok {
+		t.Fatalf("Expected *ServerToolUseBlock, got %T", block)
+	}
+	if stu.ID != "stu_xyz" {
+		t.Errorf("ID mismatch: %s", stu.ID)
+	}
+}
+
+func TestParseContentBlockAdvisorToolResult(t *testing.T) {
+	data := map[string]interface{}{
+		"type":        "advisor_tool_result",
+		"tool_use_id": "stu_abc",
+		"content":     map[string]interface{}{"answer": "42"},
+	}
+	block, err := ParseContentBlock(data)
+	if err != nil {
+		t.Fatalf("ParseContentBlock error: %v", err)
+	}
+	str, ok := block.(*ServerToolResultBlock)
+	if !ok {
+		t.Fatalf("Expected *ServerToolResultBlock, got %T", block)
+	}
+	if str.ToolUseID != "stu_abc" {
+		t.Errorf("ToolUseID mismatch: %s", str.ToolUseID)
+	}
+}
+
+func TestThinkingConfigDisplay(t *testing.T) {
+	cfg := &ThinkingConfig{
+		Type:         "adaptive",
+		BudgetTokens: 0,
+		Display:      "summarized",
+	}
+	if cfg.Display != "summarized" {
+		t.Error("Display field mismatch")
+	}
+}
+
+func TestSessionKeyStruct(t *testing.T) {
+	key := SessionKey{
+		ProjectKey: "my-project",
+		SessionID:  "sess-1",
+		Subpath:    "subagent/1",
+	}
+	if key.ProjectKey != "my-project" {
+		t.Error("ProjectKey mismatch")
+	}
+	if key.SessionID != "sess-1" {
+		t.Error("SessionID mismatch")
+	}
+	if key.Subpath != "subagent/1" {
+		t.Error("Subpath mismatch")
+	}
+}
+
+func TestSessionStoreListEntry(t *testing.T) {
+	entry := SessionStoreListEntry{SessionID: "s1", Mtime: 12345}
+	if entry.SessionID != "s1" || entry.Mtime != 12345 {
+		t.Error("SessionStoreListEntry field mismatch")
+	}
+}
+
+func TestSessionSummaryEntry(t *testing.T) {
+	e := SessionSummaryEntry{
+		SessionID: "s1",
+		Mtime:     9999,
+		Data:      map[string]interface{}{"custom_title": "My Session"},
+	}
+	if e.Data["custom_title"] != "My Session" {
+		t.Error("Data field mismatch")
+	}
+}
+
 func TestMcpStatusResponse_WrapsServers(t *testing.T) {
 	resp := McpStatusResponse{
 		MCPServers: []McpServerStatus{

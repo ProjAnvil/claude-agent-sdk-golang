@@ -45,6 +45,16 @@ type TransportOptions struct {
 	TaskBudget *int
 	// SystemPromptFile is the path to a file containing the system prompt.
 	SystemPromptFile *SystemPromptFile
+	// Skills is an optional skill allowlist. Accepted values:
+	//   nil  → no SDK auto-configuration (CLI defaults apply)
+	//   "all" → enable every discovered skill (Skill tool injected)
+	//   []string → enable only the named skills (Skill(name) entries injected)
+	Skills interface{}
+	// SessionStore is the store adapter for mirroring session transcripts.
+	// When set, --session-mirror is passed to the CLI subprocess.
+	// The interface uses interface{} here to avoid circular imports with the
+	// claude package; the actual value must satisfy the claude.SessionStore interface.
+	SessionStore interface{}
 }
 
 // SystemPromptFile represents a file-based system prompt.
@@ -76,6 +86,9 @@ type PluginConfig struct {
 type ThinkingConfig struct {
 	Type         string `json:"type"` // "adaptive", "enabled", "disabled"
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	// Display controls how thinking text is surfaced: "summarized" or "omitted".
+	// Only valid for "adaptive" and "enabled" types.
+	Display string `json:"display,omitempty"` // "summarized" or "omitted"
 }
 
 // SandboxSettings configures bash command sandboxing.

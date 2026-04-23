@@ -1848,3 +1848,155 @@ func TestBuildConversationChain(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// ListSubagents / GetSubagentMessages — added in v0.1.65
+// ---------------------------------------------------------------------------
+
+// setupSubagentDir creates a project directory layout and a subagent dir
+// mirroring the Python SDK pattern:
+//
+//	<projectsDir>/<sanitized projectPath>/<sessionID>/agent-<id>.jsonl
+func setupSubagentDir(t *testing.T, sessionID string) (projectPath string, subagentDir string, cleanup func()) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+	configDir := filepath.Join(tmpDir, ".claude")
+	projectsDir := filepath.Join(configDir, "projects")
+	os.MkdirAll(projectsDir, 0755)
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	projectPath = filepath.Join(tmpDir, "proj")
+	os.MkdirAll(projectPath, 0755)
+
+	sanitized := sanitizePath(projectPath)
+	projectDir := filepath.Join(projectsDir, sanitized)
+	os.MkdirAll(projectDir, 0755)
+
+	// create main session file (required by resolveSubagentsDir)
+	sessionFile := filepath.Join(projectDir, sessionID+".jsonl")
+	os.WriteFile(sessionFile, []byte(`{"type":"user"}`+"\n"), 0644)
+
+	subagentDir = strings.TrimSuffix(sessionFile, ".jsonl")
+	os.MkdirAll(subagentDir, 0755)
+
+	cleanup = func() {}
+	return
+}
+
+func TestListSubagents_NoSubagentsDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+	configDir := filepath.Join(tmpDir, ".claude")
+	projectsDir := filepath.Join(configDir, "projects")
+	os.MkdirAll(projectsDir, 0755)
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	projPath := filepath.Join(tmpDir, "proj")
+	os.MkdirAll(projPath, 0755)
+
+	sanitized := sanitizePath(projPath)
+	projDir := filepath.Join(projectsDir, sanitized)
+	os.MkdirAll(projDir, 0755)
+
+	sid := generateUUID()
+	// create session file but NO subagent dir
+	os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte(`{"type":"user"}`+"\n"), 0644)
+
+	ids, err := ListSubagents(&ListSubagentsOptions{
+		SessionID: sid,
+		Directory: &projPath,
+	})
+	if err != nil {
+		t.Fatalf("ListSubagents: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("Expected empty list when no subagent dir, got %v", ids)
+	}
+}
+
+func TestListSubagents_WithSubagents(t *testing.T) {
+	sid := generateUUID()
+	projectPath, subagentDir, _ := setupSubagentDir(t, sid)
+
+	// create two agent files
+	agentIDs := []string{"agent1", "agent2"}
+	for _, aid := range agentIDs {
+		fp := filepath.Join(subagentDir, "agent-"+aid+".jsonl")
+		os.WriteFile(fp, []byte(`{"type":"user"}`+"\n"), 0644)
+	}
+
+	ids, err := ListSubagents(&ListSubagentsOptions{
+		SessionID: sid,
+		Directory: &projectPath,
+	})
+	if err != nil {
+		t.Fatalf("ListSubagents: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("Expected 2 subagents, got %d: %v", len(ids), ids)
+	}
+	// IDs should be the part after "agent-"
+	found := map[string]bool{}
+	for _, id := range ids {
+		found[id] = true
+	}
+	for _, want := range agentIDs {
+		if !found[want] {
+			t.Errorf("Expected agentID %q in list, got %v", want, ids)
+		}
+	}
+}
+
+func TestListSubagents_InvalidSessionID(t *testing.T) {
+	dir := "/tmp"
+	_, err := ListSubagents(&ListSubagentsOptions{
+		SessionID: "not-a-uuid",
+		Directory: &dir,
+	})
+	if err == nil {
+		t.Error("Expected error for invalid session ID")
+	}
+}
+
+func TestGetSubagentMessages_NotFound(t *testing.T) {
+	sid := generateUUID()
+	projectPath, subagentDir, _ := setupSubagentDir(t, sid)
+	_ = subagentDir
+
+	_, err := GetSubagentMessages(&GetSubagentMessagesOptions{
+		SessionID: sid,
+		AgentID:   "nonexistent-agent",
+		Directory: &projectPath,
+	})
+	if err == nil {
+		t.Error("Expected error when agent JSONL not found")
+	}
+}
+
+func TestGetSubagentMessages_Basic(t *testing.T) {
+	sid := generateUUID()
+	projectPath, subagentDir, _ := setupSubagentDir(t, sid)
+
+	// Write a two-turn JSONL with proper UUID/parentUUID chain for "myagent"
+	userUUID := generateUUID()
+	assistantUUID := generateUUID()
+	agentFile := filepath.Join(subagentDir, "agent-myagent.jsonl")
+	lines := []string{
+		`{"type":"user","uuid":"` + userUUID + `","message":{"role":"user","content":"hi"}}`,
+		`{"type":"assistant","uuid":"` + assistantUUID + `","parentUuid":"` + userUUID + `","message":{"role":"assistant","content":"hello"}}`,
+	}
+	os.WriteFile(agentFile, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+
+	msgs, err := GetSubagentMessages(&GetSubagentMessagesOptions{
+		SessionID: sid,
+		AgentID:   "myagent",
+		Directory: &projectPath,
+	})
+	if err != nil {
+		t.Fatalf("GetSubagentMessages: %v", err)
+	}
+	if len(msgs) == 0 {
+		t.Errorf("Expected messages from subagent transcript, got 0")
+	}
+}
