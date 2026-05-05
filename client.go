@@ -19,6 +19,7 @@ type ClaudeSDKClient struct {
 	mu               sync.RWMutex
 	connected        bool
 	materialized     *MaterializedResume
+	mirrorBatcher    *internal.SimpleMirrorBatcher
 }
 
 // NewClient creates a new ClaudeSDKClient.
@@ -65,6 +66,18 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 			c.materialized = m
 			c.options = applyMaterializedOptions(c.options, m)
 		}
+	}
+
+	// Build a mirror batcher when a SessionStore is wired so that
+	// transcript_mirror frames from the subprocess are forwarded to the store.
+	if c.options != nil && c.options.SessionStore != nil {
+		c.mirrorBatcher = buildMirrorBatcher(
+			c.options.SessionStore,
+			c.materialized,
+			c.options.Env,
+			c.options.SessionStoreFlush,
+			nil, // errors forwarded via MirrorErrorMessage frames
+		)
 	}
 
 	// Convert options
@@ -214,14 +227,20 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 	}
 
 	// Create query handler
-	c.query = internal.NewQuery(internal.QueryConfig{
+	queryConfig := internal.QueryConfig{
 		Transport:       t,
 		IsStreamingMode: true,
 		CanUseTool:      canUseTool,
 		Hooks:           internalHooks,
 		SdkMCPServers:   sdkServers,
 		Agents:          internalAgents,
-	})
+	}
+	// Only set MirrorBatcher when non-nil to avoid a non-nil interface wrapping
+	// a nil pointer (Go interface nil semantics).
+	if c.mirrorBatcher != nil {
+		queryConfig.MirrorBatcher = c.mirrorBatcher
+	}
+	c.query = internal.NewQuery(queryConfig)
 
 	c.query.Start()
 
@@ -609,6 +628,11 @@ func (c *ClaudeSDKClient) Close() error {
 
 	if c.query != nil {
 		c.query.Close()
+	}
+
+	if c.mirrorBatcher != nil {
+		_ = c.mirrorBatcher.Close(context.Background())
+		c.mirrorBatcher = nil
 	}
 
 	if c.materialized != nil {

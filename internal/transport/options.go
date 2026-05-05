@@ -104,11 +104,15 @@ type SandboxSettings struct {
 
 // SandboxNetworkConfig configures network settings for sandbox.
 type SandboxNetworkConfig struct {
-	AllowUnixSockets    []string `json:"allowUnixSockets,omitempty"`
-	AllowAllUnixSockets bool     `json:"allowAllUnixSockets,omitempty"`
-	AllowLocalBinding   bool     `json:"allowLocalBinding,omitempty"`
-	HTTPProxyPort       int      `json:"httpProxyPort,omitempty"`
-	SOCKSProxyPort      int      `json:"socksProxyPort,omitempty"`
+	AllowedDomains          []string `json:"allowedDomains,omitempty"`
+	DeniedDomains           []string `json:"deniedDomains,omitempty"`
+	AllowManagedDomainsOnly bool     `json:"allowManagedDomainsOnly,omitempty"`
+	AllowUnixSockets        []string `json:"allowUnixSockets,omitempty"`
+	AllowAllUnixSockets     bool     `json:"allowAllUnixSockets,omitempty"`
+	AllowLocalBinding       bool     `json:"allowLocalBinding,omitempty"`
+	AllowMachLookup         []string `json:"allowMachLookup,omitempty"`
+	HTTPProxyPort           int      `json:"httpProxyPort,omitempty"`
+	SOCKSProxyPort          int      `json:"socksProxyPort,omitempty"`
 }
 
 // SandboxIgnoreViolations specifies violations to ignore.

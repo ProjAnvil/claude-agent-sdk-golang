@@ -205,3 +205,27 @@ func TestOptionsThinkingConfigDisplay(t *testing.T) {
 		t.Errorf("Thinking.Display mismatch: %s", opts.Thinking.Display)
 	}
 }
+
+// TestOptionsSessionStoreFlushDefault verifies that the zero value of
+// SessionStoreFlush is the empty string (not "batched"), and that both
+// recognized values can be assigned.
+func TestOptionsSessionStoreFlushDefault(t *testing.T) {
+	opts := &ClaudeAgentOptions{}
+	if opts.SessionStoreFlush != "" {
+		t.Errorf("Default SessionStoreFlush should be empty string, got %q", opts.SessionStoreFlush)
+	}
+}
+
+func TestOptionsSessionStoreFlushBatched(t *testing.T) {
+	opts := &ClaudeAgentOptions{SessionStoreFlush: SessionStoreFlushModeBatched}
+	if opts.SessionStoreFlush != "batched" {
+		t.Errorf("Expected 'batched', got %q", opts.SessionStoreFlush)
+	}
+}
+
+func TestOptionsSessionStoreFlushEager(t *testing.T) {
+	opts := &ClaudeAgentOptions{SessionStoreFlush: SessionStoreFlushModeEager}
+	if opts.SessionStoreFlush != "eager" {
+		t.Errorf("Expected 'eager', got %q", opts.SessionStoreFlush)
+	}
+}

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.73] - 2026-05-15
+
+Port of Python SDK v0.1.65-v0.1.73 changes.
+
+### Added
+
+- **`SessionStoreFlushMode`** type alias and constants `SessionStoreFlushModeBatched` / `SessionStoreFlushModeEager` -- controls when transcript-mirror entries are flushed to the `SessionStore`. Ported from Python SDK #905.
+- **`ClaudeAgentOptions.SessionStoreFlush`** field -- when `SessionStore` is set, controls the flush behaviour of the mirror batcher. Ported from Python SDK #905.
+- **`SandboxNetworkConfig`** new fields: `AllowedDomains`, `DeniedDomains`, `AllowManagedDomainsOnly`, `AllowMachLookup`. Ported from Python SDK #893.
+- **`session_resume.go`**: `sessionStoreWrapper`, `getProjectsDirFromEnv`, `buildMirrorBatcher` -- mirror batcher factory with proper projectsDir resolution. Ported from Python SDK #905.
+- **Mirror batcher wiring in `client.go`**: `Connect()` now creates and wires `SimpleMirrorBatcher` when `SessionStore != nil`. `Close()` properly drains and closes the batcher. Fixes incomplete wiring from v0.1.65.
+
+### Fixed
+
+- **`parseSessionInfoFromLite`** (`sessions.go`): `created_at` is now extracted correctly when the first JSONL record lacks a timestamp field (e.g. `permission-mode` entries). Previously only the first line was scanned. Ported from Python SDK #904 / #907.
+
+
 ## [0.1.65] - 2026-05-01
 
 Port of Python SDK v0.1.58–v0.1.65 changes.

@@ -500,11 +500,15 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 		}
 		if opts.Sandbox.Network != nil {
 			transportOpts.Sandbox.Network = &transport.SandboxNetworkConfig{
-				AllowUnixSockets:    opts.Sandbox.Network.AllowUnixSockets,
-				AllowAllUnixSockets: opts.Sandbox.Network.AllowAllUnixSockets,
-				AllowLocalBinding:   opts.Sandbox.Network.AllowLocalBinding,
-				HTTPProxyPort:       opts.Sandbox.Network.HTTPProxyPort,
-				SOCKSProxyPort:      opts.Sandbox.Network.SOCKSProxyPort,
+				AllowedDomains:          opts.Sandbox.Network.AllowedDomains,
+				DeniedDomains:           opts.Sandbox.Network.DeniedDomains,
+				AllowManagedDomainsOnly: opts.Sandbox.Network.AllowManagedDomainsOnly,
+				AllowUnixSockets:        opts.Sandbox.Network.AllowUnixSockets,
+				AllowAllUnixSockets:     opts.Sandbox.Network.AllowAllUnixSockets,
+				AllowLocalBinding:       opts.Sandbox.Network.AllowLocalBinding,
+				AllowMachLookup:         opts.Sandbox.Network.AllowMachLookup,
+				HTTPProxyPort:           opts.Sandbox.Network.HTTPProxyPort,
+				SOCKSProxyPort:          opts.Sandbox.Network.SOCKSProxyPort,
 			}
 		}
 		if opts.Sandbox.IgnoreViolations != nil {

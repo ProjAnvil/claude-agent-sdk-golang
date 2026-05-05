@@ -523,11 +523,15 @@ type SandboxSettings struct {
 
 // SandboxNetworkConfig configures network settings for sandbox.
 type SandboxNetworkConfig struct {
-	AllowUnixSockets    []string `json:"allowUnixSockets,omitempty"`
-	AllowAllUnixSockets bool     `json:"allowAllUnixSockets,omitempty"`
-	AllowLocalBinding   bool     `json:"allowLocalBinding,omitempty"`
-	HTTPProxyPort       int      `json:"httpProxyPort,omitempty"`
-	SOCKSProxyPort      int      `json:"socksProxyPort,omitempty"`
+	AllowedDomains          []string `json:"allowedDomains,omitempty"`
+	DeniedDomains           []string `json:"deniedDomains,omitempty"`
+	AllowManagedDomainsOnly bool     `json:"allowManagedDomainsOnly,omitempty"`
+	AllowUnixSockets        []string `json:"allowUnixSockets,omitempty"`
+	AllowAllUnixSockets     bool     `json:"allowAllUnixSockets,omitempty"`
+	AllowLocalBinding       bool     `json:"allowLocalBinding,omitempty"`
+	AllowMachLookup         []string `json:"allowMachLookup,omitempty"`
+	HTTPProxyPort           int      `json:"httpProxyPort,omitempty"`
+	SOCKSProxyPort          int      `json:"socksProxyPort,omitempty"`
 }
 
 // SandboxIgnoreViolations specifies violations to ignore.
@@ -965,3 +969,23 @@ func (*BaseSessionStore) Delete(_ context.Context, _ SessionKey) error {
 func (*BaseSessionStore) ListSubkeys(_ context.Context, _ SessionListSubkeysKey) ([]string, error) {
 	return nil, ErrNotImplemented
 }
+
+// SessionStoreFlushMode controls when transcript-mirror entries are flushed to
+// a SessionStore.
+//
+//   - "batched" (default): buffer entries and flush once per turn (on the
+//     result message) or when the pending buffer exceeds thresholds. Keeps
+//     adapter latency off the streaming hot path.
+//   - "eager": trigger a background flush after every transcript_mirror frame
+//     so SessionStore.Append sees entries in near real time. Appends are still
+//     serialized in enqueue order; a slow adapter will not stall the read loop.
+type SessionStoreFlushMode = string
+
+const (
+	// SessionStoreFlushModeBatched buffers entries and flushes once per turn.
+	// This is the default behavior.
+	SessionStoreFlushModeBatched SessionStoreFlushMode = "batched"
+	// SessionStoreFlushModeEager triggers a flush after every frame for
+	// near-real-time delivery to the SessionStore.
+	SessionStoreFlushModeEager SessionStoreFlushMode = "eager"
+)

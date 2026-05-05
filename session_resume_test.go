@@ -246,3 +246,99 @@ func splitOnNewline(s string) []string {
 	}
 	return result
 }
+
+// ---------------------------------------------------------------------------
+// getProjectsDirFromEnv
+// ---------------------------------------------------------------------------
+
+func TestGetProjectsDirFromEnv_UsesEnvOverride(t *testing.T) {
+	dir := getProjectsDirFromEnv(map[string]string{"CLAUDE_CONFIG_DIR": "/custom/config"})
+	want := filepath.Join("/custom/config", "projects")
+	if dir != want {
+		t.Errorf("got %q, want %q", dir, want)
+	}
+}
+
+func TestGetProjectsDirFromEnv_IgnoresEmptyEnvValue(t *testing.T) {
+	dir := getProjectsDirFromEnv(map[string]string{"CLAUDE_CONFIG_DIR": ""})
+	if dir == "" {
+		t.Error("expected non-empty projects dir when CLAUDE_CONFIG_DIR is blank")
+	}
+}
+
+func TestGetProjectsDirFromEnv_NilEnvFallsThrough(t *testing.T) {
+	dir := getProjectsDirFromEnv(nil)
+	if dir == "" {
+		t.Error("expected non-empty projects dir for nil env map")
+	}
+	if filepath.Base(dir) != "projects" {
+		t.Errorf("expected projects dir to end in projects, got %q", dir)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildMirrorBatcher
+// ---------------------------------------------------------------------------
+
+func TestBuildMirrorBatcher_ReturnsNonNil(t *testing.T) {
+	store := NewInMemorySessionStore()
+	batcher := buildMirrorBatcher(store, nil, nil, SessionStoreFlushModeBatched, nil)
+	if batcher == nil {
+		t.Fatal("buildMirrorBatcher returned nil")
+	}
+	_ = batcher.Close(context.Background())
+}
+
+func TestBuildMirrorBatcher_UsesMaterializedDir(t *testing.T) {
+	mat := &MaterializedResume{ConfigDir: t.TempDir()}
+	store := NewInMemorySessionStore()
+	batcher := buildMirrorBatcher(store, mat, nil, SessionStoreFlushModeEager, nil)
+	if batcher == nil {
+		t.Fatal("buildMirrorBatcher returned nil with materialized dir")
+	}
+	_ = batcher.Close(context.Background())
+}
+
+func TestBuildMirrorBatcher_UsesEnvOverride(t *testing.T) {
+	env := map[string]string{"CLAUDE_CONFIG_DIR": "/tmp/test-env-config"}
+	store := NewInMemorySessionStore()
+	batcher := buildMirrorBatcher(store, nil, env, SessionStoreFlushModeBatched, nil)
+	if batcher == nil {
+		t.Fatal("buildMirrorBatcher returned nil with env override")
+	}
+	_ = batcher.Close(context.Background())
+}
+
+// ---------------------------------------------------------------------------
+// sessionStoreWrapper
+// ---------------------------------------------------------------------------
+
+func TestSessionStoreWrapper_AppendRaw_UnresolvablePath(t *testing.T) {
+	store := NewInMemorySessionStore()
+	w := &sessionStoreWrapper{store: store, projectsDir: "/some/projects"}
+	err := w.AppendRaw(context.Background(), "/unrelated/path/x.jsonl",
+		[]map[string]interface{}{{"type": "user"}})
+	if err != nil {
+		t.Errorf("expected nil error for unresolvable path, got %v", err)
+	}
+}
+
+func TestSessionStoreWrapper_AppendRaw_ResolvablePath(t *testing.T) {
+	store := NewInMemorySessionStore()
+	tmpDir := t.TempDir()
+	projectsDir := filepath.Join(tmpDir, "projects")
+	os.MkdirAll(projectsDir, 0755)
+
+	sessionID := generateUUID()
+	sanitized := "-Users-test-myproject"
+	projectDir := filepath.Join(projectsDir, sanitized)
+	os.MkdirAll(projectDir, 0755)
+	filePath := filepath.Join(projectDir, sessionID+".jsonl")
+
+	w := &sessionStoreWrapper{store: store, projectsDir: projectsDir}
+	err := w.AppendRaw(context.Background(), filePath,
+		[]map[string]interface{}{{"type": "user", "content": "hello"}})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

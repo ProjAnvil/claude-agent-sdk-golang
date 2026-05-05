@@ -572,9 +572,12 @@ func parseSessionInfoFromLite(sessionID string, lite *liteSessionFile, projectPa
 		}
 	}
 
-	// created_at from first entry's ISO timestamp (epoch ms)
+	// created_at from the first ISO timestamp found in the head (epoch ms).
+	// Scans the whole head rather than only firstLine because the first record
+	// may be a metadata-only entry (e.g. permission-mode) with no timestamp field;
+	// the first user/assistant record that follows does carry one.
 	var createdAt *int64
-	firstTimestamp := extractJSONStringField(firstLine, "timestamp")
+	firstTimestamp := extractJSONStringField(head, "timestamp")
 	if firstTimestamp != "" {
 		// Go's time.Parse doesn't handle trailing 'Z' formatting issues like Python
 		ts := firstTimestamp

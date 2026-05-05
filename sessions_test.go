@@ -2000,3 +2000,45 @@ func TestGetSubagentMessages_Basic(t *testing.T) {
 		t.Errorf("Expected messages from subagent transcript, got 0")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestCreatedAt_WhenFirstLineLacksTimestamp (regression for #904 / #907)
+// ---------------------------------------------------------------------------
+
+// TestCreatedAt_WhenFirstLineLacksTimestamp verifies that created_at is
+// extracted from a later line in the head buffer when the very first JSONL
+// record is a metadata-only entry (e.g. permission-mode) that carries no
+// timestamp field.  Prior to the fix, parseSessionInfoFromLite only scanned
+// the first line, so such sessions would always have created_at == nil.
+func TestCreatedAt_WhenFirstLineLacksTimestamp(t *testing.T) {
+	_, projectPath, projectDir := setupSessionTestProject(t)
+
+	sid := generateUUID()
+	fp := filepath.Join(projectDir, sid+".jsonl")
+	lines := []string{
+		// First line: metadata-only, no timestamp
+		compactJSON(map[string]interface{}{
+			"type":           "permission-mode",
+			"permissionMode": "acceptEdits",
+		}),
+		// Second line: user message with timestamp
+		compactJSON(map[string]interface{}{
+			"type":      "user",
+			"message":   map[string]interface{}{"content": "hello"},
+			"timestamp": "2026-01-15T10:30:00.000Z",
+		}),
+	}
+	os.WriteFile(fp, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+
+	sessions, _ := ListSessions(&ListSessionsOptions{Directory: &projectPath})
+	if len(sessions) != 1 {
+		t.Fatalf("Expected 1 session, got %d", len(sessions))
+	}
+	// 2026-01-15T10:30:00Z = 1768473000 seconds = 1768473000000 ms
+	if sessions[0].CreatedAt == nil {
+		t.Fatal("Expected created_at to be non-nil")
+	}
+	if *sessions[0].CreatedAt != 1768473000000 {
+		t.Errorf("Expected created_at=1768473000000, got %d", *sessions[0].CreatedAt)
+	}
+}

@@ -1298,3 +1298,82 @@ func TestVersion(t *testing.T) {
 		t.Errorf("Version %q too short to be a valid semver", Version)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SandboxNetworkConfig new fields (#893)
+// ---------------------------------------------------------------------------
+
+func TestSandboxNetworkConfig_NewFieldsRoundTrip(t *testing.T) {
+	cfg := SandboxNetworkConfig{
+		AllowedDomains:          []string{"example.com", "api.example.com"},
+		DeniedDomains:           []string{"evil.com"},
+		AllowManagedDomainsOnly: true,
+		AllowUnixSockets:        []string{"/var/run/app.sock"},
+		AllowAllUnixSockets:     false,
+		AllowLocalBinding:       true,
+		AllowMachLookup:         []string{"com.apple.locationd"},
+		HTTPProxyPort:           8080,
+		SOCKSProxyPort:          1080,
+	}
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var got SandboxNetworkConfig
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if len(got.AllowedDomains) != 2 || got.AllowedDomains[0] != "example.com" {
+		t.Errorf("AllowedDomains mismatch: %v", got.AllowedDomains)
+	}
+	if len(got.DeniedDomains) != 1 || got.DeniedDomains[0] != "evil.com" {
+		t.Errorf("DeniedDomains mismatch: %v", got.DeniedDomains)
+	}
+	if !got.AllowManagedDomainsOnly {
+		t.Error("AllowManagedDomainsOnly should be true")
+	}
+	if len(got.AllowMachLookup) != 1 || got.AllowMachLookup[0] != "com.apple.locationd" {
+		t.Errorf("AllowMachLookup mismatch: %v", got.AllowMachLookup)
+	}
+}
+
+func TestSandboxNetworkConfig_OmitemptyOnNilSlices(t *testing.T) {
+	cfg := SandboxNetworkConfig{
+		AllowLocalBinding: true,
+		HTTPProxyPort:     9090,
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+	if _, ok := m["allowedDomains"]; ok {
+		t.Error("allowedDomains should be omitted when nil")
+	}
+	if _, ok := m["deniedDomains"]; ok {
+		t.Error("deniedDomains should be omitted when nil")
+	}
+	if _, ok := m["allowMachLookup"]; ok {
+		t.Error("allowMachLookup should be omitted when nil")
+	}
+	if _, ok := m["allowManagedDomainsOnly"]; ok {
+		t.Error("allowManagedDomainsOnly should be omitted when false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SessionStoreFlushMode constants (#905)
+// ---------------------------------------------------------------------------
+
+func TestSessionStoreFlushMode_Constants(t *testing.T) {
+	if SessionStoreFlushModeBatched != "batched" {
+		t.Errorf("SessionStoreFlushModeBatched=%q, want 'batched'", SessionStoreFlushModeBatched)
+	}
+	if SessionStoreFlushModeEager != "eager" {
+		t.Errorf("SessionStoreFlushModeEager=%q, want 'eager'", SessionStoreFlushModeEager)
+	}
+}

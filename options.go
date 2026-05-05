@@ -97,6 +97,11 @@ type ClaudeAgentOptions struct {
 	// When set, --session-mirror is passed to the CLI subprocess and incoming
 	// transcript_mirror frames are forwarded to the store via the batcher.
 	SessionStore SessionStore
+	// SessionStoreFlush controls when transcript-mirror entries are flushed to
+	// SessionStore. "batched" (default) coalesces entries and flushes once per
+	// turn or at overflow. "eager" triggers a background flush after every
+	// frame for near-real-time delivery. Ignored when SessionStore is nil.
+	SessionStoreFlush SessionStoreFlushMode
 	// LoadTimeoutMs is the upper bound on SessionStore.Load / ListSubkeys calls
 	// during resume materialization, in milliseconds.
 	// A value of 0 means immediate timeout; use a large value to effectively

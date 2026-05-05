@@ -24,6 +24,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/ProjAnvil/claude-agent-sdk-golang/internal"
 )
 
 // MaterializedResume is the result of materializeResumeSession.
@@ -492,4 +494,76 @@ func contextWithTimeoutSec(parent context.Context, secs float64) (context.Contex
 		ms = 60000
 	}
 	return context.WithTimeout(parent, time.Duration(ms)*time.Millisecond)
+}
+
+// sessionStoreWrapper adapts a SessionStore to the internal.SessionStoreAppender
+// interface used by SimpleMirrorBatcher. It converts raw file paths from
+// transcript_mirror frames into SessionKey values using FilePathToSessionKey.
+type sessionStoreWrapper struct {
+	store       SessionStore
+	projectsDir string
+}
+
+func (w *sessionStoreWrapper) AppendRaw(ctx context.Context, filePath string, entries []map[string]interface{}) error {
+	key := FilePathToSessionKey(filePath, w.projectsDir)
+	if key == nil {
+		// Unresolvable path — silently drop rather than error to keep session
+		// mirroring non-fatal.
+		return nil
+	}
+	typed := make([]SessionStoreEntry, len(entries))
+	for i, e := range entries {
+		typed[i] = SessionStoreEntry(e)
+	}
+	return w.store.Append(ctx, *key, typed)
+}
+
+// getProjectsDirFromEnv resolves the projects directory, consulting env for a
+// CLAUDE_CONFIG_DIR override before falling back to the process environment.
+// This mirrors Python SDK's _get_projects_dir(env_override) so that callers
+// which pass CLAUDE_CONFIG_DIR in options.Env resolve the same directory that
+// the subprocess will write to.
+func getProjectsDirFromEnv(env map[string]string) string {
+	if env != nil {
+		if configDir, ok := env["CLAUDE_CONFIG_DIR"]; ok && configDir != "" {
+			return filepath.Join(configDir, "projects")
+		}
+	}
+	if dir, err := getProjectsDir(); err == nil {
+		return dir
+	}
+	// Best-effort fallback using the system home dir.
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".claude", "projects")
+	}
+	return filepath.Join(".claude", "projects")
+}
+
+// buildMirrorBatcher constructs the SimpleMirrorBatcher for a session.
+//
+// Resolves projectsDir to the materialized temp dir when present (so
+// file_path → key resolution matches what the subprocess writes), otherwise
+// derives it from env's CLAUDE_CONFIG_DIR or the process environment.
+//
+// flushMode is accepted for API parity with the Python SDK; the Go batcher
+// processes items as they arrive on a background goroutine, which already
+// provides near-real-time delivery similar to Python's "eager" mode.
+func buildMirrorBatcher(
+	store SessionStore,
+	materialized *MaterializedResume,
+	env map[string]string,
+	flushMode SessionStoreFlushMode, //nolint:unparam — kept for API parity
+	onError func(error),
+) *internal.SimpleMirrorBatcher {
+	var projectsDir string
+	if materialized != nil {
+		projectsDir = filepath.Join(materialized.ConfigDir, "projects")
+	} else {
+		projectsDir = getProjectsDirFromEnv(env)
+	}
+	wrapper := &sessionStoreWrapper{
+		store:       store,
+		projectsDir: projectsDir,
+	}
+	return internal.NewSimpleMirrorBatcher(wrapper, onError)
 }
