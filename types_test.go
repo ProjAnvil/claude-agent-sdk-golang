@@ -499,6 +499,22 @@ func TestHookOutputTypes(t *testing.T) {
 	if !ok || val["result"] != "modified" {
 		t.Errorf("Expected updatedMCPToolOutput result='modified'")
 	}
+
+	// updatedToolOutput (Python SDK #911) — PostToolUse hooks can replace tool output.
+	postToolWithUpdated := HookOutput{
+		HookSpecificOutput: map[string]interface{}{
+			"hookEventName": "PostToolUse",
+			"updatedToolOutput": map[string]interface{}{
+				"stdout":      "replaced",
+				"stderr":      "",
+				"interrupted": false,
+			},
+		},
+	}
+	uto, ok := postToolWithUpdated.HookSpecificOutput["updatedToolOutput"].(map[string]interface{})
+	if !ok || uto["stdout"] != "replaced" {
+		t.Errorf("Expected updatedToolOutput stdout='replaced', got %v", postToolWithUpdated.HookSpecificOutput["updatedToolOutput"])
+	}
 }
 
 // TestClaudeAgentOptionsWithSystemPromptFile tests SystemPromptFile on options.
@@ -1206,6 +1222,21 @@ func TestAgentDefinition_EffortField(t *testing.T) {
 
 	if m["effort"] != "high" {
 		t.Errorf("Expected effort='high', got %v", m["effort"])
+	}
+}
+
+func TestAgentDefinition_EffortXhigh(t *testing.T) {
+	agent := AgentDefinition{
+		Description: "xhigh effort agent",
+		Prompt:      "p",
+		Effort:      "xhigh",
+	}
+	data, _ := json.Marshal(agent)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+
+	if m["effort"] != "xhigh" {
+		t.Errorf("Expected effort='xhigh', got %v", m["effort"])
 	}
 }
 
