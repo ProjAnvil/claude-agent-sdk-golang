@@ -109,6 +109,18 @@ type SystemMessage struct {
 
 func (m *SystemMessage) messageMarker() {}
 
+// DeferredToolUse represents a tool use that was deferred by a PreToolUse hook
+// returning decision "defer".
+//
+// When a PreToolUse hook returns decision "defer", the run stops and the result
+// message carries the deferred tool call here so the caller can inspect it and
+// decide whether to resume.
+type DeferredToolUse struct {
+	ID    string                 `json:"id"`
+	Name  string                 `json:"name"`
+	Input map[string]interface{} `json:"input"`
+}
+
 // ResultMessage represents a result message with cost and usage information.
 type ResultMessage struct {
 	Subtype           string                 `json:"subtype"`
@@ -124,6 +136,8 @@ type ResultMessage struct {
 	StructuredOutput  interface{}            `json:"structured_output,omitempty"`
 	ModelUsage        map[string]interface{} `json:"model_usage,omitempty"`
 	PermissionDenials []interface{}          `json:"permission_denials,omitempty"`
+	DeferredToolUse  *DeferredToolUse       `json:"deferred_tool_use,omitempty"`
+	APIErrorStatus   *int                   `json:"api_error_status,omitempty"`
 	Errors            []string               `json:"errors,omitempty"`
 	UUID              string                 `json:"uuid,omitempty"`
 }
@@ -506,7 +520,7 @@ type AgentDefinition struct {
 	InitialPrompt   string         `json:"initialPrompt,omitempty"`
 	MaxTurns        *int           `json:"maxTurns,omitempty"`
 	Background      *bool          `json:"background,omitempty"`
-	Effort          interface{}    `json:"effort,omitempty"`         // "low", "medium", "high", "max", or int
+	Effort          interface{}    `json:"effort,omitempty"`         // "low", "medium", "high", "xhigh", "max", or int
 	PermissionMode  PermissionMode `json:"permissionMode,omitempty"` // e.g. PermissionModeDefault
 }
 
@@ -562,8 +576,13 @@ type CanUseToolFunc func(toolName string, input map[string]interface{}, ctx Tool
 type ToolPermissionContext struct {
 	Signal      interface{}        // Future: abort signal support
 	Suggestions []PermissionUpdate // Permission suggestions from CLI
-	ToolUseID   string             // Unique identifier for this specific tool call
-	AgentID     string             // If running within a sub-agent, the sub-agent's ID
+	ToolUseID      string             // Unique identifier for this specific tool call
+	AgentID        string             // If running within a sub-agent, the sub-agent's ID
+	BlockedPath    string             // File path that triggered the permission request
+	DecisionReason string             // Explains why this permission request was triggered
+	Title          string             // Full permission prompt sentence (e.g. "Claude wants to read foo.txt")
+	DisplayName    string             // Short noun phrase for the tool action (e.g. "Read file")
+	Description    string             // Human-readable subtitle for the permission UI
 }
 
 // PermissionResult is the interface for permission results.
@@ -653,7 +672,7 @@ type HookOutput struct {
 	AsyncTimeout       int                    `json:"asyncTimeout,omitempty"`
 	SuppressOutput     bool                   `json:"suppressOutput,omitempty"`
 	StopReason         string                 `json:"stopReason,omitempty"`
-	Decision           string                 `json:"decision,omitempty"` // "block"
+	Decision           string                 `json:"decision,omitempty"` // "block", "defer"
 	SystemMessage      string                 `json:"systemMessage,omitempty"`
 	Reason             string                 `json:"reason,omitempty"`
 	HookSpecificOutput map[string]interface{} `json:"hookSpecificOutput,omitempty"`
@@ -856,6 +875,23 @@ type MirrorErrorMessage struct {
 }
 
 func (m *MirrorErrorMessage) messageMarker() {}
+
+// HookEventMessage is a hook event emitted by the CLI when IncludeHookEvents is enabled.
+//
+// When ClaudeAgentOptions.IncludeHookEvents is true, the CLI emits hook lifecycle
+// events (PreToolUse, PostToolUse, Stop, etc.) into the message stream. Each event
+// is identified by HookEventName and the full raw payload is available in Data.
+//
+// These arrive on the wire as {"type": "system", "subtype": "hook_started" | "hook_response", ...}.
+type HookEventMessage struct {
+	Subtype       string                 `json:"subtype"` // "hook_started" or "hook_response"
+	HookEventName string                 `json:"hook_event_name"`
+	Data          map[string]interface{} `json:"data"`
+	SessionID     string                 `json:"session_id,omitempty"`
+	UUID          string                 `json:"uuid,omitempty"`
+}
+
+func (m *HookEventMessage) messageMarker() {}
 
 // ---------------------------------------------------------------------------
 // Session Store Types (ported from Python SDK 0.1.64)

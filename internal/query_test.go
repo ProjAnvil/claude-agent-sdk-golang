@@ -1544,3 +1544,250 @@ done:
 		t.Error("Expected MirrorBatcher.Enqueue to be called for transcript_mirror frame")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests ported from Python SDK v0.1.73..v0.1.76
+// ---------------------------------------------------------------------------
+
+// TestHandleCanUseToolReceivesDecisionReason tests that the new permission context
+// fields are forwarded to the canUseTool callback.
+func TestHandleCanUseToolReceivesDecisionReason(t *testing.T) {
+	mockTrans := newMockTransport()
+
+	var receivedCtx ToolPermissionContext
+	canUseTool := func(toolName string, input map[string]interface{}, ctx ToolPermissionContext) (PermissionResult, error) {
+		receivedCtx = ctx
+		return &PermissionResultAllow{
+			UpdatedInput: input,
+		}, nil
+	}
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+		CanUseTool:      canUseTool,
+	})
+
+	request := map[string]interface{}{
+		"tool_name":  "Write",
+		"input":      map[string]interface{}{"file_path": "/etc/hosts"},
+		"tool_use_id": "toolu_001",
+		"agent_id":   "agent_001",
+		"blocked_path":     "/etc/hosts",
+		"decision_reason":  "PreToolUse hook returned permissionDecision=ask",
+		"title":            "Claude wants to write to /etc/hosts",
+		"display_name":     "Write file",
+		"description":      "Write content to a system file",
+		"permission_suggestions": []interface{}{
+			map[string]interface{}{
+				"type":        "addRules",
+				"behavior":    "allow",
+				"rules": []interface{}{
+					map[string]interface{}{
+						"toolName":    "Write",
+						"ruleContent": "/etc/hosts",
+					},
+				},
+			},
+		},
+	}
+
+	_, err := query.handleCanUseTool(context.Background(), request)
+	if err != nil {
+		t.Fatalf("handleCanUseTool failed: %v", err)
+	}
+
+	// Verify new fields
+	if receivedCtx.BlockedPath != "/etc/hosts" {
+		t.Errorf("Expected BlockedPath '/etc/hosts', got '%s'", receivedCtx.BlockedPath)
+	}
+	if receivedCtx.DecisionReason != "PreToolUse hook returned permissionDecision=ask" {
+		t.Errorf("Expected DecisionReason, got '%s'", receivedCtx.DecisionReason)
+	}
+	if receivedCtx.Title != "Claude wants to write to /etc/hosts" {
+		t.Errorf("Expected Title, got '%s'", receivedCtx.Title)
+	}
+	if receivedCtx.DisplayName != "Write file" {
+		t.Errorf("Expected DisplayName 'Write file', got '%s'", receivedCtx.DisplayName)
+	}
+	if receivedCtx.Description != "Write content to a system file" {
+		t.Errorf("Expected Description, got '%s'", receivedCtx.Description)
+	}
+
+	// Verify permission suggestions are properly deserialized
+	if len(receivedCtx.Suggestions) != 1 {
+		t.Fatalf("Expected 1 suggestion, got %d", len(receivedCtx.Suggestions))
+	}
+	sug := receivedCtx.Suggestions[0]
+	if sug.Type != "addRules" {
+		t.Errorf("Expected suggestion type 'addRules', got '%s'", sug.Type)
+	}
+	if sug.Behavior != "allow" {
+		t.Errorf("Expected suggestion behavior 'allow', got '%s'", sug.Behavior)
+	}
+	if len(sug.Rules) != 1 {
+		t.Fatalf("Expected 1 rule, got %d", len(sug.Rules))
+	}
+	if sug.Rules[0].ToolName != "Write" {
+		t.Errorf("Expected rule ToolName 'Write', got '%s'", sug.Rules[0].ToolName)
+	}
+	if sug.Rules[0].RuleContent != "/etc/hosts" {
+		t.Errorf("Expected rule RuleContent '/etc/hosts', got '%s'", sug.Rules[0].RuleContent)
+	}
+}
+
+// TestPermissionUpdateFromMap tests the permissionUpdateFromMap helper.
+func TestPermissionUpdateFromMap(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    map[string]interface{}
+		expected PermissionUpdate
+	}{
+		{
+			name: "addRules with rules",
+			input: map[string]interface{}{
+				"type":     "addRules",
+				"behavior": "allow",
+				"rules": []interface{}{
+					map[string]interface{}{
+						"toolName":    "Bash",
+						"ruleContent": "npm test",
+					},
+				},
+			},
+			expected: PermissionUpdate{
+				Type:     "addRules",
+				Behavior: "allow",
+				Rules: []PermissionRuleValue{
+					{ToolName: "Bash", RuleContent: "npm test"},
+				},
+			},
+		},
+		{
+			name: "setMode",
+			input: map[string]interface{}{
+				"type": "setMode",
+				"mode": "bypassPermissions",
+			},
+			expected: PermissionUpdate{
+				Type: "setMode",
+				Mode: "bypassPermissions",
+			},
+		},
+		{
+			name: "addDirectories",
+			input: map[string]interface{}{
+				"type":        "addDirectories",
+				"directories": []interface{}{"/tmp", "/var"},
+				"destination": "localSettings",
+			},
+			expected: PermissionUpdate{
+				Type:        "addDirectories",
+				Directories: []string{"/tmp", "/var"},
+				Destination: "localSettings",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := permissionUpdateFromMap(tt.input)
+			if result.Type != tt.expected.Type {
+				t.Errorf("Expected Type '%s', got '%s'", tt.expected.Type, result.Type)
+			}
+			if result.Behavior != tt.expected.Behavior {
+				t.Errorf("Expected Behavior '%s', got '%s'", tt.expected.Behavior, result.Behavior)
+			}
+			if result.Mode != tt.expected.Mode {
+				t.Errorf("Expected Mode '%s', got '%s'", tt.expected.Mode, result.Mode)
+			}
+			if result.Destination != tt.expected.Destination {
+				t.Errorf("Expected Destination '%s', got '%s'", tt.expected.Destination, result.Destination)
+			}
+			if len(result.Rules) != len(tt.expected.Rules) {
+				t.Fatalf("Expected %d rules, got %d", len(tt.expected.Rules), len(result.Rules))
+			}
+			for i, r := range result.Rules {
+				if r.ToolName != tt.expected.Rules[i].ToolName {
+					t.Errorf("Rule %d: Expected ToolName '%s', got '%s'", i, tt.expected.Rules[i].ToolName, r.ToolName)
+				}
+				if r.RuleContent != tt.expected.Rules[i].RuleContent {
+					t.Errorf("Rule %d: Expected RuleContent '%s', got '%s'", i, tt.expected.Rules[i].RuleContent, r.RuleContent)
+				}
+			}
+			if len(result.Directories) != len(tt.expected.Directories) {
+				t.Fatalf("Expected %d directories, got %d", len(tt.expected.Directories), len(result.Directories))
+			}
+			for i, d := range result.Directories {
+				if d != tt.expected.Directories[i] {
+					t.Errorf("Dir %d: Expected '%s', got '%s'", i, tt.expected.Directories[i], d)
+				}
+			}
+		})
+	}
+}
+
+// TestHandleCanUseToolSuggestionsRoundtrip tests that permission suggestions are
+// deserialized and can be echoed back in the response.
+func TestHandleCanUseToolSuggestionsRoundtrip(t *testing.T) {
+	mockTrans := newMockTransport()
+
+	var receivedSuggestions []PermissionUpdate
+	canUseTool := func(toolName string, input map[string]interface{}, ctx ToolPermissionContext) (PermissionResult, error) {
+		receivedSuggestions = ctx.Suggestions
+		// Echo back the suggestions as updated_permissions
+		return &PermissionResultAllow{
+			UpdatedInput:       input,
+			UpdatedPermissions: ctx.Suggestions,
+		}, nil
+	}
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+		CanUseTool:      canUseTool,
+	})
+
+	request := map[string]interface{}{
+		"tool_name": "Bash",
+		"input":     map[string]interface{}{"command": "ls"},
+		"permission_suggestions": []interface{}{
+			map[string]interface{}{
+				"type":        "addRules",
+				"behavior":    "allow",
+				"rules":       []interface{}{
+					map[string]interface{}{
+						"toolName":    "Bash",
+						"ruleContent": "ls",
+					},
+				},
+				"destination": "localSettings",
+			},
+		},
+	}
+
+	response, err := query.handleCanUseTool(context.Background(), request)
+	if err != nil {
+		t.Fatalf("handleCanUseTool failed: %v", err)
+	}
+
+	// Verify suggestions were properly deserialized
+	if len(receivedSuggestions) != 1 {
+		t.Fatalf("Expected 1 suggestion, got %d", len(receivedSuggestions))
+	}
+	if receivedSuggestions[0].Destination != "localSettings" {
+		t.Errorf("Expected Destination 'localSettings', got '%s'", receivedSuggestions[0].Destination)
+	}
+
+	// Verify response includes updatedPermissions
+	updatedPerms, ok := response["updatedPermissions"].([]PermissionUpdate)
+	if !ok {
+		t.Fatalf("Expected updatedPermissions to be []PermissionUpdate, got %T", response["updatedPermissions"])
+	}
+	if len(updatedPerms) != 1 {
+		t.Fatalf("Expected 1 updated permission, got %d", len(updatedPerms))
+	}
+	if updatedPerms[0].Type != "addRules" {
+		t.Errorf("Expected type 'addRules', got '%s'", updatedPerms[0].Type)
+	}
+}

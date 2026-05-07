@@ -145,6 +145,8 @@ func parseSystemMessage(data map[string]interface{}) (Message, error) {
 			return parseTaskNotificationMessage(data)
 		case "mirror_error":
 			return parseMirrorErrorMessage(data)
+		case "hook_started", "hook_response":
+			return parseHookEventMessage(data)
 		}
 	}
 
@@ -302,6 +304,34 @@ func parseTaskNotificationMessage(data map[string]interface{}) (*TaskNotificatio
 	return msg, nil
 }
 
+// parseHookEventMessage parses a hook_started or hook_response system message.
+func parseHookEventMessage(data map[string]interface{}) (*HookEventMessage, error) {
+	msg := &HookEventMessage{Data: data}
+
+	if subtype, ok := data["subtype"].(string); ok {
+		msg.Subtype = subtype
+	}
+
+	// Try multiple field names the CLI might use for the event name.
+	if hookEvent, ok := data["hook_event"].(string); ok {
+		msg.HookEventName = hookEvent
+	} else if hookName, ok := data["hook_name"].(string); ok {
+		msg.HookEventName = hookName
+	} else if hookEventName, ok := data["hook_event_name"].(string); ok {
+		msg.HookEventName = hookEventName
+	}
+
+	if sessionID, ok := data["session_id"].(string); ok {
+		msg.SessionID = sessionID
+	}
+
+	if uuid, ok := data["uuid"].(string); ok {
+		msg.UUID = uuid
+	}
+
+	return msg, nil
+}
+
 // parseIntField safely parses an int field from a map, handling both float64 and int types.
 func parseIntField(m map[string]interface{}, key string) int {
 	switch v := m[key].(type) {
@@ -389,6 +419,24 @@ func parseResultMessage(data map[string]interface{}) (*ResultMessage, error) {
 			}
 		}
 		msg.Errors = errStrings
+	}
+
+	// Extract deferred_tool_use
+	if deferred, ok := data["deferred_tool_use"].(map[string]interface{}); ok {
+		id, _ := deferred["id"].(string)
+		name, _ := deferred["name"].(string)
+		input, _ := deferred["input"].(map[string]interface{})
+		msg.DeferredToolUse = &DeferredToolUse{
+			ID:    id,
+			Name:  name,
+			Input: input,
+		}
+	}
+
+	// Extract api_error_status
+	if apiErrStatus, ok := data["api_error_status"].(float64); ok {
+		v := int(apiErrStatus)
+		msg.APIErrorStatus = &v
 	}
 
 	if uuid, ok := data["uuid"].(string); ok {

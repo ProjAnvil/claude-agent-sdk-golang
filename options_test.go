@@ -229,3 +229,31 @@ func TestOptionsSessionStoreFlushEager(t *testing.T) {
 		t.Errorf("Expected 'eager', got %q", opts.SessionStoreFlush)
 	}
 }
+
+func TestOptionsStrictMCPConfig(t *testing.T) {
+	opts := &ClaudeAgentOptions{StrictMCPConfig: true}
+	if !opts.StrictMCPConfig {
+		t.Error("Expected StrictMCPConfig to be true")
+	}
+}
+
+func TestOptionsStrictMCPConfigDefault(t *testing.T) {
+	opts := DefaultOptions()
+	if opts.StrictMCPConfig {
+		t.Error("Expected StrictMCPConfig to be false by default")
+	}
+}
+
+func TestOptionsIncludeHookEvents(t *testing.T) {
+	opts := &ClaudeAgentOptions{IncludeHookEvents: true}
+	if !opts.IncludeHookEvents {
+		t.Error("Expected IncludeHookEvents to be true")
+	}
+}
+
+func TestOptionsIncludeHookEventsDefault(t *testing.T) {
+	opts := DefaultOptions()
+	if opts.IncludeHookEvents {
+		t.Error("Expected IncludeHookEvents to be false by default")
+	}
+}

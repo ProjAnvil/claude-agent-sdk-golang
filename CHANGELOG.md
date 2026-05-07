@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.76] - 2026-05-07
+
+Port of Python SDK v0.1.73-v0.1.76 changes.
+
+### Added
+
+- **`DeferredToolUse`** struct and **`ResultMessage.DeferredToolUse`** field -- represents a tool use that was deferred by a PreToolUse hook returning decision "defer". The result message carries the deferred tool call so the caller can inspect it and decide whether to resume. Ported from Python SDK #865.
+- **`ResultMessage.APIErrorStatus`** field (`*int`) -- surfaces the HTTP status code (e.g. 429, 500, 529) of the failing API call when `IsError` is true. Emitted by the CLI since v2.1.110. Safe to log (no message content). Ported from Python SDK #923.
+- **`HookEventMessage`** type -- hook event emitted by the CLI when `IncludeHookEvents` is enabled. Arrives as `system` messages with subtype `hook_started` or `hook_response`. Implements the `Message` interface. Ported from Python SDK #917.
+- **`ClaudeAgentOptions.IncludeHookEvents`** field -- when true, the CLI emits hook lifecycle events (PreToolUse, PostToolUse, Stop, etc.) into the message stream. Maps to the CLI's `--include-hook-events` flag. Ported from Python SDK #917.
+- **`ClaudeAgentOptions.StrictMCPConfig`** field -- when true, only use MCP servers passed via `MCPServers`, ignoring all other MCP configurations (project `.mcp.json`, user/global settings, plugin-provided servers). Maps to the CLI's `--strict-mcp-config` flag. Ported from Python SDK #915.
+- **`ToolPermissionContext`** new fields: `BlockedPath`, `DecisionReason`, `Title`, `DisplayName`, `Description` -- forwarded from the CLI's `can_use_tool` control request. The callback can now show users why they are being prompted and render richer permission prompts. Ported from Python SDK #909.
+- **`permissionUpdateFromMap`** helper in internal/query.go -- deserializes `permission_suggestions` into proper `PermissionUpdate` instances with full field population (rules, behavior, mode, directories, destination). Previously suggestions were only partially deserialized (type only). Ported from Python SDK #920.
+- **`HookOutput.Decision`** field documentation updated to include "defer" alongside "block".
+- **`AgentDefinition.Effort`** and **`ClaudeAgentOptions.Effort`** comments updated to include "xhigh" (Opus 4.7 only; falls back to "high" on other models). Ported from Python SDK #914.
+- Parser now handles `hook_started` and `hook_response` system message subtypes.
+- Parser now extracts `deferred_tool_use` and `api_error_status` from result messages.
+- Transport now passes `--strict-mcp-config` and `--include-hook-events` flags to the CLI.
+
+### Test Coverage
+
+- `parser_test.go`: +8 tests for `DeferredToolUse` parsing, `APIErrorStatus` parsing, `HookEventMessage` parsing.
+- `types_test.go`: +5 tests for `DeferredToolUse` struct, `HookEventMessage` type, `ToolPermissionContext` new fields, `ResultMessage` new fields.
+- `options_test.go`: +4 tests for `StrictMCPConfig` and `IncludeHookEvents` options.
+- `internal/query_test.go`: +3 tests for permission context fields, `permissionUpdateFromMap` helper, and suggestion roundtrip.
+- `internal/transport/subprocess_test.go`: +5 tests for `--strict-mcp-config`, `--include-hook-events`, and `--effort xhigh` flags.
+
 ## [0.1.73] - 2026-05-15
 
 Port of Python SDK v0.1.65-v0.1.73 changes.

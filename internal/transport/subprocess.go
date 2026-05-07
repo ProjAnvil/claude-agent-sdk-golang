@@ -500,6 +500,16 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		args = append(args, "--session-mirror")
 	}
 
+	// Strict MCP config — only use MCP servers from --mcp-config.
+	if t.options.StrictMCPConfig {
+		args = append(args, "--strict-mcp-config")
+	}
+
+	// Include hook events — emit hook lifecycle events in the message stream.
+	if t.options.IncludeHookEvents {
+		args = append(args, "--include-hook-events")
+	}
+
 	// Sandbox
 	if t.options.Sandbox != nil {
 		sandboxJSON, _ := json.Marshal(t.options.Sandbox)

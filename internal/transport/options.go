@@ -50,6 +50,10 @@ type TransportOptions struct {
 	//   "all" → enable every discovered skill (Skill tool injected)
 	//   []string → enable only the named skills (Skill(name) entries injected)
 	Skills interface{}
+	// StrictMCPConfig when true, only use MCP servers from --mcp-config.
+	StrictMCPConfig bool
+	// IncludeHookEvents when true, emit hook events in the message stream.
+	IncludeHookEvents bool
 	// SessionStore is the store adapter for mirroring session transcripts.
 	// When set, --session-mirror is passed to the CLI subprocess.
 	// The interface uses interface{} here to avoid circular imports with the

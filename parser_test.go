@@ -1151,3 +1151,206 @@ func TestParseRateLimitEvent(t *testing.T) {
 		t.Errorf("Expected Utilization=0.91, got %v", rle.RateLimitInfo.Utilization)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests ported from Python SDK v0.1.73..v0.1.76
+// ---------------------------------------------------------------------------
+
+// TestParseResultMessageWithDeferredToolUse tests deferred_tool_use extraction.
+func TestParseResultMessageWithDeferredToolUse(t *testing.T) {
+	data := map[string]interface{}{
+		"type":            "result",
+		"subtype":         "success",
+		"duration_ms":     float64(2000),
+		"duration_api_ms": float64(1000),
+		"is_error":        false,
+		"num_turns":       float64(1),
+		"session_id":      "session_defer",
+		"deferred_tool_use": map[string]interface{}{
+			"id":   "toolu_defer123",
+			"name": "Bash",
+			"input": map[string]interface{}{
+				"command": "rm -rf /tmp/test",
+			},
+		},
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	rm, ok := msg.(*ResultMessage)
+	if !ok {
+		t.Fatalf("Expected *ResultMessage, got %T", msg)
+	}
+	if rm.DeferredToolUse == nil {
+		t.Fatal("Expected DeferredToolUse to be non-nil")
+	}
+	if rm.DeferredToolUse.ID != "toolu_defer123" {
+		t.Errorf("Expected ID 'toolu_defer123', got '%s'", rm.DeferredToolUse.ID)
+	}
+	if rm.DeferredToolUse.Name != "Bash" {
+		t.Errorf("Expected Name 'Bash', got '%s'", rm.DeferredToolUse.Name)
+	}
+	if input, ok := rm.DeferredToolUse.Input["command"].(string); !ok || input != "rm -rf /tmp/test" {
+		t.Errorf("Expected input command 'rm -rf /tmp/test', got %v", rm.DeferredToolUse.Input["command"])
+	}
+}
+
+// TestParseResultMessageDeferredToolUseAbsent tests that DeferredToolUse is nil when absent.
+func TestParseResultMessageDeferredToolUseAbsent(t *testing.T) {
+	data := map[string]interface{}{
+		"type":            "result",
+		"subtype":         "success",
+		"duration_ms":     float64(1000),
+		"duration_api_ms": float64(500),
+		"is_error":        false,
+		"num_turns":       float64(1),
+		"session_id":      "session_nodefer",
+	}
+	msg, _ := ParseMessage(data)
+	rm := msg.(*ResultMessage)
+	if rm.DeferredToolUse != nil {
+		t.Error("Expected DeferredToolUse to be nil when absent from input")
+	}
+}
+
+// TestParseResultMessageWithAPIErrorStatus tests api_error_status extraction.
+func TestParseResultMessageWithAPIErrorStatus(t *testing.T) {
+	data := map[string]interface{}{
+		"type":             "result",
+		"subtype":          "success",
+		"duration_ms":      float64(500),
+		"duration_api_ms":  float64(200),
+		"is_error":         true,
+		"num_turns":        float64(1),
+		"session_id":       "session_api_err",
+		"api_error_status": float64(529),
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	rm := msg.(*ResultMessage)
+	if rm.APIErrorStatus == nil {
+		t.Fatal("Expected APIErrorStatus to be non-nil")
+	}
+	if *rm.APIErrorStatus != 529 {
+		t.Errorf("Expected APIErrorStatus=529, got %d", *rm.APIErrorStatus)
+	}
+}
+
+// TestParseResultMessageAPIErrorStatusAbsent tests APIErrorStatus is nil when absent.
+func TestParseResultMessageAPIErrorStatusAbsent(t *testing.T) {
+	data := map[string]interface{}{
+		"type":            "result",
+		"subtype":         "success",
+		"duration_ms":     float64(1000),
+		"duration_api_ms": float64(500),
+		"is_error":        false,
+		"num_turns":       float64(1),
+		"session_id":      "session_ok",
+	}
+	msg, _ := ParseMessage(data)
+	rm := msg.(*ResultMessage)
+	if rm.APIErrorStatus != nil {
+		t.Error("Expected APIErrorStatus to be nil when absent")
+	}
+}
+
+// TestParseResultMessageAPIErrorStatusNull tests APIErrorStatus is nil for JSON null.
+func TestParseResultMessageAPIErrorStatusNull(t *testing.T) {
+	data := map[string]interface{}{
+		"type":             "result",
+		"subtype":          "success",
+		"duration_ms":      float64(1000),
+		"duration_api_ms":  float64(500),
+		"is_error":         false,
+		"num_turns":        float64(1),
+		"session_id":       "session_null",
+		"api_error_status": nil,
+	}
+	msg, _ := ParseMessage(data)
+	rm := msg.(*ResultMessage)
+	if rm.APIErrorStatus != nil {
+		t.Error("Expected APIErrorStatus to be nil for JSON null")
+	}
+}
+
+// TestParseHookEventMessageStarted tests parsing hook_started system message.
+func TestParseHookEventMessageStarted(t *testing.T) {
+	data := map[string]interface{}{
+		"type":       "system",
+		"subtype":    "hook_started",
+		"hook_event": "PreToolUse",
+		"tool_name":  "Bash",
+		"session_id": "session_hook",
+		"uuid":       "hook-uuid-001",
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	hookMsg, ok := msg.(*HookEventMessage)
+	if !ok {
+		t.Fatalf("Expected *HookEventMessage, got %T", msg)
+	}
+	if hookMsg.Subtype != "hook_started" {
+		t.Errorf("Expected subtype 'hook_started', got '%s'", hookMsg.Subtype)
+	}
+	if hookMsg.HookEventName != "PreToolUse" {
+		t.Errorf("Expected HookEventName 'PreToolUse', got '%s'", hookMsg.HookEventName)
+	}
+	if hookMsg.SessionID != "session_hook" {
+		t.Errorf("Expected SessionID 'session_hook', got '%s'", hookMsg.SessionID)
+	}
+	if hookMsg.UUID != "hook-uuid-001" {
+		t.Errorf("Expected UUID 'hook-uuid-001', got '%s'", hookMsg.UUID)
+	}
+}
+
+// TestParseHookEventMessageResponse tests parsing hook_response system message.
+func TestParseHookEventMessageResponse(t *testing.T) {
+	data := map[string]interface{}{
+		"type":       "system",
+		"subtype":    "hook_response",
+		"hook_name":  "PostToolUse",
+		"output":     "tool output here",
+		"session_id": "session_hook_resp",
+		"uuid":       "hook-uuid-002",
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	hookMsg, ok := msg.(*HookEventMessage)
+	if !ok {
+		t.Fatalf("Expected *HookEventMessage, got %T", msg)
+	}
+	if hookMsg.Subtype != "hook_response" {
+		t.Errorf("Expected subtype 'hook_response', got '%s'", hookMsg.Subtype)
+	}
+	if hookMsg.HookEventName != "PostToolUse" {
+		t.Errorf("Expected HookEventName 'PostToolUse', got '%s'", hookMsg.HookEventName)
+	}
+}
+
+// TestParseHookEventMessageWithHookEventNameField tests hook_event_name field variant.
+func TestParseHookEventMessageWithHookEventNameField(t *testing.T) {
+	data := map[string]interface{}{
+		"type":             "system",
+		"subtype":          "hook_started",
+		"hook_event_name":  "Stop",
+		"session_id":       "session_stop",
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	hookMsg, ok := msg.(*HookEventMessage)
+	if !ok {
+		t.Fatalf("Expected *HookEventMessage, got %T", msg)
+	}
+	if hookMsg.HookEventName != "Stop" {
+		t.Errorf("Expected HookEventName 'Stop', got '%s'", hookMsg.HookEventName)
+	}
+}

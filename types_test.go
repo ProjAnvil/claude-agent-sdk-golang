@@ -1377,3 +1377,96 @@ func TestSessionStoreFlushMode_Constants(t *testing.T) {
 		t.Errorf("SessionStoreFlushModeEager=%q, want 'eager'", SessionStoreFlushModeEager)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests ported from Python SDK v0.1.73..v0.1.76
+// ---------------------------------------------------------------------------
+
+func TestDeferredToolUseStruct(t *testing.T) {
+	dt := &DeferredToolUse{
+		ID:   "toolu_abc",
+		Name: "Bash",
+		Input: map[string]interface{}{
+			"command": "ls -la",
+		},
+	}
+	if dt.ID != "toolu_abc" {
+		t.Errorf("Expected ID 'toolu_abc', got '%s'", dt.ID)
+	}
+	if dt.Name != "Bash" {
+		t.Errorf("Expected Name 'Bash', got '%s'", dt.Name)
+	}
+	if dt.Input["command"] != "ls -la" {
+		t.Errorf("Expected command 'ls -la', got '%v'", dt.Input["command"])
+	}
+}
+
+func TestHookEventMessageImplementsMessage(t *testing.T) {
+	msg := &HookEventMessage{
+		Subtype:       "hook_started",
+		HookEventName: "PreToolUse",
+		Data:          map[string]interface{}{"tool_name": "Bash"},
+		SessionID:     "session_123",
+		UUID:          "uuid_456",
+	}
+	var _ Message = msg
+	if msg.Subtype != "hook_started" {
+		t.Errorf("Expected subtype 'hook_started', got '%s'", msg.Subtype)
+	}
+	if msg.HookEventName != "PreToolUse" {
+		t.Errorf("Expected HookEventName 'PreToolUse', got '%s'", msg.HookEventName)
+	}
+}
+
+func TestToolPermissionContextNewFields(t *testing.T) {
+	ctx := ToolPermissionContext{
+		ToolUseID:      "toolu_001",
+		AgentID:        "agent_001",
+		BlockedPath:    "/etc/hosts",
+		DecisionReason: "PreToolUse hook returned ask",
+		Title:          "Claude wants to write to /etc/hosts",
+		DisplayName:    "Write file",
+		Description:    "Write content to a system file",
+	}
+	if ctx.BlockedPath != "/etc/hosts" {
+		t.Errorf("Expected BlockedPath '/etc/hosts', got '%s'", ctx.BlockedPath)
+	}
+	if ctx.DecisionReason != "PreToolUse hook returned ask" {
+		t.Errorf("Expected DecisionReason, got '%s'", ctx.DecisionReason)
+	}
+	if ctx.Title != "Claude wants to write to /etc/hosts" {
+		t.Errorf("Expected Title, got '%s'", ctx.Title)
+	}
+	if ctx.DisplayName != "Write file" {
+		t.Errorf("Expected DisplayName 'Write file', got '%s'", ctx.DisplayName)
+	}
+	if ctx.Description != "Write content to a system file" {
+		t.Errorf("Expected Description, got '%s'", ctx.Description)
+	}
+}
+
+func TestResultMessageDeferredToolUseNil(t *testing.T) {
+	rm := &ResultMessage{
+		Subtype:   "success",
+		SessionID: "session_1",
+	}
+	if rm.DeferredToolUse != nil {
+		t.Error("Expected DeferredToolUse to be nil by default")
+	}
+	if rm.APIErrorStatus != nil {
+		t.Error("Expected APIErrorStatus to be nil by default")
+	}
+}
+
+func TestResultMessageAPIErrorStatus(t *testing.T) {
+	status := 529
+	rm := &ResultMessage{
+		Subtype:        "success",
+		SessionID:      "session_1",
+		IsError:        true,
+		APIErrorStatus: &status,
+	}
+	if rm.APIErrorStatus == nil || *rm.APIErrorStatus != 529 {
+		t.Errorf("Expected APIErrorStatus=529, got %v", rm.APIErrorStatus)
+	}
+}

@@ -102,6 +102,14 @@ type ClaudeAgentOptions struct {
 	// turn or at overflow. "eager" triggers a background flush after every
 	// frame for near-real-time delivery. Ignored when SessionStore is nil.
 	SessionStoreFlush SessionStoreFlushMode
+	// StrictMCPConfig when true, only use MCP servers passed via MCPServers,
+	// ignoring all other MCP configurations the CLI would otherwise load (e.g.
+	// project .mcp.json, user/global settings, plugin-provided servers).
+	// Maps to the CLI's --strict-mcp-config flag.
+	StrictMCPConfig bool
+	// IncludeHookEvents when true, the CLI emits hook events (PreToolUse, PostToolUse,
+	// Stop, etc.) as HookEventMessage objects in the message stream.
+	IncludeHookEvents bool
 	// LoadTimeoutMs is the upper bound on SessionStore.Load / ListSubkeys calls
 	// during resume materialization, in milliseconds.
 	// A value of 0 means immediate timeout; use a large value to effectively

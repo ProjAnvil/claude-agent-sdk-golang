@@ -372,6 +372,8 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 		OutputFormat:             opts.OutputFormat,
 		EnableFileCheckpointing:  opts.EnableFileCheckpointing,
 		Effort:                   opts.Effort,
+		StrictMCPConfig:          opts.StrictMCPConfig,
+		IncludeHookEvents:        opts.IncludeHookEvents,
 	}
 
 	if opts.SessionID != "" {

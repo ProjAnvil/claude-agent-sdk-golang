@@ -53,10 +53,15 @@ type CanUseToolFunc func(toolName string, input map[string]interface{}, ctx Tool
 
 // ToolPermissionContext provides context for tool permission callbacks.
 type ToolPermissionContext struct {
-	Signal      interface{}
-	Suggestions []PermissionUpdate
-	ToolUseID   string
-	AgentID     string
+	Signal         interface{}
+	Suggestions    []PermissionUpdate
+	ToolUseID      string
+	AgentID        string
+	BlockedPath    string
+	DecisionReason string
+	Title          string
+	DisplayName    string
+	Description    string
 }
 
 // PermissionResult is the interface for permission results.
@@ -82,7 +87,18 @@ func (r *PermissionResultDeny) IsAllow() bool { return false }
 
 // PermissionUpdate represents a permission update.
 type PermissionUpdate struct {
-	Type string
+	Type        string
+	Rules       []PermissionRuleValue
+	Behavior    string
+	Mode        string
+	Directories []string
+	Destination string
+}
+
+// PermissionRuleValue represents a permission rule.
+type PermissionRuleValue struct {
+	ToolName    string
+	RuleContent string
 }
 
 // HookMatcherInternal is the internal representation of a hook matcher.
@@ -568,6 +584,45 @@ func (q *Query) handleControlRequest(ctx context.Context, data map[string]interf
 	q.sendControlSuccess(requestID, responseData)
 }
 
+// permissionUpdateFromMap constructs a PermissionUpdate from the control protocol dict.
+func permissionUpdateFromMap(data map[string]interface{}) PermissionUpdate {
+	update := PermissionUpdate{}
+	if t, ok := data["type"].(string); ok {
+		update.Type = t
+	}
+	if behavior, ok := data["behavior"].(string); ok {
+		update.Behavior = behavior
+	}
+	if mode, ok := data["mode"].(string); ok {
+		update.Mode = mode
+	}
+	if dest, ok := data["destination"].(string); ok {
+		update.Destination = dest
+	}
+	if dirs, ok := data["directories"].([]interface{}); ok {
+		for _, d := range dirs {
+			if s, ok := d.(string); ok {
+				update.Directories = append(update.Directories, s)
+			}
+		}
+	}
+	if rules, ok := data["rules"].([]interface{}); ok {
+		for _, r := range rules {
+			if rMap, ok := r.(map[string]interface{}); ok {
+				rule := PermissionRuleValue{}
+				if tn, ok := rMap["toolName"].(string); ok {
+					rule.ToolName = tn
+				}
+				if rc, ok := rMap["ruleContent"].(string); ok {
+					rule.RuleContent = rc
+				}
+				update.Rules = append(update.Rules, rule)
+			}
+		}
+	}
+	return update
+}
+
 // handleCanUseTool handles tool permission requests.
 func (q *Query) handleCanUseTool(ctx context.Context, request map[string]interface{}) (map[string]interface{}, error) {
 	if ctx.Err() != nil {
@@ -582,22 +637,28 @@ func (q *Query) handleCanUseTool(ctx context.Context, request map[string]interfa
 	suggestions, _ := request["permission_suggestions"].([]interface{})
 	toolUseID, _ := request["tool_use_id"].(string)
 	agentID, _ := request["agent_id"].(string)
+	blockedPath, _ := request["blocked_path"].(string)
+	decisionReason, _ := request["decision_reason"].(string)
+	title, _ := request["title"].(string)
+	displayName, _ := request["display_name"].(string)
+	description, _ := request["description"].(string)
 
 	var permSuggestions []PermissionUpdate
 	for _, s := range suggestions {
 		if sMap, ok := s.(map[string]interface{}); ok {
-			update := PermissionUpdate{}
-			if t, ok := sMap["type"].(string); ok {
-				update.Type = t
-			}
-			permSuggestions = append(permSuggestions, update)
+			permSuggestions = append(permSuggestions, permissionUpdateFromMap(sMap))
 		}
 	}
 
 	permCtx := ToolPermissionContext{
-		Suggestions: permSuggestions,
-		ToolUseID:   toolUseID,
-		AgentID:     agentID,
+		Suggestions:    permSuggestions,
+		ToolUseID:      toolUseID,
+		AgentID:        agentID,
+		BlockedPath:    blockedPath,
+		DecisionReason: decisionReason,
+		Title:          title,
+		DisplayName:    displayName,
+		Description:    description,
 	}
 
 	result, err := q.canUseTool(toolName, input, permCtx)

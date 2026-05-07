@@ -950,3 +950,87 @@ func TestSettingSourcesNilOmitted(t *testing.T) {
 		t.Errorf("Expected no --setting-sources when SettingSources is nil: %s", args)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests ported from Python SDK v0.1.73..v0.1.76
+// ---------------------------------------------------------------------------
+
+// TestBuildCommand_StrictMCPConfig verifies --strict-mcp-config is emitted when set.
+func TestBuildCommand_StrictMCPConfig(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:         "/fake/path/claude",
+		StrictMCPConfig: true,
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--strict-mcp-config") {
+		t.Errorf("Expected --strict-mcp-config flag when StrictMCPConfig=true: %s", args)
+	}
+}
+
+// TestBuildCommand_StrictMCPConfigNotEmittedWhenFalse verifies --strict-mcp-config is
+// NOT emitted when StrictMCPConfig is false.
+func TestBuildCommand_StrictMCPConfigNotEmittedWhenFalse(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if strings.Contains(args, "--strict-mcp-config") {
+		t.Errorf("Did not expect --strict-mcp-config when StrictMCPConfig=false: %s", args)
+	}
+}
+
+// TestBuildCommand_IncludeHookEvents verifies --include-hook-events is emitted when set.
+func TestBuildCommand_IncludeHookEvents(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:           "/fake/path/claude",
+		IncludeHookEvents: true,
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--include-hook-events") {
+		t.Errorf("Expected --include-hook-events flag when IncludeHookEvents=true: %s", args)
+	}
+}
+
+// TestBuildCommand_IncludeHookEventsNotEmittedWhenFalse verifies --include-hook-events
+// is NOT emitted when IncludeHookEvents is false.
+func TestBuildCommand_IncludeHookEventsNotEmittedWhenFalse(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if strings.Contains(args, "--include-hook-events") {
+		t.Errorf("Did not expect --include-hook-events when IncludeHookEvents=false: %s", args)
+	}
+}
+
+// TestBuildCommand_EffortXhigh verifies --effort xhigh is emitted.
+func TestBuildCommand_EffortXhigh(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+		Effort:  "xhigh",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+	cmd := tr.buildCommand(context.Background())
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--effort xhigh") {
+		t.Errorf("Expected --effort xhigh: %s", args)
+	}
+}
