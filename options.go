@@ -81,7 +81,7 @@ type ClaudeAgentOptions struct {
 	OutputFormat map[string]interface{}
 	// EnableFileCheckpointing enables file change tracking.
 	EnableFileCheckpointing bool
-	// Effort controls thinking depth ("low", "medium", "high", "max").
+	// Effort controls thinking depth. Use EffortLevel constants (EffortLevelLow, EffortLevelMedium, etc.).
 	Effort string
 	// TaskBudget sets an API-side task budget in tokens.
 	TaskBudget *TaskBudget

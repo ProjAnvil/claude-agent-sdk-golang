@@ -50,6 +50,24 @@ const (
 	SdkBetaContext1M SdkBeta = "context-1m-2025-08-07"
 )
 
+// EffortLevel represents the effort level for Claude responses.
+// Controls how much effort Claude puts into its response, working with
+// adaptive thinking to guide thinking depth.
+type EffortLevel = string
+
+const (
+	// EffortLevelLow uses minimal effort.
+	EffortLevelLow EffortLevel = "low"
+	// EffortLevelMedium uses moderate effort.
+	EffortLevelMedium EffortLevel = "medium"
+	// EffortLevelHigh uses high effort.
+	EffortLevelHigh EffortLevel = "high"
+	// EffortLevelXHigh uses extra-high effort (Opus 4.7 only; falls back to high on other models).
+	EffortLevelXHigh EffortLevel = "xhigh"
+	// EffortLevelMax uses maximum effort.
+	EffortLevelMax EffortLevel = "max"
+)
+
 // HookEvent defines the type of hook event.
 type HookEvent string
 
@@ -662,7 +680,7 @@ type HookInput struct {
 	Message               string                 `json:"message,omitempty"`                // Notification
 	Title                 string                 `json:"title,omitempty"`                  // Notification
 	NotificationType      string                 `json:"notification_type,omitempty"`      // Notification
-	PermissionSuggestions []interface{}          `json:"permission_suggestions,omitempty"` // PermissionRequest
+	PermissionSuggestions []map[string]interface{}          `json:"permission_suggestions,omitempty"` // PermissionRequest
 }
 
 // HookOutput defines the response from a hook callback.

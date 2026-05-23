@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.87] - 2026-05-23
+
+Port of Python SDK v0.1.77-v0.2.87 changes.
+
+### Added
+
+- **`EffortLevel` type alias and constants**: Added public `EffortLevel` type alias for effort string values with constants `EffortLevelLow`, `EffortLevelMedium`, `EffortLevelHigh`, `EffortLevelXHigh`, `EffortLevelMax`. Ported from Python SDK #951.
+- **`Query.lastErrorResultText` error tracking**: When the CLI emits a result with `is_error=true` (e.g. `error_max_turns`, `error_during_execution`) and then exits non-zero, the trailing `ProcessError` is replaced with the structured error text from the result. Ported from Python SDK #918.
+- **Stderr callback panic isolation**: The stderr read loop now recovers from panics in the user-provided `StderrCallback` per-line, so a failing callback does not silently drop every subsequent stderr line for the rest of the session. Ported from Python SDK #932.
+- **`CancelledError` handling in mirror batcher**: The Go batcher already handled context cancellation gracefully via channel semantics; verified parity with Python SDK #931.
+
+### Changed
+
+- **`HookInput.PermissionSuggestions` type tightened**: Changed from `[]interface{}` to `[]map[string]interface{}` for type safety in both `internal/query.go` and `types.go`. Ported from Python SDK #955.
+- **Error messages after error results are actionable**: Instead of the generic "command failed with exit code 1", consumers now receive messages like "Claude Code returned an error result: Reached maximum number of turns (60)".
+
+### Test Coverage
+
+- `types_test.go`: +2 tests for `EffortLevel` values and `HookInput.PermissionSuggestions` type.
+- `internal/query_test.go`: +7 tests for ProcessError after error result (uses result error text, falls back to subtype, joins multiple errors, without result still surfaces, after success still surfaces, non-result message resets, session_state_changed does not reset).
+- `internal/transport/subprocess_test.go`: +1 test for stderr callback panic isolation.
+- `internal/callbacks_test.go`: +1 test for SimpleMirrorBatcher graceful close with pending items.
+- Total: 640 tests passing across all packages.
+
 ## [0.1.76] - 2026-05-07
 
 Port of Python SDK v0.1.73-v0.1.76 changes.

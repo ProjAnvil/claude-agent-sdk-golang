@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -619,5 +620,61 @@ func TestToolPermissionCallback_MissingAgentID(t *testing.T) {
 	}
 	if receivedCtx.AgentID != "" {
 		t.Errorf("Expected empty AgentID, got '%s'", receivedCtx.AgentID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for SimpleMirrorBatcher graceful close
+// ---------------------------------------------------------------------------
+
+// mockAppender is a test double for SessionStoreAppender.
+type mockAppender struct {
+	mu      sync.Mutex
+	calls   []string
+	fail    bool
+	failErr error
+}
+
+func (m *mockAppender) AppendRaw(_ context.Context, filePath string, _ []map[string]interface{}) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, filePath)
+	if m.fail {
+		return m.failErr
+	}
+	return nil
+}
+
+// TestSimpleMirrorBatcherCloseWithPendingItems verifies the batcher handles
+// close gracefully even with pending items. Mirrors Python SDK PR #931
+// (handle CancelledError in eager-flush done callback).
+func TestSimpleMirrorBatcherCloseWithPendingItems(t *testing.T) {
+	store := &mockAppender{}
+	var errs []error
+	onError := func(err error) {
+		errs = append(errs, err)
+	}
+
+	batcher := NewSimpleMirrorBatcher(store, onError)
+
+	// Enqueue some items
+	batcher.Enqueue("test/path.jsonl", []map[string]interface{}{
+		{"type": "user", "n": float64(1)},
+	})
+	batcher.Enqueue("test/path.jsonl", []map[string]interface{}{
+		{"type": "assistant", "n": float64(2)},
+	})
+
+	// Close should complete without panic
+	err := batcher.Close(context.Background())
+	if err != nil {
+		t.Errorf("Close returned error: %v", err)
+	}
+
+	// Verify items were delivered
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.calls) != 2 {
+		t.Errorf("Expected 2 append calls, got %d", len(store.calls))
 	}
 }

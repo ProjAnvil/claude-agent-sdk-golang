@@ -1034,3 +1034,55 @@ func TestBuildCommand_EffortXhigh(t *testing.T) {
 		t.Errorf("Expected --effort xhigh: %s", args)
 	}
 }
+
+// TestStderrCallbackPanicDoesNotTerminateLoop verifies that a panic in the
+// user-provided stderr callback does not terminate the stderr read loop.
+// All subsequent stderr lines must still be delivered.
+func TestStderrCallbackPanicDoesNotTerminateLoop(t *testing.T) {
+	var received []string
+	callCount := 0
+
+	callback := func(line string) {
+		callCount++
+		received = append(received, line)
+		if callCount == 1 {
+			panic("simulated handler failure")
+		}
+	}
+
+	transport := &SubprocessTransport{
+		options: &TransportOptions{
+			StderrCallback: callback,
+		},
+		messages: make(chan map[string]interface{}, 10),
+		errors:   make(chan error, 10),
+	}
+
+	// Use a pipe to simulate stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.stderr = r
+
+	// Write lines to the pipe
+	go func() {
+		w.WriteString("line 1\n")
+		w.WriteString("line 2\n")
+		w.WriteString("line 3\n")
+		w.Close()
+	}()
+
+	// Run readStderr (it blocks until stderr is closed)
+	transport.readStderr()
+
+	if len(received) != 3 {
+		t.Errorf("Expected 3 lines received, got %d: %v", len(received), received)
+	}
+	expected := []string{"line 1", "line 2", "line 3"}
+	for i, exp := range expected {
+		if received[i] != exp {
+			t.Errorf("Line %d: expected %q, got %q", i, exp, received[i])
+		}
+	}
+}

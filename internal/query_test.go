@@ -3,9 +3,12 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ProjAnvil/claude-agent-sdk-golang/internal/transport"
 )
 
 // mockTransport is a simple mock for testing Query.
@@ -1789,5 +1792,273 @@ func TestHandleCanUseToolSuggestionsRoundtrip(t *testing.T) {
 	}
 	if updatedPerms[0].Type != "addRules" {
 		t.Errorf("Expected type 'addRules', got '%s'", updatedPerms[0].Type)
+	}
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Tests for ProcessError after error result (Python SDK v0.1.77, PR #918)
+// ---------------------------------------------------------------------------
+
+// collectErrors reads errors from the channel with a timeout to avoid blocking
+// indefinitely when q.errors is never closed (by design).
+func collectErrors(ch <-chan error, timeout time.Duration) []error {
+	var errs []error
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case err, ok := <-ch:
+			if !ok {
+				return errs
+			}
+			errs = append(errs, err)
+		case <-timer.C:
+			return errs
+		}
+	}
+}
+
+// TestProcessErrorAfterErrorResultUsesResultErrorText verifies that when the
+// CLI emits a result with is_error=true followed by a ProcessError, the error
+// text is replaced with the structured error from the result.
+func TestProcessErrorAfterErrorResultUsesResultErrorText(t *testing.T) {
+	tr := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       tr,
+		IsStreamingMode:  false,
+	})
+	q.Start()
+
+	// Send error result
+	tr.messages <- map[string]interface{}{
+		"type":      "result",
+		"subtype":   "error_max_turns",
+		"is_error":  true,
+		"num_turns": float64(60),
+		"errors":    []interface{}{"Reached maximum number of turns (60)"},
+	}
+	// Close messages channel to end the read loop's message phase
+	close(tr.messages)
+	// Send ProcessError (will be read after messages close)
+	tr.errors <- &transport.ProcessError{Message: "Command failed with exit code 1", ExitCode: 1}
+	close(tr.errors)
+
+	// Read messages
+	msgCount := 0
+	for msg := range q.RawMessages() {
+		msgCount++
+		if msg["subtype"] != "error_max_turns" {
+			t.Errorf("Expected subtype error_max_turns, got %v", msg["subtype"])
+		}
+	}
+	if msgCount != 1 {
+		t.Errorf("Expected 1 message, got %d", msgCount)
+	}
+
+	// Read errors (with timeout since q.errors is never closed by design)
+	errs := collectErrors(q.Errors(), 200*time.Millisecond)
+	if len(errs) != 1 {
+		t.Errorf("Expected 1 error, got %d", len(errs))
+	}
+	if len(errs) > 0 {
+		if !strings.Contains(errs[0].Error(), "Claude Code returned an error result") {
+			t.Errorf("Expected actionable error message, got: %v", errs[0])
+		}
+		if !strings.Contains(errs[0].Error(), "Reached maximum number of turns (60)") {
+			t.Errorf("Expected error to contain turn count, got: %v", errs[0])
+		}
+	}
+}
+
+// TestProcessErrorAfterErrorResultFallsBackToSubtype verifies that when the
+// result has no errors array, the improved message falls back to the subtype.
+func TestProcessErrorAfterErrorResultFallsBackToSubtype(t *testing.T) {
+	tr := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       tr,
+		IsStreamingMode:  false,
+	})
+	q.Start()
+
+	tr.messages <- map[string]interface{}{
+		"type":     "result",
+		"subtype":  "error_during_execution",
+		"is_error": true,
+	}
+	close(tr.messages)
+	tr.errors <- &transport.ProcessError{Message: "Command failed with exit code 1", ExitCode: 1}
+	close(tr.errors)
+
+	for range q.RawMessages() {
+	}
+	errs := collectErrors(q.Errors(), 200*time.Millisecond)
+	if len(errs) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errs))
+	}
+	if !strings.Contains(errs[0].Error(), "error_during_execution") {
+		t.Errorf("Expected fallback to subtype, got: %v", errs[0])
+	}
+}
+
+// TestProcessErrorAfterErrorResultJoinsMultipleErrors verifies that multiple
+// errors in the errors array are joined with semicolons.
+func TestProcessErrorAfterErrorResultJoinsMultipleErrors(t *testing.T) {
+	tr := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       tr,
+		IsStreamingMode:  false,
+	})
+	q.Start()
+
+	tr.messages <- map[string]interface{}{
+		"type":     "result",
+		"subtype":  "error_during_execution",
+		"is_error": true,
+		"errors":   []interface{}{"Error one", "Error two"},
+	}
+	close(tr.messages)
+	tr.errors <- &transport.ProcessError{Message: "Command failed with exit code 1", ExitCode: 1}
+	close(tr.errors)
+
+	for range q.RawMessages() {
+	}
+	errs := collectErrors(q.Errors(), 200*time.Millisecond)
+	if len(errs) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errs))
+	}
+	if !strings.Contains(errs[0].Error(), "Error one; Error two") {
+		t.Errorf("Expected joined errors, got: %v", errs[0])
+	}
+}
+
+// TestProcessErrorWithoutResultStillSurfaces verifies that a ProcessError
+// without any prior result still surfaces as-is.
+func TestProcessErrorWithoutResultStillSurfaces(t *testing.T) {
+	tr := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       tr,
+		IsStreamingMode:  false,
+	})
+	q.Start()
+
+	close(tr.messages)
+	tr.errors <- &transport.ProcessError{Message: "Command failed with exit code 1", ExitCode: 1}
+	close(tr.errors)
+
+	for range q.RawMessages() {
+	}
+	errs := collectErrors(q.Errors(), 200*time.Millisecond)
+	if len(errs) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errs))
+	}
+	if strings.Contains(errs[0].Error(), "Claude Code returned an error result") {
+		t.Errorf("Unexpected error replacement without prior result: %v", errs[0])
+	}
+}
+
+// TestProcessErrorAfterSuccessResultStillSurfaces verifies that a ProcessError
+// after a successful result (is_error=false) still surfaces as-is.
+func TestProcessErrorAfterSuccessResultStillSurfaces(t *testing.T) {
+	tr := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       tr,
+		IsStreamingMode:  false,
+	})
+	q.Start()
+
+	tr.messages <- map[string]interface{}{
+		"type":     "result",
+		"subtype":  "success",
+		"is_error": false,
+	}
+	close(tr.messages)
+	tr.errors <- &transport.ProcessError{Message: "Command failed with exit code 1", ExitCode: 1}
+	close(tr.errors)
+
+	for range q.RawMessages() {
+	}
+	errs := collectErrors(q.Errors(), 200*time.Millisecond)
+	if len(errs) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errs))
+	}
+	if strings.Contains(errs[0].Error(), "Claude Code returned an error result") {
+		t.Errorf("Unexpected error replacement after success result: %v", errs[0])
+	}
+}
+
+// TestNonResultMessageResetsErrorResultText verifies that non-result messages
+// (other than session_state_changed) reset the error result text tracker.
+func TestNonResultMessageResetsErrorResultText(t *testing.T) {
+	tr := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       tr,
+		IsStreamingMode:  false,
+	})
+	q.Start()
+
+	// Send error result first
+	tr.messages <- map[string]interface{}{
+		"type":     "result",
+		"subtype":  "error_max_turns",
+		"is_error": true,
+		"errors":   []interface{}{"Turn limit reached"},
+	}
+	// Send an assistant message (resets tracker)
+	tr.messages <- map[string]interface{}{
+		"type": "assistant",
+	}
+	close(tr.messages)
+	// Send ProcessError -- should NOT be replaced since tracker was reset
+	tr.errors <- &transport.ProcessError{Message: "Command failed with exit code 1", ExitCode: 1}
+	close(tr.errors)
+
+	for range q.RawMessages() {
+	}
+	errs := collectErrors(q.Errors(), 200*time.Millisecond)
+	if len(errs) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errs))
+	}
+	if strings.Contains(errs[0].Error(), "Claude Code returned an error result") {
+		t.Errorf("Error should not have been replaced after non-result message: %v", errs[0])
+	}
+}
+
+// TestSessionStateChangedDoesNotResetErrorResultText verifies that
+// system messages with subtype session_state_changed do NOT reset the
+// error result text tracker.
+func TestSessionStateChangedDoesNotResetErrorResultText(t *testing.T) {
+	tr := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       tr,
+		IsStreamingMode:  false,
+	})
+	q.Start()
+
+	// Send error result
+	tr.messages <- map[string]interface{}{
+		"type":     "result",
+		"subtype":  "error_max_turns",
+		"is_error": true,
+		"errors":   []interface{}{"Turn limit"},
+	}
+	// session_state_changed should NOT reset
+	tr.messages <- map[string]interface{}{
+		"type":    "system",
+		"subtype": "session_state_changed",
+	}
+	close(tr.messages)
+	tr.errors <- &transport.ProcessError{Message: "Command failed with exit code 1", ExitCode: 1}
+	close(tr.errors)
+
+	for range q.RawMessages() {
+	}
+	errs := collectErrors(q.Errors(), 200*time.Millisecond)
+	if len(errs) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errs))
+	}
+	if !strings.Contains(errs[0].Error(), "Claude Code returned an error result") {
+		t.Errorf("Expected error replacement after session_state_changed: %v", errs[0])
 	}
 }

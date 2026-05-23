@@ -1501,3 +1501,48 @@ func TestResultMessageAPIErrorStatus(t *testing.T) {
 		t.Errorf("Expected APIErrorStatus=529, got %v", rm.APIErrorStatus)
 	}
 }
+
+// TestEffortLevelValues verifies that all EffortLevel constants are defined.
+func TestEffortLevelValues(t *testing.T) {
+	expected := map[EffortLevel]bool{
+		EffortLevelLow:    true,
+		EffortLevelMedium: true,
+		EffortLevelHigh:   true,
+		EffortLevelXHigh:  true,
+		EffortLevelMax:    true,
+	}
+	if len(expected) != 5 {
+		t.Errorf("Expected 5 distinct EffortLevel values, got %d", len(expected))
+	}
+	// Verify string values
+	tests := []struct {
+		constant EffortLevel
+		value    string
+	}{
+		{EffortLevelLow, "low"},
+		{EffortLevelMedium, "medium"},
+		{EffortLevelHigh, "high"},
+		{EffortLevelXHigh, "xhigh"},
+		{EffortLevelMax, "max"},
+	}
+	for _, tt := range tests {
+		if string(tt.constant) != tt.value {
+			t.Errorf("EffortLevel constant = %q, want %q", tt.constant, tt.value)
+		}
+	}
+}
+
+// TestHookInputPermissionSuggestionsType verifies the PermissionSuggestions field type.
+func TestHookInputPermissionSuggestionsType(t *testing.T) {
+	hi := HookInput{
+		PermissionSuggestions: []map[string]interface{}{
+			{"type": "addRules", "behavior": "allow"},
+		},
+	}
+	if len(hi.PermissionSuggestions) != 1 {
+		t.Fatalf("Expected 1 suggestion, got %d", len(hi.PermissionSuggestions))
+	}
+	if hi.PermissionSuggestions[0]["type"] != "addRules" {
+		t.Errorf("Expected type=addRules, got %v", hi.PermissionSuggestions[0]["type"])
+	}
+}

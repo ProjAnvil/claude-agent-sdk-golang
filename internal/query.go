@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,11 @@ type Query struct {
 	initializationResult map[string]interface{}
 	firstResultReceived  bool
 	firstResultCh        chan struct{}
+	// lastErrorResultText is set when the most recent message is a result
+	// with is_error=true. Used to replace the generic "exit code 1"
+	// ProcessError with the structured error the CLI already reported.
+	// Mirrors the TypeScript SDK's lastErrorResultText (Query.ts).
+	lastErrorResultText string
 }
 
 // CanUseToolFunc is the callback type for tool permission requests.
@@ -139,7 +145,7 @@ type HookInput struct {
 	Message               string
 	Title                 string
 	NotificationType      string
-	PermissionSuggestions []interface{}
+	PermissionSuggestions []map[string]interface{}
 }
 
 // HookOutput defines the response from a hook callback.
@@ -474,6 +480,33 @@ func (q *Query) readMessages() {
 			if q.mirrorBatcher != nil {
 				_ = q.mirrorBatcher.Flush(context.Background())
 			}
+			// Track error result text for actionable ProcessError replacement.
+			if isError, _ := data["is_error"].(bool); isError {
+				errorsRaw, _ := data["errors"].([]interface{})
+				var errorStrs []string
+				for _, e := range errorsRaw {
+					if s, ok := e.(string); ok {
+						errorStrs = append(errorStrs, s)
+					}
+				}
+				if len(errorStrs) > 0 {
+					q.lastErrorResultText = strings.Join(errorStrs, "; ")
+				} else {
+					subtype, _ := data["subtype"].(string)
+					if subtype == "" {
+						subtype = "unknown error"
+					}
+					q.lastErrorResultText = subtype
+				}
+			} else {
+				q.lastErrorResultText = ""
+			}
+		} else if !(msgType == "system" && data["subtype"] == "session_state_changed") {
+			// Anything other than the post-turn session_state_changed
+			// marker means the conversation moved on; a ProcessError
+			// now is a fresh crash, not the expected exit from a prior
+			// error result. Mirrors the TypeScript SDK's reset logic.
+			q.lastErrorResultText = ""
 		}
 
 		// Send raw data to be parsed by caller
@@ -488,6 +521,18 @@ func (q *Query) readMessages() {
 	// Forward transport errors (non-blocking to prevent deadlock
 	// when the consumer goroutine has stopped reading).
 	for err := range q.transport.Errors() {
+		// When the CLI emits a result with is_error=true (e.g.
+		// error_max_turns, error_during_execution) it then exits non-zero
+		// on purpose. The trailing ProcessError carries no information
+		// beyond "exit code 1" -- replace it with the structured error
+		// the CLI already reported so the exception is actionable.
+		// Mirrors the TypeScript SDK (Query.ts readMessages).
+		if lastText := q.lastErrorResultText; lastText != "" {
+			if pe, ok := err.(*transport.ProcessError); ok {
+				err = fmt.Errorf("Claude Code returned an error result: %s", lastText)
+				_ = pe // suppress unused warning
+			}
+		}
 		select {
 		case q.errors <- err:
 		default:
@@ -771,9 +816,13 @@ func (q *Query) handleHookCallback(ctx context.Context, request map[string]inter
 	if notificationType, ok := inputData["notification_type"].(string); ok {
 		hookInput.NotificationType = notificationType
 	}
-	if permissionSuggestions, ok := inputData["permission_suggestions"].([]interface{}); ok {
-		hookInput.PermissionSuggestions = permissionSuggestions
-	}
+		if permissionSuggestions, ok := inputData["permission_suggestions"].([]interface{}); ok {
+			for _, s := range permissionSuggestions {
+				if m, ok := s.(map[string]interface{}); ok {
+					hookInput.PermissionSuggestions = append(hookInput.PermissionSuggestions, m)
+				}
+			}
+		}
 
 	hookCtx := HookContext{}
 

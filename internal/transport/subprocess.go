@@ -659,12 +659,25 @@ func (t *SubprocessTransport) readStdout() {
 }
 
 // readStderr reads stderr output.
+// Each line is delivered to the StderrCallback if set. A panic in the
+// user-provided callback is recovered per-line so a failing callback does not
+// terminate the loop and silently drop every subsequent stderr line for the
+// rest of the session.
 func (t *SubprocessTransport) readStderr() {
 	scanner := bufio.NewScanner(t.stderr)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if t.options.StderrCallback != nil {
-			t.options.StderrCallback(line)
+			// Isolate per-line so a panic in the user's callback doesn't
+			// kill the read loop.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// Log and continue reading subsequent lines.
+					}
+				}()
+				t.options.StderrCallback(line)
+			}()
 		}
 	}
 }
