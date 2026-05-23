@@ -574,6 +574,39 @@ func TestSanitizeUnicode_Iterative(t *testing.T) {
 	}
 }
 
+func TestSanitizeUnicode_NFKCNormalization(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		// Full-width ASCII letters (U+FF21..U+FF3A) normalized to ASCII (U+0041..U+005A)
+		{"full-width uppercase A", "\uff21", "A"},
+		{"full-width uppercase Z", "\uff3a", "Z"},
+		// Full-width lowercase (U+FF41..U+FF5A) normalized to ASCII lowercase
+		{"full-width lowercase a", "\uff41", "a"},
+		{"full-width lowercase z", "\uff5a", "z"},
+		// Full-width digits (U+FF10..U+FF19) normalized to ASCII digits
+		{"full-width digit 0", "\uff10", "0"},
+		{"full-width digit 9", "\uff19", "9"},
+		// Full-width mixed string
+		{"full-width mixed", "\uff28\uff45\uff4c\uff4c\uff4f", "Hello"},
+		// Compatibility whitespace variants normalized to regular space
+		{"narrow no-break space", "a\u202fb", "a b"},
+		// Ligatures decomposed by NFKC
+		{"fi ligature", "\ufb01nance", "finance"},
+		// Full-width inside real content
+		{"full-width in sentence", "hello \uff57\uff4f\uff52\uff4c\uff44", "hello world"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizeUnicode(tt.input); got != tt.expected {
+				t.Errorf("sanitizeUnicode(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DeleteSession additional tests
 // ---------------------------------------------------------------------------

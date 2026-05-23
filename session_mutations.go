@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // RenameSession renames a session by appending a custom-title entry.
@@ -530,7 +532,7 @@ var unicodeStripRE = regexp.MustCompile(
 
 // sanitizeUnicode removes dangerous Unicode characters from a string.
 func sanitizeUnicode(value string) string {
-	current := value
+	current := norm.NFKC.String(value)
 	for range 10 {
 		previous := current
 		// Strip format (Cf), private use (Co) categories and explicit ranges

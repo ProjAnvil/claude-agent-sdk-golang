@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -97,7 +98,6 @@ type InMemorySessionStore struct {
 	mu        sync.RWMutex
 	data      map[string][]inMemoryEntry // key → batches
 	summaries map[string]SessionSummaryEntry
-	nextMtime int64 // monotonically increasing counter
 }
 
 // NewInMemorySessionStore creates an empty InMemorySessionStore.
@@ -115,9 +115,9 @@ func (s *InMemorySessionStore) mkey(key SessionKey) string {
 	return key.ProjectKey + "|" + key.SessionID
 }
 
-func (s *InMemorySessionStore) nextMtimeVal() int64 {
-	s.nextMtime++
-	return s.nextMtime
+// nowUnixMilli returns the current time as Unix epoch milliseconds.
+func nowUnixMilli() int64 {
+	return time.Now().UnixMilli()
 }
 
 // Append adds entries to the session identified by key.
@@ -126,21 +126,28 @@ func (s *InMemorySessionStore) Append(_ context.Context, key SessionKey, entries
 	defer s.mu.Unlock()
 
 	mk := s.mkey(key)
+	mtime := nowUnixMilli()
 	batch := inMemoryEntry{
-		mtime:   s.nextMtimeVal(),
+		mtime:   mtime,
 		entries: append([]SessionStoreEntry(nil), entries...),
 	}
 	s.data[mk] = append(s.data[mk], batch)
 
-	// Update summary sidecar.
-	allEntries := s.flatEntries(mk)
-	prev, hasPrev := s.summaries[mk]
-	if !hasPrev {
-		prev = SessionSummaryEntry{
-			SessionID: key.SessionID,
+	// Update summary sidecar only for main transcript (no subpath).
+	// Subagent transcripts must not contribute to the main session's summary.
+	if key.Subpath == "" {
+		allEntries := s.flatEntries(mk)
+		prev, hasPrev := s.summaries[mk]
+		if !hasPrev {
+			prev = SessionSummaryEntry{
+				SessionID: key.SessionID,
+			}
 		}
+		summary := FoldSessionSummary(&prev, key, allEntries)
+		// The adapter stamps mtime after persisting; FoldSessionSummary does not set it.
+		summary.Mtime = mtime
+		s.summaries[mk] = summary
 	}
-	s.summaries[mk] = FoldSessionSummary(&prev, key, allEntries)
 
 	return nil
 }
@@ -199,6 +206,7 @@ func (s *InMemorySessionStore) ListSessions(_ context.Context, projectKey string
 }
 
 // ListSessionSummaries returns full summary entries for all sessions in a project.
+// Only returns summaries for main transcripts (no subpath).
 func (s *InMemorySessionStore) ListSessionSummaries(_ context.Context, projectKey string) ([]SessionSummaryEntry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -206,15 +214,23 @@ func (s *InMemorySessionStore) ListSessionSummaries(_ context.Context, projectKe
 	prefix := projectKey + "|"
 	var out []SessionSummaryEntry
 	for mk, summary := range s.summaries {
-		if strings.HasPrefix(mk, prefix) {
-			out = append(out, summary)
+		if !strings.HasPrefix(mk, prefix) {
+			continue
 		}
+		// Skip subkey summaries (they contain "/" after the session ID).
+		rest := strings.TrimPrefix(mk, prefix)
+		if strings.Contains(rest, "/") {
+			continue
+		}
+		out = append(out, summary)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Mtime < out[j].Mtime })
 	return out, nil
 }
 
-// Delete removes all stored entries for the given key.
+// Delete removes stored entries for the given key.
+// When deleting a main-transcript key (Subpath empty), it cascades to all
+// subkeys so subagent transcripts are not orphaned.
 func (s *InMemorySessionStore) Delete(_ context.Context, key SessionKey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -222,6 +238,18 @@ func (s *InMemorySessionStore) Delete(_ context.Context, key SessionKey) error {
 	mk := s.mkey(key)
 	delete(s.data, mk)
 	delete(s.summaries, mk)
+
+	// Cascade: when deleting the main transcript, also remove all subkeys.
+	if key.Subpath == "" {
+		prefix := mk + "/"
+		for k := range s.data {
+			if strings.HasPrefix(k, prefix) {
+				delete(s.data, k)
+				delete(s.summaries, k)
+			}
+		}
+	}
+
 	return nil
 }
 

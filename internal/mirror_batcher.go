@@ -2,9 +2,22 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// MaxPendingEntries is the threshold for the number of pending entries above
+// which a warning is logged. It mirrors the Python SDK constant
+// MAX_PENDING_ENTRIES.
+const MaxPendingEntries = 500
+
+// MaxPendingBytes is the threshold for the approximate size of pending entry
+// data (in bytes) above which a warning is logged. It mirrors the Python SDK
+// constant MAX_PENDING_BYTES (1 MiB).
+const MaxPendingBytes = 1 << 20 // 1 MiB
 
 // SessionStoreAppender is the minimal interface required by the batcher to
 // forward transcript entries to a session store.
@@ -19,9 +32,10 @@ type SessionStoreAppender interface {
 
 // mirrorItem is a single unit of work for the batcher.
 type mirrorItem struct {
-	filePath string
-	entries  []map[string]interface{}
-	done     chan struct{} // closed when this item has been processed
+	filePath  string
+	entries   []map[string]interface{}
+	sizeBytes int          // approximate serialized size of entries
+	done      chan struct{} // closed when this item has been processed
 }
 
 // SimpleMirrorBatcher is a goroutine-based batcher that forwards
@@ -42,6 +56,9 @@ type SimpleMirrorBatcher struct {
 	wg       sync.WaitGroup
 	stopOnce sync.Once
 	done     chan struct{}
+
+	pendingEntries int64 // atomic: number of entries waiting in the queue
+	pendingBytes   int64 // atomic: approximate byte size of pending entries
 }
 
 // NewSimpleMirrorBatcher creates and starts a new SimpleMirrorBatcher.
@@ -63,14 +80,41 @@ func NewSimpleMirrorBatcher(store SessionStoreAppender, onError func(error)) *Si
 // It does not block; if the internal queue is full, the item is dropped and
 // onError is called with the reason.
 func (b *SimpleMirrorBatcher) Enqueue(filePath string, entries []map[string]interface{}) {
-	item := &mirrorItem{
-		filePath: filePath,
-		entries:  entries,
-		done:     make(chan struct{}),
+	// Calculate approximate serialized size of entries.
+	size := 0
+	for _, e := range entries {
+		if data, err := json.Marshal(e); err == nil {
+			size += len(data)
+		}
 	}
+
+	item := &mirrorItem{
+		filePath:  filePath,
+		entries:   entries,
+		sizeBytes: size,
+		done:      make(chan struct{}),
+	}
+
+	atomic.AddInt64(&b.pendingEntries, int64(len(entries)))
+	atomic.AddInt64(&b.pendingBytes, int64(size))
+
+	pe := atomic.LoadInt64(&b.pendingEntries)
+	pb := atomic.LoadInt64(&b.pendingBytes)
+	if pe > MaxPendingEntries || pb > MaxPendingBytes {
+		slog.Warn("mirror batcher pending threshold exceeded",
+			"pending_entries", pe,
+			"pending_bytes", pb,
+			"max_pending_entries", MaxPendingEntries,
+			"max_pending_bytes", MaxPendingBytes,
+		)
+	}
+
 	select {
 	case b.queue <- item:
 	default:
+		// Queue full; decrement counters since this item will not be processed.
+		atomic.AddInt64(&b.pendingEntries, -int64(len(entries)))
+		atomic.AddInt64(&b.pendingBytes, -int64(size))
 		close(item.done)
 		if b.onError != nil {
 			b.onError(errBatcherQueueFull)
@@ -97,6 +141,13 @@ func (b *SimpleMirrorBatcher) Flush(ctx context.Context) error {
 	case <-b.done:
 		return nil
 	}
+}
+
+// PendingStats returns the current number of pending entries and approximate
+// byte size of those entries in the batcher queue. The values are snapshots
+// and may change concurrently.
+func (b *SimpleMirrorBatcher) PendingStats() (entries int64, bytes int64) {
+	return atomic.LoadInt64(&b.pendingEntries), atomic.LoadInt64(&b.pendingBytes)
 }
 
 // Close flushes all pending items and shuts down the batcher.
@@ -142,6 +193,9 @@ func (b *SimpleMirrorBatcher) run() {
 					b.onError(lastErr)
 				}
 			}
+			// Decrement pending counters now that this item has been processed.
+			atomic.AddInt64(&b.pendingEntries, -int64(len(item.entries)))
+			atomic.AddInt64(&b.pendingBytes, -int64(item.sizeBytes))
 			close(item.done)
 		case <-b.done:
 			return
