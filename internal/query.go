@@ -816,13 +816,13 @@ func (q *Query) handleHookCallback(ctx context.Context, request map[string]inter
 	if notificationType, ok := inputData["notification_type"].(string); ok {
 		hookInput.NotificationType = notificationType
 	}
-		if permissionSuggestions, ok := inputData["permission_suggestions"].([]interface{}); ok {
-			for _, s := range permissionSuggestions {
-				if m, ok := s.(map[string]interface{}); ok {
-					hookInput.PermissionSuggestions = append(hookInput.PermissionSuggestions, m)
-				}
+	if permissionSuggestions, ok := inputData["permission_suggestions"].([]interface{}); ok {
+		for _, s := range permissionSuggestions {
+			if m, ok := s.(map[string]interface{}); ok {
+				hookInput.PermissionSuggestions = append(hookInput.PermissionSuggestions, m)
 			}
 		}
+	}
 
 	hookCtx := HookContext{}
 

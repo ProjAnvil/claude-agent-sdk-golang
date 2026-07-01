@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.110] - 2026-07-01
+
+Port of Python SDK v0.2.88-v0.2.110 changes. Of the 83 commits in this range,
+exactly one is a functional change requiring a Go port; the remainder are CLI
+version bumps (32), changelog/release housekeeping (46), a Python-only
+`anyio`/`trio` async-backend port (#990), a Python dependency pin (#1028), and
+Python test/CI infrastructure (#1018, #1021).
+
+### Added
+
+- **`TaskUpdatedMessage` typed lifecycle message**: The CLI emits `system`/`task_updated` events as a background task moves through its lifecycle. Previously these fell through to a generic `SystemMessage`; they are now parsed into a typed `TaskUpdatedMessage` (standalone struct with `TaskID`, `Patch`, `Status`, `SessionID`, `UUID`). Ported from Python SDK #1016 (v0.2.101, commit `141c37f`).
+- **`TaskUpdatedStatus` type and constants**: `TaskUpdatedStatusPending` ("pending"), `TaskUpdatedStatusRunning` ("running"), `TaskUpdatedStatusPaused` ("paused"), `TaskUpdatedStatusCompleted` ("completed"), `TaskUpdatedStatusFailed` ("failed"), `TaskUpdatedStatusKilled` ("killed").
+- **`TerminalTaskStatuses` shared set**: A `map[string]bool` spanning both task lifecycle vocabularies (`"completed"`, `"failed"`, `"stopped"` from `TaskNotificationMessage`, `"killed"` from `TaskUpdatedMessage`). Consumers tracking active task IDs should clear them on a terminal status from EITHER a `TaskNotificationMessage` or a `TaskUpdatedMessage`.
+
+### Changed
+
+- **Parser dispatch**: `parseSystemMessage` now routes the `task_updated` subtype to `parseTaskUpdatedMessage`. This parser is deliberately defensive and NEVER returns an error, mirroring Python's "parsing must never raise on a lifecycle event" intent (it diverges from the sibling task parsers, which raise `MessageParseError` on missing required fields). `Patch` defaults to a non-nil empty map when absent or non-dict; `Status` is read from `patch.status` (not `data.status`) and defaults to `""`.
+
+### Deferred
+
+- **#1058** (post-v0.2.110, unreleased on Python `origin/main`): hardens content-block parsing to raise `MessageParseError` on a non-dict block. Go is already crash-safe here but the parity gap (Go silently skips where Python now raises) is deferred to a future port so this release stays strictly at v0.2.110.
+
+### Test Coverage
+
+- `parser_test.go`: +8 tests for `TaskUpdatedMessage` parsing — terminal patch (`killed`), non-terminal (`running`), missing `patch` key, non-dict `patch` (string/slice/number/nil), `patch` without `status`, missing `task_id`/`uuid`/`session_id`, parametrized terminal statuses (`completed`/`failed`/`killed` plus `stopped` set membership), and `parseSystemMessage` dispatch yielding `*TaskUpdatedMessage` rather than a generic `*SystemMessage`.
+- `version.go`: bumped `Version` from `"0.2.87"` to `"0.2.110"`.
+
 ## [0.2.87] - 2026-05-23
 
 Port of Python SDK v0.1.77-v0.2.87 changes.

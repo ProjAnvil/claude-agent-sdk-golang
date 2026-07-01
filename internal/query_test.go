@@ -1572,19 +1572,19 @@ func TestHandleCanUseToolReceivesDecisionReason(t *testing.T) {
 	})
 
 	request := map[string]interface{}{
-		"tool_name":  "Write",
-		"input":      map[string]interface{}{"file_path": "/etc/hosts"},
-		"tool_use_id": "toolu_001",
-		"agent_id":   "agent_001",
-		"blocked_path":     "/etc/hosts",
-		"decision_reason":  "PreToolUse hook returned permissionDecision=ask",
-		"title":            "Claude wants to write to /etc/hosts",
-		"display_name":     "Write file",
-		"description":      "Write content to a system file",
+		"tool_name":       "Write",
+		"input":           map[string]interface{}{"file_path": "/etc/hosts"},
+		"tool_use_id":     "toolu_001",
+		"agent_id":        "agent_001",
+		"blocked_path":    "/etc/hosts",
+		"decision_reason": "PreToolUse hook returned permissionDecision=ask",
+		"title":           "Claude wants to write to /etc/hosts",
+		"display_name":    "Write file",
+		"description":     "Write content to a system file",
 		"permission_suggestions": []interface{}{
 			map[string]interface{}{
-				"type":        "addRules",
-				"behavior":    "allow",
+				"type":     "addRules",
+				"behavior": "allow",
 				"rules": []interface{}{
 					map[string]interface{}{
 						"toolName":    "Write",
@@ -1756,9 +1756,9 @@ func TestHandleCanUseToolSuggestionsRoundtrip(t *testing.T) {
 		"input":     map[string]interface{}{"command": "ls"},
 		"permission_suggestions": []interface{}{
 			map[string]interface{}{
-				"type":        "addRules",
-				"behavior":    "allow",
-				"rules":       []interface{}{
+				"type":     "addRules",
+				"behavior": "allow",
+				"rules": []interface{}{
 					map[string]interface{}{
 						"toolName":    "Bash",
 						"ruleContent": "ls",
@@ -1795,8 +1795,6 @@ func TestHandleCanUseToolSuggestionsRoundtrip(t *testing.T) {
 	}
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Tests for ProcessError after error result (Python SDK v0.1.77, PR #918)
 // ---------------------------------------------------------------------------
@@ -1827,7 +1825,7 @@ func TestProcessErrorAfterErrorResultUsesResultErrorText(t *testing.T) {
 	tr := newMockTransport()
 	q := NewQuery(QueryConfig{
 		Transport:       tr,
-		IsStreamingMode:  false,
+		IsStreamingMode: false,
 	})
 	q.Start()
 
@@ -1878,7 +1876,7 @@ func TestProcessErrorAfterErrorResultFallsBackToSubtype(t *testing.T) {
 	tr := newMockTransport()
 	q := NewQuery(QueryConfig{
 		Transport:       tr,
-		IsStreamingMode:  false,
+		IsStreamingMode: false,
 	})
 	q.Start()
 
@@ -1908,7 +1906,7 @@ func TestProcessErrorAfterErrorResultJoinsMultipleErrors(t *testing.T) {
 	tr := newMockTransport()
 	q := NewQuery(QueryConfig{
 		Transport:       tr,
-		IsStreamingMode:  false,
+		IsStreamingMode: false,
 	})
 	q.Start()
 
@@ -1939,7 +1937,7 @@ func TestProcessErrorWithoutResultStillSurfaces(t *testing.T) {
 	tr := newMockTransport()
 	q := NewQuery(QueryConfig{
 		Transport:       tr,
-		IsStreamingMode:  false,
+		IsStreamingMode: false,
 	})
 	q.Start()
 
@@ -1964,7 +1962,7 @@ func TestProcessErrorAfterSuccessResultStillSurfaces(t *testing.T) {
 	tr := newMockTransport()
 	q := NewQuery(QueryConfig{
 		Transport:       tr,
-		IsStreamingMode:  false,
+		IsStreamingMode: false,
 	})
 	q.Start()
 
@@ -1994,7 +1992,7 @@ func TestNonResultMessageResetsErrorResultText(t *testing.T) {
 	tr := newMockTransport()
 	q := NewQuery(QueryConfig{
 		Transport:       tr,
-		IsStreamingMode:  false,
+		IsStreamingMode: false,
 	})
 	q.Start()
 
@@ -2032,7 +2030,7 @@ func TestSessionStateChangedDoesNotResetErrorResultText(t *testing.T) {
 	tr := newMockTransport()
 	q := NewQuery(QueryConfig{
 		Transport:       tr,
-		IsStreamingMode:  false,
+		IsStreamingMode: false,
 	})
 	q.Start()
 

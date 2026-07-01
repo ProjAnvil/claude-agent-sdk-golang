@@ -34,7 +34,7 @@ type SessionStoreAppender interface {
 type mirrorItem struct {
 	filePath  string
 	entries   []map[string]interface{}
-	sizeBytes int          // approximate serialized size of entries
+	sizeBytes int           // approximate serialized size of entries
 	done      chan struct{} // closed when this item has been processed
 }
 

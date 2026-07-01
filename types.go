@@ -154,8 +154,8 @@ type ResultMessage struct {
 	StructuredOutput  interface{}            `json:"structured_output,omitempty"`
 	ModelUsage        map[string]interface{} `json:"model_usage,omitempty"`
 	PermissionDenials []interface{}          `json:"permission_denials,omitempty"`
-	DeferredToolUse  *DeferredToolUse       `json:"deferred_tool_use,omitempty"`
-	APIErrorStatus   *int                   `json:"api_error_status,omitempty"`
+	DeferredToolUse   *DeferredToolUse       `json:"deferred_tool_use,omitempty"`
+	APIErrorStatus    *int                   `json:"api_error_status,omitempty"`
 	Errors            []string               `json:"errors,omitempty"`
 	UUID              string                 `json:"uuid,omitempty"`
 }
@@ -298,6 +298,61 @@ type TaskNotificationMessage struct {
 }
 
 func (m *TaskNotificationMessage) messageMarker() {}
+
+// TaskUpdatedStatus represents a status value reported inside a task_updated patch.
+//
+// "pending", "running", "paused" are non-terminal; "completed", "failed",
+// "killed" are terminal. Note task_updated reports the raw "killed"; the CLI
+// maps that to "stopped" only when it emits a task_notification.
+type TaskUpdatedStatus string
+
+const (
+	TaskUpdatedStatusPending   TaskUpdatedStatus = "pending"
+	TaskUpdatedStatusRunning   TaskUpdatedStatus = "running"
+	TaskUpdatedStatusPaused    TaskUpdatedStatus = "paused"
+	TaskUpdatedStatusCompleted TaskUpdatedStatus = "completed"
+	TaskUpdatedStatusFailed    TaskUpdatedStatus = "failed"
+	TaskUpdatedStatusKilled    TaskUpdatedStatus = "killed"
+)
+
+// TerminalTaskStatuses is the set of task statuses that mean the task has
+// finished and should be cleared from any "active task" tracking.
+//
+// This set spans both lifecycle vocabularies: task_notification reports
+// "stopped" (the CLI's mapped form of a killed task) while task_updated
+// reports the raw "killed". Consumers should treat the Status of a
+// TaskNotificationMessage and a TaskUpdatedMessage the same way, e.g.
+//
+//	if claude.TerminalTaskStatuses[string(msg.Status)] { ... }
+var TerminalTaskStatuses = map[string]bool{
+	"completed": true,
+	"failed":    true,
+	"stopped":   true,
+	"killed":    true,
+}
+
+// TaskUpdatedMessage represents a task_updated system message emitted when a
+// background task's state changes.
+//
+// The CLI emits system/task_updated events as a task moves through its
+// lifecycle. Patch carries the changed fields (e.g. status, end_time); when
+// Patch["status"] is terminal (see TerminalTaskStatuses) the task has finished.
+//
+// Lifecycle note: a background task's terminal state can arrive ONLY as a
+// TaskUpdatedMessage with no accompanying TaskNotificationMessage. For example
+// a task stopped via TaskStop reports status="killed" here, and the matching
+// notification is sometimes suppressed. Consumers that track active task IDs
+// should therefore clear them on a terminal status (see TerminalTaskStatuses)
+// from EITHER a TaskNotificationMessage or a TaskUpdatedMessage.
+type TaskUpdatedMessage struct {
+	TaskID    string                 `json:"task_id"`
+	Patch     map[string]interface{} `json:"patch"`
+	Status    TaskUpdatedStatus      `json:"status,omitempty"`
+	SessionID string                 `json:"session_id,omitempty"`
+	UUID      string                 `json:"uuid,omitempty"`
+}
+
+func (m *TaskUpdatedMessage) messageMarker() {}
 
 // TextBlock represents a text content block.
 type TextBlock struct {
@@ -592,8 +647,8 @@ type CanUseToolFunc func(toolName string, input map[string]interface{}, ctx Tool
 
 // ToolPermissionContext provides context for tool permission callbacks.
 type ToolPermissionContext struct {
-	Signal      interface{}        // Future: abort signal support
-	Suggestions []PermissionUpdate // Permission suggestions from CLI
+	Signal         interface{}        // Future: abort signal support
+	Suggestions    []PermissionUpdate // Permission suggestions from CLI
 	ToolUseID      string             // Unique identifier for this specific tool call
 	AgentID        string             // If running within a sub-agent, the sub-agent's ID
 	BlockedPath    string             // File path that triggered the permission request
@@ -659,28 +714,28 @@ type HookContext struct {
 
 // HookInput contains data passed to hook callbacks.
 type HookInput struct {
-	HookEventName         string                 `json:"hook_event_name"`
-	SessionID             string                 `json:"session_id"`
-	TranscriptPath        string                 `json:"transcript_path"`
-	CWD                   string                 `json:"cwd"`
-	PermissionMode        string                 `json:"permission_mode,omitempty"`
-	ToolName              string                 `json:"tool_name,omitempty"`              // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest (includes agent_id/agent_type for subagents)
-	ToolInput             map[string]interface{} `json:"tool_input,omitempty"`             // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
-	ToolResponse          interface{}            `json:"tool_response,omitempty"`          // PostToolUse
-	ToolUseID             string                 `json:"tool_use_id,omitempty"`            // PreToolUse, PostToolUse, PostToolUseFailure
-	Error                 string                 `json:"error,omitempty"`                  // PostToolUseFailure
-	IsInterrupt           bool                   `json:"is_interrupt,omitempty"`           // PostToolUseFailure
-	Prompt                string                 `json:"prompt,omitempty"`                 // UserPromptSubmit
-	StopHookActive        bool                   `json:"stop_hook_active,omitempty"`       // Stop, SubagentStop
-	AgentID               string                 `json:"agent_id,omitempty"`               // SubagentStop, SubagentStart, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
-	AgentTranscriptPath   string                 `json:"agent_transcript_path,omitempty"`  // SubagentStop
-	AgentType             string                 `json:"agent_type,omitempty"`             // SubagentStop, SubagentStart, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
-	Trigger               string                 `json:"trigger,omitempty"`                // PreCompact: "manual" or "auto"
-	CustomInstructions    string                 `json:"custom_instructions,omitempty"`    // PreCompact
-	Message               string                 `json:"message,omitempty"`                // Notification
-	Title                 string                 `json:"title,omitempty"`                  // Notification
-	NotificationType      string                 `json:"notification_type,omitempty"`      // Notification
-	PermissionSuggestions []map[string]interface{}          `json:"permission_suggestions,omitempty"` // PermissionRequest
+	HookEventName         string                   `json:"hook_event_name"`
+	SessionID             string                   `json:"session_id"`
+	TranscriptPath        string                   `json:"transcript_path"`
+	CWD                   string                   `json:"cwd"`
+	PermissionMode        string                   `json:"permission_mode,omitempty"`
+	ToolName              string                   `json:"tool_name,omitempty"`              // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest (includes agent_id/agent_type for subagents)
+	ToolInput             map[string]interface{}   `json:"tool_input,omitempty"`             // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
+	ToolResponse          interface{}              `json:"tool_response,omitempty"`          // PostToolUse
+	ToolUseID             string                   `json:"tool_use_id,omitempty"`            // PreToolUse, PostToolUse, PostToolUseFailure
+	Error                 string                   `json:"error,omitempty"`                  // PostToolUseFailure
+	IsInterrupt           bool                     `json:"is_interrupt,omitempty"`           // PostToolUseFailure
+	Prompt                string                   `json:"prompt,omitempty"`                 // UserPromptSubmit
+	StopHookActive        bool                     `json:"stop_hook_active,omitempty"`       // Stop, SubagentStop
+	AgentID               string                   `json:"agent_id,omitempty"`               // SubagentStop, SubagentStart, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
+	AgentTranscriptPath   string                   `json:"agent_transcript_path,omitempty"`  // SubagentStop
+	AgentType             string                   `json:"agent_type,omitempty"`             // SubagentStop, SubagentStart, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
+	Trigger               string                   `json:"trigger,omitempty"`                // PreCompact: "manual" or "auto"
+	CustomInstructions    string                   `json:"custom_instructions,omitempty"`    // PreCompact
+	Message               string                   `json:"message,omitempty"`                // Notification
+	Title                 string                   `json:"title,omitempty"`                  // Notification
+	NotificationType      string                   `json:"notification_type,omitempty"`      // Notification
+	PermissionSuggestions []map[string]interface{} `json:"permission_suggestions,omitempty"` // PermissionRequest
 }
 
 // HookOutput defines the response from a hook callback.

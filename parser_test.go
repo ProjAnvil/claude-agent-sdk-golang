@@ -1337,10 +1337,10 @@ func TestParseHookEventMessageResponse(t *testing.T) {
 // TestParseHookEventMessageWithHookEventNameField tests hook_event_name field variant.
 func TestParseHookEventMessageWithHookEventNameField(t *testing.T) {
 	data := map[string]interface{}{
-		"type":             "system",
-		"subtype":          "hook_started",
-		"hook_event_name":  "Stop",
-		"session_id":       "session_stop",
+		"type":            "system",
+		"subtype":         "hook_started",
+		"hook_event_name": "Stop",
+		"session_id":      "session_stop",
 	}
 	msg, err := ParseMessage(data)
 	if err != nil {
@@ -1352,5 +1352,270 @@ func TestParseHookEventMessageWithHookEventNameField(t *testing.T) {
 	}
 	if hookMsg.HookEventName != "Stop" {
 		t.Errorf("Expected HookEventName 'Stop', got '%s'", hookMsg.HookEventName)
+	}
+}
+
+// ---- Tests for TaskUpdatedMessage (ported from Python SDK #1016, v0.2.101) ----
+
+// TestParseTaskUpdatedMessageTerminal verifies a task_updated with a terminal
+// patch.status yields a fully populated TaskUpdatedMessage and that the status
+// is recognized as terminal.
+func TestParseTaskUpdatedMessageTerminal(t *testing.T) {
+	data := map[string]interface{}{
+		"type":       "system",
+		"subtype":    "task_updated",
+		"task_id":    "task-abc",
+		"patch":      map[string]interface{}{"status": "killed", "end_time": float64(1780405729183)},
+		"uuid":       "uuid-4",
+		"session_id": "session-1",
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+	tum, ok := msg.(*TaskUpdatedMessage)
+	if !ok {
+		t.Fatalf("Expected *TaskUpdatedMessage, got %T", msg)
+	}
+	if tum.TaskID != "task-abc" {
+		t.Errorf("TaskID mismatch: %s", tum.TaskID)
+	}
+	if tum.Patch["status"] != "killed" {
+		t.Errorf("Patch.status mismatch: %v", tum.Patch["status"])
+	}
+	if tum.Patch["end_time"] != float64(1780405729183) {
+		t.Errorf("Patch.end_time mismatch: %v", tum.Patch["end_time"])
+	}
+	if tum.Status != TaskUpdatedStatusKilled {
+		t.Errorf("Status mismatch: %s", tum.Status)
+	}
+	if tum.UUID != "uuid-4" {
+		t.Errorf("UUID mismatch: %s", tum.UUID)
+	}
+	if tum.SessionID != "session-1" {
+		t.Errorf("SessionID mismatch: %s", tum.SessionID)
+	}
+	if !TerminalTaskStatuses[string(tum.Status)] {
+		t.Errorf("Expected status %q to be terminal", tum.Status)
+	}
+}
+
+// TestParseTaskUpdatedMessageNonTerminal verifies a non-terminal status parses
+// and is not treated as terminal.
+func TestParseTaskUpdatedMessageNonTerminal(t *testing.T) {
+	data := map[string]interface{}{
+		"type":    "system",
+		"subtype": "task_updated",
+		"task_id": "task-abc",
+		"patch":   map[string]interface{}{"status": "running"},
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+	tum, ok := msg.(*TaskUpdatedMessage)
+	if !ok {
+		t.Fatalf("Expected *TaskUpdatedMessage, got %T", msg)
+	}
+	if tum.Status != TaskUpdatedStatusRunning {
+		t.Errorf("Status mismatch: %s", tum.Status)
+	}
+	if TerminalTaskStatuses[string(tum.Status)] {
+		t.Errorf("Expected status %q to be non-terminal", tum.Status)
+	}
+}
+
+// TestParseTaskUpdatedMessageNoPatch verifies a task_updated with no patch key
+// parses with a non-nil empty Patch and empty Status; no panic, no error.
+func TestParseTaskUpdatedMessageNoPatch(t *testing.T) {
+	data := map[string]interface{}{
+		"type":    "system",
+		"subtype": "task_updated",
+		"task_id": "task-abc",
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+	tum, ok := msg.(*TaskUpdatedMessage)
+	if !ok {
+		t.Fatalf("Expected *TaskUpdatedMessage, got %T", msg)
+	}
+	if tum.Patch == nil {
+		t.Fatal("Expected Patch to be non-nil")
+	}
+	if len(tum.Patch) != 0 {
+		t.Errorf("Expected empty Patch, got %v", tum.Patch)
+	}
+	if tum.Status != "" {
+		t.Errorf("Expected empty Status, got %s", tum.Status)
+	}
+	if TerminalTaskStatuses[string(tum.Status)] {
+		t.Errorf("Expected empty status to be non-terminal")
+	}
+}
+
+// TestParseTaskUpdatedMessageNonDictPatch verifies a non-dict patch never
+// raises; Patch falls back to an empty map and Status is empty.
+func TestParseTaskUpdatedMessageNonDictPatch(t *testing.T) {
+	nonDictPatches := []interface{}{
+		"completed",                // string
+		[]interface{}{"completed"}, // slice
+		float64(42),                // number
+		nil,                        // JSON null / absent-equivalent non-dict
+	}
+	for _, p := range nonDictPatches {
+		data := map[string]interface{}{
+			"type":    "system",
+			"subtype": "task_updated",
+			"task_id": "task-abc",
+			"patch":   p,
+		}
+
+		msg, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("patch=%v: unexpected error: %v", p, err)
+			continue
+		}
+		tum, ok := msg.(*TaskUpdatedMessage)
+		if !ok {
+			t.Errorf("patch=%v: Expected *TaskUpdatedMessage, got %T", p, msg)
+			continue
+		}
+		if tum.Patch == nil {
+			t.Errorf("patch=%v: Expected Patch to be non-nil", p)
+			continue
+		}
+		if len(tum.Patch) != 0 {
+			t.Errorf("patch=%v: Expected empty Patch, got %v", p, tum.Patch)
+		}
+		if tum.Status != "" {
+			t.Errorf("patch=%v: Expected empty Status, got %s", p, tum.Status)
+		}
+	}
+}
+
+// TestParseTaskUpdatedMessagePatchWithoutStatus verifies a patch lacking
+// 'status' is preserved verbatim and Status is empty.
+func TestParseTaskUpdatedMessagePatchWithoutStatus(t *testing.T) {
+	data := map[string]interface{}{
+		"type":    "system",
+		"subtype": "task_updated",
+		"task_id": "task-abc",
+		"patch":   map[string]interface{}{"end_time": float64(1780405729183)},
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+	tum, ok := msg.(*TaskUpdatedMessage)
+	if !ok {
+		t.Fatalf("Expected *TaskUpdatedMessage, got %T", msg)
+	}
+	if got, want := tum.Patch["end_time"], float64(1780405729183); got != want {
+		t.Errorf("Patch.end_time mismatch: got %v, want %v", got, want)
+	}
+	if len(tum.Patch) != 1 {
+		t.Errorf("Expected Patch to preserve only the one field, got %v", tum.Patch)
+	}
+	if tum.Status != "" {
+		t.Errorf("Expected empty Status, got %s", tum.Status)
+	}
+}
+
+// TestParseTaskUpdatedMessageMissingFields verifies that missing task_id /
+// uuid / session_id each stay zero-value "" with no error.
+func TestParseTaskUpdatedMessageMissingFields(t *testing.T) {
+	data := map[string]interface{}{
+		"type":    "system",
+		"subtype": "task_updated",
+		"patch":   map[string]interface{}{"status": "completed"},
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+	tum, ok := msg.(*TaskUpdatedMessage)
+	if !ok {
+		t.Fatalf("Expected *TaskUpdatedMessage, got %T", msg)
+	}
+	if tum.TaskID != "" {
+		t.Errorf("Expected empty TaskID, got %s", tum.TaskID)
+	}
+	if tum.UUID != "" {
+		t.Errorf("Expected empty UUID, got %s", tum.UUID)
+	}
+	if tum.SessionID != "" {
+		t.Errorf("Expected empty SessionID, got %s", tum.SessionID)
+	}
+}
+
+// TestParseTaskUpdatedMessageTerminalStatuses verifies every terminal status
+// (completed, failed, stopped-from-notification-vocabulary, killed) is reported
+// as terminal via the shared TerminalTaskStatuses set.
+//
+// task_updated reports the raw "killed" (not the "stopped" form the CLI maps to
+// on task_notification), but TerminalTaskStatuses accepts both.
+func TestParseTaskUpdatedMessageTerminalStatuses(t *testing.T) {
+	statuses := []string{"completed", "failed", "killed"}
+	for _, s := range statuses {
+		data := map[string]interface{}{
+			"type":    "system",
+			"subtype": "task_updated",
+			"task_id": "task-abc",
+			"patch":   map[string]interface{}{"status": s},
+		}
+
+		msg, err := ParseMessage(data)
+		if err != nil {
+			t.Errorf("status=%s: unexpected error: %v", s, err)
+			continue
+		}
+		tum, ok := msg.(*TaskUpdatedMessage)
+		if !ok {
+			t.Errorf("status=%s: Expected *TaskUpdatedMessage, got %T", s, msg)
+			continue
+		}
+		if string(tum.Status) != s {
+			t.Errorf("status=%s: Status mismatch: %s", s, tum.Status)
+		}
+		if !TerminalTaskStatuses[string(tum.Status)] {
+			t.Errorf("status=%s: Expected terminal", s)
+		}
+	}
+
+	// Also confirm "stopped" (the task_notification vocabulary form) is itself
+	// terminal in the shared set, so a consumer treating both messages the same
+	// sees a cleared active-task regardless of source.
+	if !TerminalTaskStatuses["stopped"] {
+		t.Error("Expected \"stopped\" to be in TerminalTaskStatuses")
+	}
+}
+
+// TestParseTaskUpdatedMessageDispatch verifies that a system/task_updated
+// payload yields *TaskUpdatedMessage via the parseSystemMessage dispatch (and
+// is NOT downgraded to a generic *SystemMessage).
+func TestParseTaskUpdatedMessageDispatch(t *testing.T) {
+	data := map[string]interface{}{
+		"type":    "system",
+		"subtype": "task_updated",
+		"task_id": "task-abc",
+		"patch":   map[string]interface{}{"status": "completed"},
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+	if _, ok := msg.(*TaskUpdatedMessage); !ok {
+		t.Fatalf("Expected *TaskUpdatedMessage from dispatch, got %T", msg)
+	}
+	if _, ok := msg.(*SystemMessage); ok {
+		t.Fatal("Expected dispatch to NOT produce a generic *SystemMessage")
 	}
 }

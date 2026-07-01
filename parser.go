@@ -143,6 +143,8 @@ func parseSystemMessage(data map[string]interface{}) (Message, error) {
 			return parseTaskProgressMessage(data)
 		case "task_notification":
 			return parseTaskNotificationMessage(data)
+		case "task_updated":
+			return parseTaskUpdatedMessage(data)
 		case "mirror_error":
 			return parseMirrorErrorMessage(data)
 		case "hook_started", "hook_response":
@@ -245,6 +247,45 @@ func parseTaskProgressMessage(data map[string]interface{}) (*TaskProgressMessage
 	if lastToolName, ok := data["last_tool_name"].(string); ok {
 		msg.LastToolName = lastToolName
 	}
+
+	return msg, nil
+}
+
+// parseTaskUpdatedMessage parses a task_updated system message.
+//
+// Terminal task completion sometimes arrives only as a task_updated patch (no
+// separate task_notification), so this surfaces it as a typed lifecycle message
+// rather than a generic SystemMessage. Parsed defensively: the patch may omit
+// uuid/session_id and parsing must never raise on a lifecycle event, so this
+// function NEVER returns an error.
+//
+// Terminal-ness is derived from patch.status; the CLI is assumed to set it on
+// terminal transitions. A patch that carries only end_time/result/error (no
+// status) is left non-terminal (status=""); the full patch is still preserved
+// on .Patch for callers that need more.
+func parseTaskUpdatedMessage(data map[string]interface{}) (*TaskUpdatedMessage, error) {
+	msg := &TaskUpdatedMessage{}
+
+	// task_id defaults to "" — no error if absent/non-string.
+	msg.TaskID, _ = data["task_id"].(string)
+
+	// patch: preserve verbatim when present and a dict; otherwise default to an
+	// empty (non-nil) map so callers never see a nil Patch.
+	if patch, ok := data["patch"].(map[string]interface{}); ok {
+		msg.Patch = patch
+	} else {
+		msg.Patch = map[string]interface{}{}
+	}
+
+	// status is read from patch.status (NOT data.status). Absent -> "".
+	// Note: the JSON-decoded value is a plain string, so assert to string then
+	// convert — mirroring how parseTaskNotificationMessage handles its status.
+	if status, ok := msg.Patch["status"].(string); ok {
+		msg.Status = TaskUpdatedStatus(status)
+	}
+
+	msg.SessionID, _ = data["session_id"].(string)
+	msg.UUID, _ = data["uuid"].(string)
 
 	return msg, nil
 }

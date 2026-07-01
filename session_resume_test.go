@@ -92,7 +92,7 @@ func TestMaterializeResumeSession_InvalidUUID(t *testing.T) {
 func TestMaterializeResumeSession_EmptyStore(t *testing.T) {
 	store := NewInMemorySessionStore()
 	opts := &ClaudeAgentOptions{
-		SessionStore:        store,
+		SessionStore:         store,
 		ContinueConversation: true,
 	}
 	m, err := materializeResumeSession(context.Background(), opts)
@@ -115,8 +115,8 @@ func TestMaterializeResumeSession_WritesJSONL(t *testing.T) {
 	}
 
 	opts := &ClaudeAgentOptions{
-		SessionStore: store,
-		Resume:       sessionID,
+		SessionStore:  store,
+		Resume:        sessionID,
 		LoadTimeoutMs: 5000,
 	}
 	m, err := materializeResumeSession(ctx, opts)
