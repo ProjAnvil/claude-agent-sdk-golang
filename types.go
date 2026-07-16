@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -492,7 +493,14 @@ func ParseContentBlocks(rawBlocks []interface{}) ([]ContentBlock, error) {
 	for _, raw := range rawBlocks {
 		rawMap, ok := raw.(map[string]interface{})
 		if !ok {
-			continue
+			// A non-dict block is malformed content, not something to drop
+			// silently. Raise MessageParseError naming the offending Go type,
+			// mirroring Python SDK #1058 (previously Go `continue`d past it,
+			// which lost the block without trace).
+			return nil, NewMessageParseError(
+				fmt.Sprintf("invalid content block (expected dict, got %T)", raw),
+				nil,
+			)
 		}
 		block, err := ParseContentBlock(rawMap)
 		if err != nil {

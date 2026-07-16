@@ -49,6 +49,10 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 		return nil
 	}
 
+	// Advisory: warn if other permission options shadow a configured
+	// can_use_tool callback (Python SDK #1081).
+	warnIfCanUseToolShadowed(c.options)
+
 	// Fail fast on invalid session_store option combinations before spawn.
 	if err := validateSessionStoreOptions(c.options); err != nil {
 		return err

@@ -60,6 +60,10 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 		opts = DefaultOptions()
 	}
 
+	// Advisory: warn if other permission options shadow a configured
+	// can_use_tool callback (Python SDK #1081).
+	warnIfCanUseToolShadowed(opts)
+
 	go func() {
 		defer close(messages)
 		defer close(errs)

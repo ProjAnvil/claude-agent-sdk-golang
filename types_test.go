@@ -338,6 +338,93 @@ func TestParseContentBlocks(t *testing.T) {
 	}
 }
 
+// TestParseContentBlocks_NonDictBlockRaises tests that a content block that
+// is not a dict raises MessageParseError rather than being silently skipped.
+// Ported from Python SDK #1058 (Go previously `continue`d past the block).
+func TestParseContentBlocks_NonDictBlockRaises(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  interface{}
+	}{
+		{"string", "oops"},
+		{"number", float64(42)},
+		{"bool", true},
+		{"nil", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseContentBlocks([]interface{}{tc.raw})
+			if err == nil {
+				t.Fatalf("Expected error for %s content block, got nil", tc.name)
+			}
+			if !IsMessageParseError(err) {
+				t.Errorf("Expected MessageParseError for %s block, got %T: %v", tc.name, err, err)
+			}
+		})
+	}
+}
+
+// TestParseContentBlocks_NonDictBlockAbortsParse tests that a non-dict block
+// aborts parsing even when a valid block precedes it (no silent partial skip).
+func TestParseContentBlocks_NonDictBlockAbortsParse(t *testing.T) {
+	rawBlocks := []interface{}{
+		map[string]interface{}{"type": "text", "text": "ok"},
+		"not-a-dict",
+	}
+	_, err := ParseContentBlocks(rawBlocks)
+	if err == nil {
+		t.Fatal("Expected error when a non-dict block follows a valid one, got nil")
+	}
+	if !IsMessageParseError(err) {
+		t.Errorf("Expected MessageParseError, got %T", err)
+	}
+}
+
+// TestParseAssistantMessage_StringContentRaises tests that an assistant
+// message whose content is a bare string raises MessageParseError (not a
+// runtime panic). Ported from Python SDK #1058.
+func TestParseAssistantMessage_StringContentRaises(t *testing.T) {
+	data := map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{
+			"model":   "m",
+			"content": "hi",
+		},
+	}
+	_, err := ParseMessage(data)
+	if err == nil {
+		t.Fatal("Expected error for assistant message with string content, got nil")
+	}
+	if !IsMessageParseError(err) {
+		t.Errorf("Expected MessageParseError, got %T: %v", err, err)
+	}
+}
+
+// TestParseMessage_NonDictBlockRaisesForBothRoles mirrors Python #1058's
+// parametrized test: a non-dict block inside content raises for both the
+// user and assistant branches.
+func TestParseMessage_NonDictBlockRaisesForBothRoles(t *testing.T) {
+	for _, role := range []string{"user", "assistant"} {
+		t.Run(role, func(t *testing.T) {
+			message := map[string]interface{}{"content": []interface{}{"oops"}}
+			if role == "assistant" {
+				message["model"] = "m"
+			}
+			data := map[string]interface{}{
+				"type":    role,
+				"message": message,
+			}
+			_, err := ParseMessage(data)
+			if err == nil {
+				t.Fatalf("Expected error for %s message with non-dict block, got nil", role)
+			}
+			if !IsMessageParseError(err) {
+				t.Errorf("Expected MessageParseError for %s, got %T: %v", role, err, err)
+			}
+		})
+	}
+}
+
 // TestUserMessageCreation tests creating and marshaling a UserMessage.
 func TestUserMessageCreation(t *testing.T) {
 	msg := &UserMessage{Content: "Hello, Claude!"}

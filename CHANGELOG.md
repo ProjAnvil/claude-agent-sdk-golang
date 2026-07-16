@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.120] - 2026-07-16
+
+Port of Python SDK v0.2.110..v0.2.120 changes. Of the 10 tagged releases in
+this range, six non-bump commits were reviewed: two required a Go port and
+four were analyzed and explicitly ruled out. CLI version bumps (2.1.202 →
+2.1.211) and changelog/release housekeeping are not applicable — the Go SDK
+does not bundle a CLI.
+
+### Added
+
+- **`can_use_tool` shadowed advisory warning (#1081)**: `can_use_tool` is only consulted when the CLI's permission ladder lands on "ask". `bypassPermissions`, or an `allowed_tools` entry that allows a whole tool (`"Read"`, `"Read()"`, `"Read(*)"`), auto-approves the call earlier in the ladder and the callback never runs — a silent security footgun (documented cases of path-jailing callbacks being bypassed). The SDK now emits a single `slog.Warn` advisory at `Query()` start and `ClaudeSDKClient.Connect()` when the callback is set alongside a visibly-shadowing option. `skills:"all"` is treated as injecting a bare `"Skill"` (shadows); `skills:[]string{...}` injects `Skill(name)` specifiers (does not shadow). Advisory only — it never blocks or returns an error. Ported from Python SDK #1081 (v0.2.111, commit `7968c40`).
+
+### Fixed
+
+- **Non-dict content block now raises `MessageParseError` (#1058)**: `ParseContentBlocks` previously `continue`d past a content block that was not a JSON object (e.g. a bare string or number inside the `content` array), silently dropping it. It now returns `MessageParseError` naming the offending Go type, matching Python #1058's "expected dict, got X". The `assistant` branch already rejected a bare-string `content` via its `[]interface{}` type assertion; that behavior is now locked in by tests. Ported from Python SDK #1058 (v0.2.111, commit `d47b180`; previously deferred at v0.2.110 where the parity gap was first noted).
+- **`CLAUDE_AGENT_SDK_VERSION` env var was stale**: `internal/transport/version.go` still held `"0.2.87"` after the v0.2.110 port (only the top-level `version.go` was bumped), so the CLI received `CLAUDE_AGENT_SDK_VERSION=0.2.87`. Both constants are now `0.2.120`, and the existing code comment reminds that the two must stay in sync.
+
+### Not Ported (analyzed, ruled out)
+
+- **#1083 — NDJSON line framing**: Python's `anyio.TextReceiveStream` yields chunks (up to 64KiB), and treating each chunk as a line stripped whitespace at the seam — including inside JSON string values. Go reads stdout/stderr with `bufio.Scanner` (ScanLines), which frames by line natively; `strings.TrimSpace` then runs on a complete line and cannot eat interior whitespace. No change needed.
+- **#1082 — zombie CLI children**: Python's async `close()` was not cancellation-safe; a `CancelledError` propagated past the terminate/kill escalation and leaked the child. Go's `Close()` is synchronous (uncancellable) and runs the full `wait(5s) → SIGTERM → wait(5s) → Kill` chain; the subprocess is also created with `exec.CommandContext`, which auto-kills on ctx cancel. No orphan is possible under either path.
+- **#1084 — e2e stderr test fix**: CI test-infra fix (clean cwd / trust workspace); the Go SDK has no equivalent e2e suite.
+- **#1116 — Slack notification workflow**: `.github/workflows/` change; the Go SDK ships no GitHub Actions workflows.
+
+### Test Coverage
+
+- `types_test.go`: +4 tests for non-dict content block handling — `ParseContentBlocks` raises on string/number/bool/nil blocks (parametrized), aborts parse even after a preceding valid block, assistant string-content raises, and both `user`/`assistant` branches raise on a non-dict block.
+- `warnings_test.go` (new file): +14 tests covering `wholeToolAllowed` (table-driven), `canUseToolShadowedMessage` (bypass precedence, dedupe/order preservation, specifiers-not-shadowed, none), and `warnIfCanUseToolShadowed` (nil opts, no callback, no shadow, bypass, whole-tool entry, skills="all" injects Skill, skills list does not, no options mutation). Captures `slog` output via a test handler to assert emission and silence.
+- `version.go` / `internal/transport/version.go`: bumped to `0.2.120`.
+- Total: 733 tests passing across all packages.
+
 ## [0.2.110] - 2026-07-01
 
 Port of Python SDK v0.2.88-v0.2.110 changes. Of the 83 commits in this range,
