@@ -1,5 +1,7 @@
 package claude
 
+import "encoding/json"
+
 // ParseMessage parses a raw JSON message into a typed Message.
 // Returns nil for unknown message types for forward compatibility.
 func ParseMessage(data map[string]interface{}) (Message, error) {
@@ -444,8 +446,22 @@ func parseResultMessage(data map[string]interface{}) (*ResultMessage, error) {
 		msg.StructuredOutput = structuredOutput
 	}
 
+	// modelUsage passes through verbatim from the CLI; re-marshal each
+	// entry into the typed ModelUsage shape (mirrors the TypeScript SDK).
 	if modelUsage, ok := data["modelUsage"].(map[string]interface{}); ok {
-		msg.ModelUsage = modelUsage
+		typed := make(map[string]ModelUsage, len(modelUsage))
+		for model, raw := range modelUsage {
+			entryJSON, err := json.Marshal(raw)
+			if err != nil {
+				continue
+			}
+			var entry ModelUsage
+			if err := json.Unmarshal(entryJSON, &entry); err != nil {
+				continue
+			}
+			typed[model] = entry
+		}
+		msg.ModelUsage = typed
 	}
 
 	if permDenials, ok := data["permission_denials"].([]interface{}); ok {
@@ -482,6 +498,10 @@ func parseResultMessage(data map[string]interface{}) (*ResultMessage, error) {
 
 	if uuid, ok := data["uuid"].(string); ok {
 		msg.UUID = uuid
+	}
+
+	if terminalReason, ok := data["terminal_reason"].(string); ok {
+		msg.TerminalReason = terminalReason
 	}
 
 	return msg, nil

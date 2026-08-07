@@ -97,7 +97,7 @@ func TestBuildCommand_Extended(t *testing.T) {
 				ContinueConversation: true,
 				Resume:               "session-123",
 			},
-			expected: []string{"--continue", "--resume", "session-123"},
+			expected: []string{"--continue", "--resume=session-123"},
 		},
 		{
 			name: "settings file",

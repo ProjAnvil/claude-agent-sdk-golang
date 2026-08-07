@@ -2,4 +2,4 @@ package transport
 
 // sdkVersion is the current version of the Go SDK.
 // Must be kept in sync with the top-level version.go constant.
-const sdkVersion = "0.2.120"
+const sdkVersion = "0.2.132"

@@ -9,12 +9,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -23,6 +26,19 @@ const (
 	// MinimumCLIVersion is the minimum supported Claude Code version.
 	MinimumCLIVersion = "2.0.0"
 )
+
+// cmdExeMetacharacters are the cmd.exe metacharacters (plus the quote
+// character cmd.exe uses to toggle its quoting state, and "!", which expands
+// like "%" when delayed expansion is enabled). See rejectWindowsBatchCLI /
+// rejectWindowsCmdMetacharacters.
+const cmdExeMetacharacters = `&|<>^%!"`
+
+// skillNameInvalidChars matches characters that can never ride safely in a
+// Skill(name) rule: parentheses and commas are delimiters to the
+// --allowedTools tokenizer, and control characters (C0, DEL, C1) never appear
+// in a skill directory name. U+FEFF is here rather than with the whitespace
+// check because the CLI trims it as whitespace and unicode.IsSpace does not.
+var skillNameInvalidChars = regexp.MustCompile(`[(),\x00-\x1f\x7f-\x9f\x{feff}]`)
 
 // SubprocessTransport implements Transport using Claude Code CLI subprocess.
 type SubprocessTransport struct {
@@ -42,6 +58,9 @@ type SubprocessTransport struct {
 	errors        chan error
 	closed        bool
 	closeMu       sync.Mutex
+	// goos overrides runtime.GOOS for the Windows-only validation in
+	// Connect; empty means runtime.GOOS. Test seam only.
+	goos string
 }
 
 // NewSubprocessTransport creates a new subprocess transport.
@@ -78,13 +97,27 @@ func NewSubprocessTransport(prompt interface{}, opts *TransportOptions) (*Subpro
 // CLINotFoundError indicates that the Claude Code CLI is not installed.
 type CLINotFoundError struct {
 	CLIPath string
+	// windows selects the Windows remediation message (the native
+	// installer); npm is not recommended there because it installs a
+	// claude.cmd shim, which Connect refuses to run.
+	windows bool
 }
 
 func (e *CLINotFoundError) Error() string {
-	msg := "Claude Code not found. Install with:\n" +
-		"  curl -fsSL https://claude.ai/install.sh | bash\n\n" +
-		"If already installed, provide the path via options:\n" +
-		"  &TransportOptions{CLIPath: \"/path/to/claude\"}"
+	var msg string
+	if e.windows {
+		msg = "Claude Code not found. Install the native claude.exe with (PowerShell):\n" +
+			"  irm https://claude.ai/install.ps1 | iex\n\n" +
+			"Or provide the path to a claude.exe via options:\n" +
+			"  &TransportOptions{CLIPath: \"C:\\\\path\\\\to\\\\claude.exe\"}\n\n" +
+			"(npm install -g @anthropic-ai/claude-code produces a claude.cmd shim, " +
+			"which this SDK refuses to run on Windows.)"
+	} else {
+		msg = "Claude Code not found. Install with:\n" +
+			"  curl -fsSL https://claude.ai/install.sh | bash\n\n" +
+			"If already installed, provide the path via options:\n" +
+			"  &TransportOptions{CLIPath: \"/path/to/claude\"}"
+	}
 	if e.CLIPath != "" {
 		msg = fmt.Sprintf("%s: %s", msg, e.CLIPath)
 	}
@@ -156,19 +189,72 @@ func (e *BufferOverflowError) Error() string {
 
 // findCLI searches for the Claude Code CLI binary.
 func findCLI() (string, error) {
+	return findCLIForGOOS(runtime.GOOS)
+}
+
+// findCLIForGOOS is findCLI with the target OS as a parameter, so the
+// Windows-only branches are testable on POSIX hosts.
+func findCLIForGOOS(goos string) (string, error) {
 	// Check bundled CLI first
 	if bundled := findBundledCLI(); bundled != "" {
 		return bundled, nil
 	}
 
 	// Check PATH
+	var whichHit string
 	if cli, err := exec.LookPath("claude"); err == nil {
-		return cli, nil
+		if goos != "windows" || isWindowsNativeExe(cli) {
+			return cli, nil
+		}
+		// Windows resolved something CreateProcess cannot run directly as
+		// the CLI: npm's claude.cmd shim (which Connect refuses to spawn)
+		// or an extensionless wrapper script from a git-bash / WSL setup
+		// (which fails at spawn with WinError 193). LookPath walks PATH
+		// directory-major, so such an entry in an early PATH directory
+		// shadows a native claude.exe installed in a later one. Prefer any
+		// discoverable native executable, and keep this hit only as the
+		// last resort so a shim-only machine still gets the explanatory
+		// batch-script refusal from Connect. The claude.exe probe is
+		// vetted too: PATHEXT resolution can append an extension and hand
+		// back "claude.exe.cmd".
+		if exe, err := exec.LookPath("claude.exe"); err == nil && isWindowsNativeExe(exe) {
+			return exe, nil
+		}
+		whichHit = cli
 	}
 
 	// Check common locations
 	home, _ := os.UserHomeDir()
-	locations := []string{
+	for _, path := range cliSearchLocations(home, goos) {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, nil
+		}
+	}
+
+	if whichHit != "" {
+		// No native executable was discoverable anywhere: return the
+		// original PATH hit so Connect raises the batch-script refusal
+		// (with its remediation) for a shim, or the spawn error for a
+		// wrapper script, rather than a bare not-found error.
+		return whichHit, nil
+	}
+
+	return "", &CLINotFoundError{windows: goos == "windows"}
+}
+
+// cliSearchLocations lists the fixed fallback install locations probed after
+// PATH. On Windows only the native installer's claude.exe is probed: an
+// extensionless match (a WSL / git-bash script artifact at
+// ~/.local/bin/claude) would preempt the explanatory batch-script refusal
+// with an opaque spawn failure, and a rooted-but-driveless
+// "/usr/local/bin/claude" resolves against the current drive
+// (C:\usr\local\bin\...), a location another local user can create -- a
+// binary-planting probe.
+func cliSearchLocations(home, goos string) []string {
+	if goos == "windows" {
+		return []string{filepath.Join(home, ".local/bin/claude.exe")}
+	}
+	return []string{
 		filepath.Join(home, ".npm-global/bin/claude"),
 		"/usr/local/bin/claude",
 		filepath.Join(home, ".local/bin/claude"),
@@ -176,14 +262,230 @@ func findCLI() (string, error) {
 		filepath.Join(home, ".yarn/bin/claude"),
 		filepath.Join(home, ".claude/local/claude"),
 	}
+}
 
-	for _, path := range locations {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			return path, nil
+// isWindowsNativeExe reports whether cliPath's final component names an image
+// CreateProcess runs directly (.exe / .com), used only to decide which
+// discovery result to prefer. It is not a security gate: every returned path
+// still passes rejectWindowsBatchCLI in Connect.
+func isWindowsNativeExe(cliPath string) bool {
+	name := strings.ReplaceAll(cliPath, "\\", "/")
+	name = name[strings.LastIndex(name, "/")+1:]
+	name = strings.ToLower(strings.TrimRight(name, ". "))
+	return strings.HasSuffix(name, ".exe") || strings.HasSuffix(name, ".com")
+}
+
+// isWindowsBatchCLI reports whether cliPath names a .bat/.cmd batch script on
+// Windows. Always false off Windows. See rejectWindowsBatchCLI for why
+// spawning such a script is refused.
+func isWindowsBatchCLI(cliPath string) bool {
+	return isWindowsBatchCLIForGOOS(cliPath, runtime.GOOS)
+}
+
+// isWindowsBatchCLIForGOOS is isWindowsBatchCLI with the target OS as a
+// parameter, so the Windows branch is testable on POSIX CI hosts.
+//
+// Deliberately plain string logic rather than filepath: filepath parses
+// several of the cases below differently per OS, and the tests run on POSIX
+// CI while the code runs on Windows.
+//
+// EVERY path component is classified, not only the final one. Win32 opens a
+// path after lexical normalization -- "." / ".." collapsing, repeated
+// separators, and position-dependent trailing dot/space trimming (a middle
+// ".. " or "..." stays a literal name while a final one trims to ".." or
+// vanishes) -- and any attempt to re-derive the effective final component
+// here is a race against that ruleset: get one rule slightly wrong and a
+// spelling such as "claude.cmd\...\.." resolves to claude.cmd on Windows
+// while the simulation lands on some other name. Refusing whenever ANY
+// component carries a batch extension closes that whole class outright,
+// because every normalization trick still has to spell the .bat/.cmd
+// component somewhere in the string. It costs nothing legitimate: no real
+// claude.exe lives beneath a directory named like a batch file.
+//
+// Within a component, Win32 finds the extension with a last-dot scan over
+// the WHOLE component, stream spec included -- "claude:evil.cmd" has
+// extension ".cmd" -- while an NTFS stream spec also opens its base file --
+// "claude.cmd:stream" opens claude.cmd -- and a drive prefix
+// ("C:claude.cmd") rides in the same component. Splitting each component on
+// ":" covers all of these: colons cannot appear in real file names, so no
+// legitimate segment is over-refused. Trailing dots and spaces, which
+// Windows strips at path resolution, are stripped per segment (the same
+// normalization Rust's CVE-2024-24576 fix applies), and a bare ".cmd"
+// counts as a batch extension (as Win32 PathFindExtension treats it).
+func isWindowsBatchCLIForGOOS(cliPath, goos string) bool {
+	if goos != "windows" {
+		return false
+	}
+	for _, component := range strings.Split(strings.ReplaceAll(cliPath, "\\", "/"), "/") {
+		for _, segment := range strings.Split(component, ":") {
+			segment = strings.ToLower(strings.TrimRight(segment, ". "))
+			if strings.HasSuffix(segment, ".bat") || strings.HasSuffix(segment, ".cmd") {
+				return true
+			}
 		}
 	}
+	return false
+}
 
-	return "", &CLINotFoundError{}
+// rejectWindowsBatchCLI refuses to execute a .bat/.cmd script as the CLI on
+// Windows.
+//
+// Windows has no shebang mechanism: CreateProcess runs batch scripts by
+// silently rewriting the spawn into a "cmd.exe /c" invocation, and cmd.exe
+// re-parses the whole command line at execution time. Go's os/exec quotes
+// arguments for the MSVCRT argv rules only, not for cmd.exe, so cmd.exe
+// metacharacters inside an argument value -- for example a session title
+// passed to --resume -- reach cmd.exe unescaped and can execute injected
+// commands. Reliable escaping for cmd.exe does not exist (%VAR% expands even
+// inside double quotes), so spawning a batch script with runtime-provided
+// arguments cannot be made safe. Refusing is the same remediation Node.js
+// shipped for this vulnerability class (CVE-2024-27980, "BatBadBut").
+//
+// In practice this refuses npm's claude.cmd shim, which findCLI returns only
+// when no native claude.exe is discoverable. The alternatives in the error
+// message avoid cmd.exe entirely.
+func rejectWindowsBatchCLI(cliPath string) error {
+	return rejectWindowsBatchCLIForGOOS(cliPath, runtime.GOOS)
+}
+
+func rejectWindowsBatchCLIForGOOS(cliPath, goos string) error {
+	if !isWindowsBatchCLIForGOOS(cliPath, goos) {
+		return nil
+	}
+	return &CLIConnectionError{Message: fmt.Sprintf(
+		"Refusing to execute batch script %q: Windows runs "+
+			".bat/.cmd files via cmd.exe, which can execute commands "+
+			"injected through CLI arguments, and no reliable escaping for "+
+			"cmd.exe exists. Use a native claude executable instead: "+
+			"install Claude Code natively "+
+			"(irm https://claude.ai/install.ps1 | iex), or point "+
+			"TransportOptions.CLIPath at a claude.exe.", cliPath)}
+}
+
+// rejectWindowsCmdMetacharacters is defense in depth for Windows: it rejects
+// cmd.exe metacharacters in option values.
+//
+// With batch-script spawning refused (rejectWindowsBatchCLI), these
+// characters are harmless: os/exec quotes correctly for native executables.
+// They are rejected anyway so that Resume / SessionID values, which
+// applications commonly take from external input, stay inert even if a
+// cmd.exe hop is ever reintroduced between the SDK and the CLI. No format is
+// imposed beyond this (resume values may be arbitrary session titles, not
+// only UUIDs), and POSIX behavior is unchanged.
+func rejectWindowsCmdMetacharacters(optionName, value string) error {
+	return rejectWindowsCmdMetacharactersForGOOS(optionName, value, runtime.GOOS)
+}
+
+func rejectWindowsCmdMetacharactersForGOOS(optionName, value, goos string) error {
+	if goos != "windows" {
+		return nil
+	}
+	var bad []rune
+	seen := make(map[rune]bool)
+	for _, c := range value {
+		if (strings.ContainsRune(cmdExeMetacharacters, c) || c == '\r' || c == '\n') && !seen[c] {
+			seen[c] = true
+			bad = append(bad, c)
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Slice(bad, func(i, j int) bool { return bad[i] < bad[j] })
+	quoted := make([]string, len(bad))
+	for i, c := range bad {
+		quoted[i] = "'" + string(c) + "'"
+	}
+	return fmt.Errorf("%s value %q contains characters that are unsafe to pass "+
+		"on a Windows command line: [%s]", optionName, value, strings.Join(quoted, ", "))
+}
+
+// validateSkillsOptions rejects Skills values other than nil, "all", or a
+// []string of valid skill names.
+//
+// A bare string other than "all" is almost always a caller bug (in the
+// Python SDK it would silently iterate as characters), and any other type
+// would be silently ignored when the argv is built, installing no skill
+// filter at all. Failing closed mirrors the Python SDK (#1145).
+func validateSkillsOptions(skills interface{}) error {
+	switch s := skills.(type) {
+	case nil:
+		return nil
+	case string:
+		if s == "all" {
+			return nil
+		}
+		return fmt.Errorf("ClaudeAgentOptions.skills must be a list of skill names or "+
+			"\"all\", got '%s'. Did you mean ['%s']?", s, s)
+	case []string:
+		for _, name := range s {
+			if err := validateSkillName(name); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("ClaudeAgentOptions.skills must be a list of skill names or "+
+			"\"all\", got %v.", skills)
+	}
+}
+
+// validateSkillName rejects skill names that cannot ride safely in a
+// Skill(name) rule.
+//
+// Names from Options.Skills are formatted into the --allowedTools value,
+// which the CLI splits into rules on commas and spaces outside parentheses.
+// That tokenizer does not honor escape sequences -- escaping exists only in
+// the per-rule grammar, applied after splitting -- so a name carrying a
+// delimiter cannot be passed through reliably: what it tokenizes into
+// depends on what surrounds it.
+//
+// Names that tokenize cleanly but can never match the listed skill are
+// rejected too, so a dead rule fails loudly here instead of silently
+// granting nothing. Each check below states its own reason.
+func validateSkillName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("skill names must be non-empty strings")
+	}
+	// Go strings are UTF-8 bytes, so the Python surrogate check has no
+	// direct equivalent; reject invalid UTF-8 instead -- no CLI-discovered
+	// skill name contains it.
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("invalid skill name %q: contains invalid UTF-8,"+
+			" which can never match a skill the CLI discovered.", name)
+	}
+	if name != strings.TrimSpace(name) {
+		return fmt.Errorf("invalid skill name %q: leading or trailing whitespace"+
+			" can never match — the Skill tool trims the invoked name.", name)
+	}
+	if skillNameInvalidChars.MatchString(name) {
+		return fmt.Errorf("invalid skill name %q: parentheses, commas, control"+
+			" characters, and byte-order marks are not allowed. Names match"+
+			" the skill's directory name, or 'plugin:skill' for"+
+			" plugin-qualified skills.", name)
+	}
+	if name == "*" {
+		return fmt.Errorf("invalid skill name '*': use skills=\"all\" to enable every skill.")
+	}
+	if strings.HasSuffix(name, ":*") || strings.HasSuffix(name, " *") {
+		return fmt.Errorf("invalid skill name %q: wildcard-suffix names are not"+
+			" allowed; list each skill by its exact name.", name)
+	}
+	if strings.HasPrefix(name, "/") {
+		return fmt.Errorf("invalid skill name %q: skill names may not start with"+
+			" '/'. The skills option takes the canonical name, not the"+
+			" slash-command form.", name)
+	}
+	if strings.Contains(name, "\\\\") {
+		return fmt.Errorf("invalid skill name %q: consecutive backslashes are not"+
+			" allowed — the per-rule parser collapses them, so the rule"+
+			" would name a different skill.", name)
+	}
+	if strings.HasSuffix(name, "\\") {
+		return fmt.Errorf("invalid skill name %q: names may not end with an"+
+			" unpaired backslash.", name)
+	}
+	return nil
 }
 
 // findBundledCLI looks for a bundled CLI binary.
@@ -210,6 +512,26 @@ func findBundledCLI() string {
 func (t *SubprocessTransport) Connect(ctx context.Context) error {
 	if t.process != nil {
 		return nil
+	}
+
+	goos := t.goos
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+
+	// Validate the resolved CLI path and option values before anything is
+	// spawned with them (#1127, #1145).
+	if err := rejectWindowsBatchCLIForGOOS(t.cliPath, goos); err != nil {
+		return err
+	}
+	if err := rejectWindowsCmdMetacharactersForGOOS("resume", t.options.Resume, goos); err != nil {
+		return err
+	}
+	if err := rejectWindowsCmdMetacharactersForGOOS("session_id", t.options.SessionID, goos); err != nil {
+		return err
+	}
+	if err := validateSkillsOptions(t.options.Skills); err != nil {
+		return err
 	}
 
 	cmd := t.buildCommand(ctx)
@@ -284,7 +606,9 @@ func (t *SubprocessTransport) streamInput(ch chan map[string]interface{}) {
 //   - "all"      → inject the bare "Skill" tool; default SettingSources to ["user","project"] when nil
 //   - []string   → inject "Skill(name)" for each name; same SettingSources default
 //
-// Does not mutate t.options.
+// Each listed skill name is validated in Connect via validateSkillsOptions
+// before being formatted into a rule; invalid Skills values surface as
+// errors there, not here. Does not mutate t.options.
 func (t *SubprocessTransport) applySkillsDefaults() (allowedTools []string, settingSources []string, settingSourcesSet bool) {
 	allowedTools = make([]string, len(t.options.AllowedTools))
 	copy(allowedTools, t.options.AllowedTools)
@@ -414,12 +738,17 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		args = append(args, "--continue")
 	}
 
+	// Pass these as --flag=value rather than as two argv tokens. The CLI
+	// declares --resume with an optional value, so in the two-token form a
+	// dash-leading value is not bound to the flag and is instead parsed as
+	// a separate CLI flag -- letting an untrusted value inject arbitrary
+	// flags. The equals form always binds the value to the flag.
 	if t.options.Resume != "" {
-		args = append(args, "--resume", t.options.Resume)
+		args = append(args, "--resume="+t.options.Resume)
 	}
 
 	if t.options.SessionID != "" {
-		args = append(args, "--session-id", t.options.SessionID)
+		args = append(args, "--session-id="+t.options.SessionID)
 	}
 
 	if t.options.Settings != "" {
@@ -469,7 +798,15 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	// Extra args
 	for flag, value := range t.options.ExtraArgs {
 		if value == "" {
+			// Boolean flag without value
 			args = append(args, fmt.Sprintf("--%s", flag))
+		} else if strings.HasPrefix(value, "-") {
+			// In the two-token form, a dash-leading value is not bound
+			// to its flag when the CLI declares the option with an
+			// optional value -- it parses as a separate flag instead
+			// (the same injection the --resume change above closes).
+			// The equals form always binds.
+			args = append(args, fmt.Sprintf("--%s=%s", flag, value))
 		} else {
 			args = append(args, fmt.Sprintf("--%s", flag), value)
 		}

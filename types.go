@@ -140,6 +140,29 @@ type DeferredToolUse struct {
 	Input map[string]interface{} `json:"input"`
 }
 
+// ModelUsage is the per-model token usage and cost breakdown.
+//
+// Keys match the TypeScript SDK's ModelUsage shape (camelCase), since the
+// value is passed through verbatim from the CLI's modelUsage field.
+type ModelUsage struct {
+	InputTokens              int     `json:"inputTokens"`
+	OutputTokens             int     `json:"outputTokens"`
+	CacheReadInputTokens     int     `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int     `json:"cacheCreationInputTokens"`
+	WebSearchRequests        int     `json:"webSearchRequests"`
+	CostUSD                  float64 `json:"costUSD"`
+	ContextWindow            int     `json:"contextWindow"`
+	MaxOutputTokens          int     `json:"maxOutputTokens"`
+	// CanonicalModel is the canonical model id used for the pricing lookup
+	// (e.g. "claude-opus-4-7"). May differ from the raw model string this
+	// entry is keyed by (provider-specific ids, aliases).
+	CanonicalModel string `json:"canonicalModel,omitempty"`
+	// Provider is the API provider that served this model ("firstParty",
+	// "bedrock", "vertex", "foundry", "anthropicAws",
+	// "anthropicGoogleCloud", "mantle", "gateway").
+	Provider string `json:"provider,omitempty"`
+}
+
 // ResultMessage represents a result message with cost and usage information.
 type ResultMessage struct {
 	Subtype           string                 `json:"subtype"`
@@ -153,12 +176,20 @@ type ResultMessage struct {
 	Usage             map[string]interface{} `json:"usage,omitempty"`
 	Result            string                 `json:"result,omitempty"`
 	StructuredOutput  interface{}            `json:"structured_output,omitempty"`
-	ModelUsage        map[string]interface{} `json:"model_usage,omitempty"`
+	ModelUsage        map[string]ModelUsage  `json:"model_usage,omitempty"`
 	PermissionDenials []interface{}          `json:"permission_denials,omitempty"`
 	DeferredToolUse   *DeferredToolUse       `json:"deferred_tool_use,omitempty"`
 	APIErrorStatus    *int                   `json:"api_error_status,omitempty"`
 	Errors            []string               `json:"errors,omitempty"`
 	UUID              string                 `json:"uuid,omitempty"`
+	// TerminalReason reports why the query loop terminated (e.g. "completed",
+	// "max_turns", "aborted_streaming"). A value of "aborted_streaming" or
+	// "aborted_tools" indicates the turn was cancelled (via
+	// Client.Interrupt or an interrupt control request). Empty when the CLI
+	// did not report a terminal reason (older CLI versions, or a result that
+	// bypassed the query loop such as a local slash command). Mirrors the
+	// TypeScript SDK's SDKResultMessage.terminal_reason.
+	TerminalReason string `json:"terminal_reason,omitempty"`
 }
 
 func (m *ResultMessage) messageMarker() {}

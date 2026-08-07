@@ -1047,8 +1047,66 @@ func TestParseResultMessageWithModelUsage(t *testing.T) {
 	if rm.ModelUsage == nil {
 		t.Fatal("Expected ModelUsage to be set")
 	}
+	usage, ok := rm.ModelUsage["claude-sonnet-4-5-20250929"]
+	if !ok {
+		t.Fatal("Expected ModelUsage entry for claude-sonnet-4-5-20250929")
+	}
+	if usage.InputTokens != 3 {
+		t.Errorf("Expected InputTokens 3, got %d", usage.InputTokens)
+	}
+	if usage.OutputTokens != 24 {
+		t.Errorf("Expected OutputTokens 24, got %d", usage.OutputTokens)
+	}
+	if usage.CostUSD != 0.0106 {
+		t.Errorf("Expected CostUSD 0.0106, got %v", usage.CostUSD)
+	}
 	if rm.UUID != "d379c496-f33a-4ea4-b920-3c5483baa6f7" {
 		t.Errorf("Expected UUID, got '%s'", rm.UUID)
+	}
+}
+
+// TestParseResultMessageWithTerminalReason tests the terminal_reason field.
+func TestParseResultMessageWithTerminalReason(t *testing.T) {
+	data := map[string]interface{}{
+		"type":            "result",
+		"subtype":         "success",
+		"duration_ms":     float64(1000),
+		"duration_api_ms": float64(500),
+		"is_error":        false,
+		"num_turns":       float64(2),
+		"session_id":      "session_123",
+		"result":          "",
+		"terminal_reason": "aborted_tools",
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	rm := msg.(*ResultMessage)
+	if rm.TerminalReason != "aborted_tools" {
+		t.Errorf("Expected TerminalReason 'aborted_tools', got '%s'", rm.TerminalReason)
+	}
+}
+
+// TestParseResultMessageMissingTerminalReason tests that a result message
+// without terminal_reason parses with an empty TerminalReason.
+func TestParseResultMessageMissingTerminalReason(t *testing.T) {
+	data := map[string]interface{}{
+		"type":            "result",
+		"subtype":         "success",
+		"duration_ms":     float64(1000),
+		"duration_api_ms": float64(500),
+		"is_error":        false,
+		"num_turns":       float64(2),
+		"session_id":      "session_123",
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	rm := msg.(*ResultMessage)
+	if rm.TerminalReason != "" {
+		t.Errorf("Expected empty TerminalReason, got '%s'", rm.TerminalReason)
 	}
 }
 

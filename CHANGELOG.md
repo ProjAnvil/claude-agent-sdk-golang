@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.132] - 2026-08-07
+
+Port of Python SDK v0.2.120..v0.2.132 changes. Of the 12 tagged releases in
+this range, seven non-bump commits were reviewed: six required a Go port and
+one was analyzed and explicitly ruled out. Bundled CLI version bumps
+(2.1.212 → 2.1.224) and changelog/release housekeeping are not applicable —
+the Go SDK does not bundle a CLI.
+
+### Security
+
+- **`--resume` / `--session-id` now passed as a single `--flag=value` argv token (#1123)**: the CLI declares `--resume` with an *optional* value, so in the two-token form a dash-leading value (e.g. `Resume: "--version"`) is not bound to the flag and is instead parsed as an independent CLI flag — an argv-level flag injection for applications that route untrusted input into `Resume` / `SessionID`. The equals form always binds the value; the CLI then rejects a dash-leading value as an invalid session ID, which is the desired behavior. Ported from Python SDK #1123 (v0.2.121, commit `347a1cb`).
+- **Refuse to spawn `.bat`/`.cmd` CLI scripts on Windows (#1127)**: on Windows installs without a bundled `claude.exe`, CLI discovery can resolve npm's `claude.cmd` batch shim. Windows runs batch scripts by rewriting the spawn into `cmd.exe /c ...`, and cmd.exe re-parses the whole command line — Go's `os/exec` quotes for the MSVCRT argv rules only, so cmd.exe metacharacters inside an argument value (a `--resume` session title, `--mcp-config` JSON, a system prompt) reach cmd.exe unescaped and can execute injected commands (the "BatBadBut" class, CVE-2024-27980). No reliable escaping for cmd.exe exists, so `Connect` now refuses `.bat`/`.cmd` paths with a `CLIConnectionError` pointing at the alternatives (the native installer `irm https://claude.ai/install.ps1 | iex`, or an explicit `TransportOptions.CLIPath` to a `claude.exe`). The extension check classifies every path component with plain string logic (trailing dot/space stripping, NTFS alternate-data-stream specs, drive-relative paths, bare `.cmd` — the same normalization Rust applied for CVE-2024-24576). CLI discovery on Windows now prefers a native `claude.exe` over a shim PATH hit, probes only `~/.local/bin/claude.exe` as a fallback location, and the not-found error recommends the native installer instead of npm. Ported from Python SDK #1127 (v0.2.124, commit `879e920`).
+- **Windows-only rejection of cmd.exe metacharacters in `Resume` / `SessionID` (#1127)**: defense in depth — on Windows these values now reject `& | < > ^ % ! "` and CR/LF at `Connect`, keeping them inert even if a cmd.exe hop is ever reintroduced between the SDK and the CLI. POSIX behavior is unchanged.
+- **`ExtraArgs` binds dash-leading values via `--flag=value` (#1127)**: in the two-token form a dash-leading value parses as a separate flag when the CLI declares the option with an optional value — the same injection class #1123 closed for `--resume`. Values not starting with `-` and bare flags are unchanged.
+- **Skill names in `Options.Skills` are validated before reaching `--allowedTools` (#1145)**: the CLI splits that value into permission rules on commas and spaces outside parentheses, and its tokenizer honors no escape sequences, so a name carrying a delimiter cannot round-trip. The transport now fails closed at `Connect`, rejecting parentheses, commas, control characters (C0, DEL, C1), U+FEFF, empty names, invalid UTF-8, a literal `*` and wildcard suffixes (`:*`, ` *`), and shapes that parse but can never match — surrounding whitespace, a leading `/`, consecutive backslashes, and a trailing unpaired backslash. A bare string passed in place of a list (or any other type) now errors instead of being silently ignored, with a `Did you mean ['name']?` suggestion. Ported from Python SDK #1145 (v0.2.129, commit `cbed47d`).
+
+### Breaking
+
+- `Options.Skills`: `[]string{"plugin:*"}` and `[]string{"*"}` now return an error — use `"all"`, or a `Skill(...)` rule in `AllowedTools` for prefix matching. `[]string{" name"}` and `[]string{"/name"}` now error as well; both previously built a rule that could never match, so the skill was silently unavailable. A bare string other than `"all"` (e.g. `Skills: "my-skill"`) now errors — pass `[]string{"my-skill"}`.
+- `ResultMessage.ModelUsage` is now typed as `map[string]ModelUsage` instead of `map[string]interface{}` (see below).
+
+### Added
+
+- **`ResultMessage.TerminalReason` (#1142)**: surfaces why the query loop ended (`"completed"`, `"max_turns"`, `"aborted_streaming"`, `"aborted_tools"`, etc.). A value of `"aborted_streaming"` or `"aborted_tools"` means the turn was cancelled via `Client.Interrupt`. Empty when the CLI did not report a terminal reason (older CLI versions, or a result that bypassed the query loop). Ported from Python SDK #1142 (v0.2.126, commit `07b46c6`).
+- **`ModelUsage` struct (#1143)**: `ResultMessage.ModelUsage` is now `map[string]ModelUsage`, mirroring the TypeScript SDK's `ModelUsage` shape (camelCase JSON keys, passed through verbatim from the CLI's `modelUsage` field): `InputTokens`, `OutputTokens`, `CacheReadInputTokens`, `CacheCreationInputTokens`, `WebSearchRequests`, `CostUSD`, `ContextWindow`, `MaxOutputTokens`, plus `CanonicalModel` and `Provider` (emitted by newer CLI versions; give callers a stable key for their own rate-table lookups across provider-specific model ids and aliases). Ported from Python SDK #1143 (v0.2.126, commit `9c27ca8`).
+
+### Fixed
+
+- **Stdin no longer closed on a result frame while tasks are in flight (#1103)**: a `result` frame marks the end of one *turn*, not the end of the *run* — a background task keeps running past it and still needs stdin for hook and SDK-MCP control responses. `Query` previously closed stdin on the first result frame, which broke a still-running subagent's SDK-MCP tool calls ("Stream closed") and silently bypassed its PreToolUse hooks. The SDK now tracks in-flight tasks from the `task_started` / `task_notification` / terminal `task_updated` lifecycle frames (only `local_agent` / `local_workflow` — types that reliably reach a terminal status — so background shells and monitors cannot hang the query) and only treats a result frame as run-ending when no tasks are in flight. With no background tasks, behavior is unchanged. Ported from Python SDK #1103 (v0.2.127, commit `e6e07f1`).
+
+### Not Ported (analyzed, ruled out)
+
+- **#1117 — `CLAUDE_CLI_VERSION` validation / build-script hardening**: Python packaging scripts only (`scripts/download_cli.py`, `scripts/update_cli_version.py`, CI workflows); the Go SDK has no CLI-download build scripts, so there is no equivalent attack surface.
+
+### Test Coverage
+
+- `internal/transport/subprocess_security_test.go` (new): ~70 cases mirroring the new Python `tests/test_transport.py` coverage — `--resume=--evil` / `--session-id=-r` single-token regression (#1123); batch-path classification table (`claude.cmd:stream`, `claude:evil.cmd`, `C:claude.cmd`, bare `.cmd`, `claude.cmd\...\..`, trailing dots/spaces) with refusal before any spawn, Windows CLI discovery preferring a native exe, cmd.exe metacharacter rejection, `ExtraArgs` dash-leading value binding (#1127); parametrized skill-name rejection/acceptance tables and bare-string `Did you mean` errors (#1145). Windows branches are exercised through a `goos` test seam so they run on POSIX CI.
+- `internal/transport/subprocess_extended_test.go`, `subprocess_test.go`: existing `--resume` / `--session-id` argv expectations updated to the equals form.
+- `parser_test.go`: `TestParseResultMessageWithTerminalReason`, `TestParseResultMessageMissingTerminalReason` (#1142), and typed-field assertions in `TestParseResultMessageWithModelUsage` (#1143).
+- `query_test.go`: `TestTaskLifecycleTracker` (add / non-deferring-type ignored / non-terminal keeps / terminal discards via both `task_notification` and `task_updated` / unknown-id / missing-id), `TestResultWithInflightTaskKeepsStdinOpen` (parametrized over both drain frames), and `TestResultWithNoInflightTasksClosesStdin` (unchanged behavior) (#1103).
+- `version.go` / `internal/transport/version.go`: bumped to `0.2.132`.
+- Full suite: `go build ./...`, `go vet ./...`, `go test ./...` all clean.
+
 ## [0.2.120] - 2026-07-16
 
 Port of Python SDK v0.2.110..v0.2.120 changes. Of the 10 tagged releases in

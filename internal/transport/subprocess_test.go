@@ -584,7 +584,7 @@ func TestSessionIDFlag(t *testing.T) {
 	cmd := transport.buildCommand(context.Background())
 
 	args := strings.Join(cmd.Args, " ")
-	if !strings.Contains(args, "--session-id test-session-123") {
+	if !strings.Contains(args, "--session-id=test-session-123") {
 		t.Errorf("Expected --session-id flag in args: %s", args)
 	}
 }
