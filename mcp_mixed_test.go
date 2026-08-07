@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,12 +20,13 @@ func TestMixedMCPServers(t *testing.T) {
 	mockTrans := newMockTransport()
 	handleInitialization(mockTrans, nil)
 
-	// Capture options passed to transport
-	var capturedOpts *transport.TransportOptions
+	// Capture options passed to transport. Stored through an atomic because
+	// the Query goroutine writes it while the test goroutine polls it.
+	var capturedOpts atomic.Pointer[transport.TransportOptions]
 
 	// Override factory
 	makeTransport = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
-		capturedOpts = opts
+		capturedOpts.Store(opts)
 		return mockTrans, nil
 	}
 
@@ -81,7 +83,7 @@ func TestMixedMCPServers(t *testing.T) {
 		case <-timeout:
 			t.Fatal("Timeout waiting for transport creation")
 		case <-ticker.C:
-			if capturedOpts != nil {
+			if capturedOpts.Load() != nil {
 				goto Verified
 			}
 		case <-errs:
@@ -92,13 +94,14 @@ func TestMixedMCPServers(t *testing.T) {
 	}
 
 Verified:
+	captured := capturedOpts.Load()
 	// Verify transport options
-	if capturedOpts.MCPServers == nil {
+	if captured.MCPServers == nil {
 		t.Fatal("Expected MCPServers in transport options")
 	}
 
 	// Verify SDK server is present as type "sdk"
-	sdkConfig, ok := capturedOpts.MCPServers["sdk"].(map[string]interface{})
+	sdkConfig, ok := captured.MCPServers["sdk"].(map[string]interface{})
 	if !ok {
 		t.Fatal("Expected sdk server config map")
 	}
@@ -110,7 +113,7 @@ Verified:
 	}
 
 	// Verify External server is present as type "stdio"
-	extConfig, ok := capturedOpts.MCPServers["external"].(map[string]interface{})
+	extConfig, ok := captured.MCPServers["external"].(map[string]interface{})
 	if !ok {
 		t.Fatal("Expected external server config map")
 	}

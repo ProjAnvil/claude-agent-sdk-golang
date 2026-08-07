@@ -34,6 +34,7 @@ the Go SDK does not bundle a CLI.
 ### Fixed
 
 - **Stdin no longer closed on a result frame while tasks are in flight (#1103)**: a `result` frame marks the end of one *turn*, not the end of the *run* — a background task keeps running past it and still needs stdin for hook and SDK-MCP control responses. `Query` previously closed stdin on the first result frame, which broke a still-running subagent's SDK-MCP tool calls ("Stream closed") and silently bypassed its PreToolUse hooks. The SDK now tracks in-flight tasks from the `task_started` / `task_notification` / terminal `task_updated` lifecycle frames (only `local_agent` / `local_workflow` — types that reliably reach a terminal status — so background shells and monitors cannot hang the query) and only treats a result frame as run-ending when no tasks are in flight. With no background tasks, behavior is unchanged. Ported from Python SDK #1103 (v0.2.127, commit `e6e07f1`).
+- **Concurrent `exec.Cmd.Wait` calls raced in `SubprocessTransport.Close`**: both `readStdout`'s teardown and `Close`'s graceful-shutdown path called `process.Wait()`, and `os/exec.Cmd.Wait` is not safe for concurrent use (surfaced by `go test -race`). Reaping is now serialized through a helper that runs `Wait` exactly once and hands later callers the stored result; `Close` also no longer reads `process.ProcessState` concurrently with an in-flight `Wait`.
 
 ### Not Ported (analyzed, ruled out)
 

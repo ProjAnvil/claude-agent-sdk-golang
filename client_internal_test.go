@@ -20,9 +20,17 @@ type MockTransport struct {
 	CloseFunc        func() error
 	IsReadyFunc      func() bool
 
-	// Channels
-	readCh chan map[string]interface{}
-	errCh  chan error
+	// readCh and errCh are the write side: test feeders and the
+	// initialization responder send here. They are never closed, so a late
+	// send can never race with (or panic on a channel closed by) Close.
+	// A forwarder goroutine copies them to readOut/errOut, which are what
+	// ReadMessages/Errors hand out and what shutdown closes (after
+	// draining) to terminate readers.
+	readCh  chan map[string]interface{}
+	errCh   chan error
+	readOut chan map[string]interface{}
+	errOut  chan error
+	done    chan struct{}
 
 	closeOnce sync.Once
 }
@@ -45,14 +53,14 @@ func (m *MockTransport) ReadMessages() <-chan map[string]interface{} {
 	if m.ReadMessagesFunc != nil {
 		return m.ReadMessagesFunc()
 	}
-	return m.readCh
+	return m.readOut
 }
 
 func (m *MockTransport) Errors() <-chan error {
 	if m.ErrorsFunc != nil {
 		return m.ErrorsFunc()
 	}
-	return m.errCh
+	return m.errOut
 }
 
 func (m *MockTransport) EndInput() error {
@@ -66,11 +74,16 @@ func (m *MockTransport) Close() error {
 	if m.CloseFunc != nil {
 		return m.CloseFunc()
 	}
-	m.closeOnce.Do(func() {
-		close(m.readCh)
-		close(m.errCh)
-	})
+	m.shutdown()
 	return nil
+}
+
+// shutdown terminates the forwarder, which drains any buffered input and
+// then closes readOut/errOut so readers see EOF. Idempotent.
+func (m *MockTransport) shutdown() {
+	m.closeOnce.Do(func() {
+		close(m.done)
+	})
 }
 
 func (m *MockTransport) IsReady() bool {
@@ -82,9 +95,46 @@ func (m *MockTransport) IsReady() bool {
 
 // newMockTransport creates a MockTransport with initialized channels.
 func newMockTransport() *MockTransport {
-	return &MockTransport{
-		readCh: make(chan map[string]interface{}, 100),
-		errCh:  make(chan error, 100),
+	m := &MockTransport{
+		readCh:  make(chan map[string]interface{}, 100),
+		errCh:   make(chan error, 100),
+		readOut: make(chan map[string]interface{}, 100),
+		errOut:  make(chan error, 100),
+		done:    make(chan struct{}),
+	}
+	go m.forward()
+	return m
+}
+
+// forward copies the write-side channels to the read side until shutdown,
+// then drains whatever is still buffered before closing the read side.
+// Sends that land after shutdown are simply dropped (they stay buffered on
+// the never-closed write side), which removes the send-vs-close data race —
+// and the potential "send on closed channel" panic — between test feeders /
+// the initialization responder and Close.
+func (m *MockTransport) forward() {
+	for {
+		select {
+		case msg := <-m.readCh:
+			m.readOut <- msg
+		case err := <-m.errCh:
+			m.errOut <- err
+		case <-m.done:
+			for {
+				select {
+				case msg := <-m.readCh:
+					m.readOut <- msg
+					continue
+				case err := <-m.errCh:
+					m.errOut <- err
+					continue
+				default:
+				}
+				close(m.readOut)
+				close(m.errOut)
+				return
+			}
+		}
 	}
 }
 

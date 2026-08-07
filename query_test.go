@@ -244,10 +244,7 @@ func TestQueryDeadlockRegression(t *testing.T) {
 		}
 		go func() {
 			time.Sleep(10 * time.Millisecond)
-			mockTrans.closeOnce.Do(func() {
-				close(mockTrans.readCh)
-				close(mockTrans.errCh)
-			})
+			mockTrans.shutdown()
 		}()
 		return nil
 	}
@@ -344,10 +341,7 @@ func TestQuerySyncDeadlockRegression(t *testing.T) {
 		}
 		go func() {
 			time.Sleep(10 * time.Millisecond)
-			mockTrans.closeOnce.Do(func() {
-				close(mockTrans.readCh)
-				close(mockTrans.errCh)
-			})
+			mockTrans.shutdown()
 		}()
 		return nil
 	}

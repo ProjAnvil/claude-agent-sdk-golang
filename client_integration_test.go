@@ -46,8 +46,7 @@ func TestIntegration_SimpleQueryResponse(t *testing.T) {
 			"session_id":      "test-session",
 			"total_cost_usd":  0.001,
 		}
-		close(mockT.readCh) // Close channel to finish the Query loop
-		close(mockT.errCh)
+		mockT.shutdown() // Close channel to finish the Query loop
 	}()
 
 	msgs, err := client.Query(ctx, "What is 2 + 2?")

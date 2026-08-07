@@ -58,6 +58,13 @@ type SubprocessTransport struct {
 	errors        chan error
 	closed        bool
 	closeMu       sync.Mutex
+	// waitMu serializes process reaping: os/exec.Cmd.Wait is not safe for
+	// concurrent use, and both readStdout's teardown and Close's graceful
+	// shutdown need the process's exit status. The first caller runs Wait;
+	// later callers block until it finishes and observe the stored result.
+	waitMu     sync.Mutex
+	waitCalled bool
+	waitErr    error
 	// goos overrides runtime.GOOS for the Windows-only validation in
 	// Connect; empty means runtime.GOOS. Test seam only.
 	goos string
@@ -987,12 +994,28 @@ func (t *SubprocessTransport) readStdout() {
 		}
 	}
 
-	if err := t.process.Wait(); err != nil {
+	if err := t.waitForProcessExit(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			t.exitError = &ProcessError{Message: "command failed", ExitCode: exitErr.ExitCode()}
 			t.errors <- t.exitError
 		}
 	}
+}
+
+// waitForProcessExit reaps the child exactly once. Concurrent callers
+// (readStdout's teardown and Close's graceful-shutdown path) serialize on
+// waitMu; later callers block until the first Wait finishes and then return
+// the stored result instead of racing inside os/exec.Cmd.Wait, which is not
+// safe for concurrent use.
+func (t *SubprocessTransport) waitForProcessExit() error {
+	t.waitMu.Lock()
+	defer t.waitMu.Unlock()
+	if t.waitCalled {
+		return t.waitErr
+	}
+	t.waitCalled = true
+	t.waitErr = t.process.Wait()
+	return t.waitErr
 }
 
 // readStderr reads stderr output.
@@ -1081,27 +1104,26 @@ func (t *SubprocessTransport) Close() error {
 	// EOF on stdin. Without this grace period, SIGTERM can interrupt the
 	// write and cause the last assistant message to be lost.
 	if t.process != nil && t.process.Process != nil {
-		if t.process.ProcessState == nil {
-			// Process hasn't exited yet — wait with timeout
-			done := make(chan struct{})
-			go func() {
-				t.process.Wait()
-				close(done)
-			}()
+		done := make(chan struct{})
+		go func() {
+			// Returns immediately if the process was already reaped (e.g.
+			// by readStdout's teardown).
+			t.waitForProcessExit()
+			close(done)
+		}()
 
+		select {
+		case <-done:
+			// Process exited gracefully
+		case <-time.After(5 * time.Second):
+			// Graceful shutdown timed out — send SIGTERM
+			t.process.Process.Signal(syscall.SIGTERM)
 			select {
 			case <-done:
-				// Process exited gracefully
 			case <-time.After(5 * time.Second):
-				// Graceful shutdown timed out — send SIGTERM
-				t.process.Process.Signal(syscall.SIGTERM)
-				select {
-				case <-done:
-				case <-time.After(5 * time.Second):
-					// SIGTERM timed out — force kill
-					t.process.Process.Kill()
-					<-done
-				}
+				// SIGTERM timed out — force kill
+				t.process.Process.Kill()
+				<-done
 			}
 		}
 	}
