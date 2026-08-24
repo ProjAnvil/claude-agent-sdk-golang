@@ -27,6 +27,8 @@ func ParseMessage(data map[string]interface{}) (Message, error) {
 		return parseStreamEvent(data)
 	case "rate_limit_event":
 		return parseRateLimitEvent(data)
+	case "conversation_reset":
+		return parseConversationResetMessage(data)
 	default:
 		// Forward-compatible: skip unrecognized message types so newer
 		// CLI versions don't crash older SDK versions.
@@ -50,6 +52,8 @@ func parseUserMessage(data map[string]interface{}) (*UserMessage, error) {
 	if tur, ok := data["tool_use_result"].(map[string]interface{}); ok {
 		msg.ToolUseResult = tur
 	}
+
+	msg.Origin = parseOrigin(data)
 
 	// Extract content from nested message
 	messageData, ok := data["message"].(map[string]interface{})
@@ -387,6 +391,22 @@ func parseIntField(m map[string]interface{}, key string) int {
 	}
 }
 
+// parseOrigin returns data["origin"] if it is a well-formed origin object.
+//
+// The origin map is passed through as-is (including keys this SDK version
+// doesn't model) so newer CLI origin kinds/fields stay visible to callers.
+// Anything that is not an object with a string "kind" is treated as absent.
+func parseOrigin(data map[string]interface{}) MessageOrigin {
+	origin, ok := data["origin"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	if _, ok := origin["kind"].(string); !ok {
+		return nil
+	}
+	return MessageOrigin(origin)
+}
+
 func parseResultMessage(data map[string]interface{}) (*ResultMessage, error) {
 	msg := &ResultMessage{}
 
@@ -504,6 +524,8 @@ func parseResultMessage(data map[string]interface{}) (*ResultMessage, error) {
 		msg.TerminalReason = terminalReason
 	}
 
+	msg.Origin = parseOrigin(data)
+
 	return msg, nil
 }
 
@@ -586,6 +608,31 @@ func parseRateLimitEvent(data map[string]interface{}) (*RateLimitEvent, error) {
 		msg.SessionID = sessionID
 	} else {
 		return nil, NewMessageParseError("missing required field in rate_limit_event message: session_id", data)
+	}
+
+	return msg, nil
+}
+
+// parseConversationResetMessage parses a conversation_reset message.
+func parseConversationResetMessage(data map[string]interface{}) (*ConversationResetMessage, error) {
+	msg := &ConversationResetMessage{}
+
+	if newConversationID, ok := data["new_conversation_id"].(string); ok {
+		msg.NewConversationID = newConversationID
+	} else {
+		return nil, NewMessageParseError("missing required field in conversation_reset message: new_conversation_id", data)
+	}
+
+	if uuid, ok := data["uuid"].(string); ok {
+		msg.UUID = uuid
+	} else {
+		return nil, NewMessageParseError("missing required field in conversation_reset message: uuid", data)
+	}
+
+	if sessionID, ok := data["session_id"].(string); ok {
+		msg.SessionID = sessionID
+	} else {
+		return nil, NewMessageParseError("missing required field in conversation_reset message: session_id", data)
 	}
 
 	return msg, nil

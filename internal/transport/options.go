@@ -54,6 +54,15 @@ type TransportOptions struct {
 	StrictMCPConfig bool
 	// IncludeHookEvents when true, emit hook events in the message stream.
 	IncludeHookEvents bool
+	// ResumeSessionAt, when resuming, only loads the conversation up to and
+	// including the message with this UUID. Use with Resume (and usually
+	// ForkSession) to branch from an earlier point in the conversation.
+	ResumeSessionAt string
+	// ResumeDropsTurn, with ResumeSessionAt, is the UUID of the user prompt
+	// whose turn this truncating resume intends to discard. A non-nil pointer
+	// is always forwarded — even to an empty string — so the CLI rejects a
+	// malformed declaration instead of the SDK silently disarming the guard.
+	ResumeDropsTurn *string
 	// SessionStore is the store adapter for mirroring session transcripts.
 	// When set, --session-mirror is passed to the CLI subprocess.
 	// The interface uses interface{} here to avoid circular imports with the

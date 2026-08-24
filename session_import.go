@@ -157,25 +157,25 @@ func ImportSessionToStore(ctx context.Context, sessionID string, directory *stri
 		}
 		total += n
 
-		// Import .meta.json sidecar if present.
-		metaPath := strings.TrimSuffix(fp, ".jsonl") + ".meta.json"
-		metaData, err := os.ReadFile(metaPath)
+		// Import the .meta.json sidecar so materializeResumeSession can
+		// recreate it and resumed subagents keep their agentType/worktreePath.
+		// A missing, corrupt, or non-object sidecar is treated as absent (the
+		// transcript is still imported); other read errors propagate.
+		meta, err := readAgentMetadataSidecar(fp)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue // no sidecar, that is fine
-			}
-			return total, fmt.Errorf("failed to read meta file %s: %w", metaPath, err)
+			return total, fmt.Errorf("failed to read meta file %s: %w", agentMetadataSidecarPath(fp), err)
+		}
+		if meta == nil {
+			continue
 		}
 
-		var meta map[string]interface{}
-		if err := json.Unmarshal(metaData, &meta); err != nil {
-			return total, fmt.Errorf("failed to parse meta file %s: %w", metaPath, err)
-		}
-
-		metaEntry := SessionStoreEntry{"type": "agent_metadata"}
+		// Synthetic discriminator last so a stray "type" key in the CLI-owned
+		// sidecar can never shadow it.
+		metaEntry := make(SessionStoreEntry, len(meta)+1)
 		for k, v := range meta {
 			metaEntry[k] = v
 		}
+		metaEntry["type"] = "agent_metadata"
 
 		if err := store.Append(ctx, subKey, []SessionStoreEntry{metaEntry}); err != nil {
 			return total, fmt.Errorf("failed to append meta entry for %s: %w", fp, err)

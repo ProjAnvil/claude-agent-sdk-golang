@@ -43,8 +43,14 @@ func setupTestTransport(t *testing.T) (*SubprocessTransport, *io.PipeWriter, fun
 	loop:
 		for {
 			select {
-			case <-transport.messages:
-			case <-transport.errors:
+			case _, ok := <-transport.messages:
+				if !ok {
+					break loop
+				}
+			case _, ok := <-transport.errors:
+				if !ok {
+					break loop
+				}
 			default:
 				break loop
 			}

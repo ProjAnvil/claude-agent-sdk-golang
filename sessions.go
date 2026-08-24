@@ -1146,6 +1146,15 @@ func filterVisibleMessages(chain []transcriptEntry) []transcriptEntry {
 
 // toSessionMessages converts transcript entries to SessionMessage objects.
 func toSessionMessages(entries []transcriptEntry) []SessionMessage {
+	return toSessionMessagesWithParents(entries, nil, nil)
+}
+
+// toSessionMessagesWithParents converts transcript entries to SessionMessage
+// objects, stamping the given parent ids on every message. Used for subagent
+// transcripts, where every message shares the same parents: parentToolUseID
+// is the id of the Agent tool_use block in the parent session that spawned
+// the subagent, and parentAgentID the spawning subagent for nested subagents.
+func toSessionMessagesWithParents(entries []transcriptEntry, parentToolUseID, parentAgentID *string) []SessionMessage {
 	result := []SessionMessage{}
 	for _, entry := range entries {
 		msgType := SessionMessageTypeUser
@@ -1154,15 +1163,82 @@ func toSessionMessages(entries []transcriptEntry) []SessionMessage {
 		}
 
 		msg := SessionMessage{
-			Type:      msgType,
-			UUID:      entry.UUID,
-			SessionID: entry.SessionID,
-			Message:   entry.Message,
+			Type:            msgType,
+			UUID:            entry.UUID,
+			SessionID:       entry.SessionID,
+			Message:         entry.Message,
+			ParentToolUseID: parentToolUseID,
+			ParentAgentID:   parentAgentID,
 		}
 
 		result = append(result, msg)
 	}
 	return result
+}
+
+// agentMetadataSidecarPath maps agent-<id>.jsonl to agent-<id>.meta.json (same
+// directory). The single definition of the sidecar naming convention, shared
+// by the read path here, session import, and resume materialization.
+func agentMetadataSidecarPath(transcriptPath string) string {
+	return strings.TrimSuffix(transcriptPath, ".jsonl") + ".meta.json"
+}
+
+// readAgentMetadataSidecar reads the .meta.json sidecar beside a subagent
+// transcript.
+//
+// Returns (nil, nil) when the sidecar is missing, not valid JSON, or not a
+// JSON object — an unusable optional sidecar degrades to an absent one. Other
+// read errors (e.g. permission denied) are returned to the caller.
+func readAgentMetadataSidecar(transcriptPath string) (map[string]interface{}, error) {
+	data, err := os.ReadFile(agentMetadataSidecarPath(transcriptPath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		// Corrupt JSON or valid JSON that is not an object: degrade to absent.
+		return nil, nil
+	}
+	return meta, nil
+}
+
+// splitAgentMetadata separates the synthetic agent_metadata entry from
+// transcript lines.
+//
+// A subagent's SessionStore stream carries its .meta.json sidecar as
+// {"type": "agent_metadata", ...} entries alongside the transcript. Returns
+// (metadata, transcript) where metadata is the *last* such entry (it is
+// rewritten on resume, so last wins) or nil.
+func splitAgentMetadata(entries []SessionStoreEntry) (map[string]interface{}, []SessionStoreEntry) {
+	var metadata map[string]interface{}
+	transcript := make([]SessionStoreEntry, 0, len(entries))
+	for _, e := range entries {
+		if t, _ := e["type"].(string); t == "agent_metadata" {
+			metadata = map[string]interface{}(e)
+		} else {
+			transcript = append(transcript, e)
+		}
+	}
+	return metadata, transcript
+}
+
+// parentIDsFromAgentMetadata extracts (toolUseId, parentAgentId) from an agent
+// metadata dict. Works for both the on-disk .meta.json sidecar and the
+// synthetic agent_metadata entry a SessionStore receives in its place.
+func parentIDsFromAgentMetadata(meta map[string]interface{}) (*string, *string) {
+	if len(meta) == 0 {
+		return nil, nil
+	}
+	strPtr := func(key string) *string {
+		if s, ok := meta[key].(string); ok {
+			return &s
+		}
+		return nil
+	}
+	return strPtr("toolUseId"), strPtr("parentAgentId")
 }
 
 // resolveSubagentsDir returns the subagents directory for a session.
@@ -1269,6 +1345,12 @@ type GetSubagentMessagesOptions struct {
 }
 
 // GetSubagentMessages reads messages from a subagent transcript.
+//
+// Each message's ParentToolUseID is the id of the Agent tool_use in the
+// parent session that spawned this subagent (and ParentAgentID the spawning
+// subagent, for nested subagents), read from the agent-<agentId>.meta.json
+// sidecar next to the transcript; both are nil if the sidecar is missing or
+// unusable.
 func GetSubagentMessages(opts *GetSubagentMessagesOptions) ([]SessionMessage, error) {
 	if opts == nil {
 		return nil, fmt.Errorf("options cannot be nil")
@@ -1299,10 +1381,21 @@ func GetSubagentMessages(opts *GetSubagentMessagesOptions) ([]SessionMessage, er
 		return []SessionMessage{}, nil
 	}
 
+	// The .meta.json sidecar next to the transcript records which Agent
+	// tool_use spawned this subagent (and, for nested subagents, the parent
+	// agent id). Like the transcript read above, any failure to read it
+	// (missing, unreadable, corrupt) degrades to "no metadata" rather than
+	// failing this best-effort read helper.
+	meta, err := readAgentMetadataSidecar(filePath)
+	if err != nil {
+		meta = nil
+	}
+	parentToolUseID, parentAgentID := parentIDsFromAgentMetadata(meta)
+
 	entries := parseTranscriptEntries(content)
 	chain := buildConversationChain(entries)
 	visible := filterVisibleMessages(chain)
-	messages := toSessionMessages(visible)
+	messages := toSessionMessagesWithParents(visible, parentToolUseID, parentAgentID)
 
 	offset := opts.Offset
 	if offset < 0 {
@@ -1512,9 +1605,17 @@ func filterTranscriptEntries(raw []SessionStoreEntry) []transcriptEntry {
 // entriesToSessionMessages converts filtered transcript entries to SessionMessage slice.
 // Applies offset/limit if non-nil.
 func entriesToSessionMessages(entries []transcriptEntry, limit *int, offset int) []SessionMessage {
+	return entriesToSubagentMessages(entries, limit, offset, nil, nil)
+}
+
+// entriesToSubagentMessages converts filtered transcript entries to
+// SessionMessage values stamped with the given shared parent ids. Shared by
+// the filesystem and SessionStore-backed subagent read paths; every message
+// in a subagent transcript shares the same parent ids.
+func entriesToSubagentMessages(entries []transcriptEntry, limit *int, offset int, parentToolUseID, parentAgentID *string) []SessionMessage {
 	chain := buildConversationChain(entries)
 	visible := filterVisibleMessages(chain)
-	messages := toSessionMessages(visible)
+	messages := toSessionMessagesWithParents(visible, parentToolUseID, parentAgentID)
 	if offset < 0 {
 		offset = 0
 	}
@@ -1922,6 +2023,8 @@ func ListSubagentsFromStore(ctx context.Context, opts *ListSubagentsFromStoreOpt
 // This is the store-backed counterpart to GetSubagentMessages. Subagents may
 // live at subagents/agent-<id> or nested under subagents/workflows/<runId>/agent-<id>.
 // Scans subkeys when the store implements ListSubkeys; otherwise tries the direct path.
+// ParentToolUseID / ParentAgentID are taken from the subagent's agent_metadata
+// entry in the store (nil if absent).
 // Returns an empty slice if not found or the session_id is invalid.
 func GetSubagentMessagesFromStore(ctx context.Context, opts *GetSubagentMessagesFromStoreOptions) ([]SessionMessage, error) {
 	if opts == nil || opts.Store == nil {
@@ -1965,5 +2068,19 @@ func GetSubagentMessagesFromStore(ctx context.Context, opts *GetSubagentMessages
 	if len(entries) == 0 {
 		return []SessionMessage{}, nil
 	}
-	return entriesToSessionMessages(filterTranscriptEntries(entries), opts.Limit, opts.Offset), nil
+
+	// The synthetic agent_metadata entry (the store's copy of the .meta.json
+	// sidecar) records which Agent tool_use spawned this subagent. Recover the
+	// parent ids from it — last one wins, since the metadata is rewritten on
+	// resume — then drop it: it is not a transcript line.
+	metaEntry, transcript := splitAgentMetadata(entries)
+	if len(transcript) == 0 {
+		return []SessionMessage{}, nil
+	}
+	parentToolUseID, parentAgentID := parentIDsFromAgentMetadata(metaEntry)
+
+	return entriesToSubagentMessages(
+		filterTranscriptEntries(transcript), opts.Limit, opts.Offset,
+		parentToolUseID, parentAgentID,
+	), nil
 }

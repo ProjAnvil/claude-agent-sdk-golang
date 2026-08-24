@@ -484,4 +484,131 @@ func TestGetSubagentMessagesFromStore_Basic(t *testing.T) {
 	if len(msgs) < 1 {
 		t.Fatalf("expected at least 1 message, got %d", len(msgs))
 	}
+	for _, m := range msgs {
+		if m.ParentToolUseID != nil || m.ParentAgentID != nil {
+			t.Errorf("parent ids should be nil without agent_metadata, got %v / %v",
+				m.ParentToolUseID, m.ParentAgentID)
+		}
+	}
+}
+
+// TestGetSubagentMessagesFromStore_ParentIDsRecoveredFromAgentMetadata verifies
+// that toolUseId / parentAgentId on the agent_metadata entry (the store's copy
+// of the .meta.json sidecar) are stamped on every message; when the metadata
+// was rewritten (e.g. on resume) the last entry wins.
+func TestGetSubagentMessagesFromStore_ParentIDsRecoveredFromAgentMetadata(t *testing.T) {
+	store := NewInMemorySessionStore()
+	ctx := context.Background()
+	sessionID := generateUUID()
+	projectKey := ProjectKeyForDirectory("")
+	subKey := SessionKey{ProjectKey: projectKey, SessionID: sessionID, Subpath: "subagents/agent-x"}
+
+	userUUID := generateUUID()
+	assistantUUID := generateUUID()
+	entries := []SessionStoreEntry{
+		{"type": "agent_metadata", "agentType": "gp", "toolUseId": "toolu_old"},
+		{
+			"type":      "user",
+			"uuid":      userUUID,
+			"sessionId": sessionID,
+			"message":   map[string]interface{}{"role": "user", "content": "hi"},
+		},
+		{
+			"type":       "assistant",
+			"uuid":       assistantUUID,
+			"parentUuid": userUUID,
+			"sessionId":  sessionID,
+			"message":    map[string]interface{}{"role": "assistant", "content": "hello"},
+		},
+		{"type": "agent_metadata", "agentType": "gp", "toolUseId": "toolu_new", "parentAgentId": "a-parent"},
+	}
+	if err := store.Append(ctx, subKey, entries); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	msgs, err := GetSubagentMessagesFromStore(ctx, &GetSubagentMessagesFromStoreOptions{
+		Store:     store,
+		SessionID: sessionID,
+		AgentID:   "x",
+	})
+	if err != nil {
+		t.Fatalf("GetSubagentMessagesFromStore: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].UUID != userUUID || msgs[1].UUID != assistantUUID {
+		t.Errorf("unexpected message order: %v, %v", msgs[0].UUID, msgs[1].UUID)
+	}
+	for _, m := range msgs {
+		if m.ParentToolUseID == nil || *m.ParentToolUseID != "toolu_new" {
+			t.Errorf("ParentToolUseID: got %v, want toolu_new", m.ParentToolUseID)
+		}
+		if m.ParentAgentID == nil || *m.ParentAgentID != "a-parent" {
+			t.Errorf("ParentAgentID: got %v, want a-parent", m.ParentAgentID)
+		}
+	}
+}
+
+// TestGetSubagentMessagesFromStore_ParentIDsIgnoreNonStringMetadata verifies
+// that non-string toolUseId / parentAgentId values degrade to nil.
+func TestGetSubagentMessagesFromStore_ParentIDsIgnoreNonStringMetadata(t *testing.T) {
+	store := NewInMemorySessionStore()
+	ctx := context.Background()
+	sessionID := generateUUID()
+	projectKey := ProjectKeyForDirectory("")
+	subKey := SessionKey{ProjectKey: projectKey, SessionID: sessionID, Subpath: "subagents/agent-x"}
+
+	entries := []SessionStoreEntry{
+		{"type": "agent_metadata", "toolUseId": 7, "parentAgentId": nil},
+		{
+			"type":      "user",
+			"uuid":      generateUUID(),
+			"sessionId": sessionID,
+			"message":   map[string]interface{}{"role": "user", "content": "hi"},
+		},
+	}
+	if err := store.Append(ctx, subKey, entries); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	msgs, err := GetSubagentMessagesFromStore(ctx, &GetSubagentMessagesFromStoreOptions{
+		Store:     store,
+		SessionID: sessionID,
+		AgentID:   "x",
+	})
+	if err != nil {
+		t.Fatalf("GetSubagentMessagesFromStore: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if msgs[0].ParentToolUseID != nil || msgs[0].ParentAgentID != nil {
+		t.Errorf("parent ids should be nil, got %v / %v", msgs[0].ParentToolUseID, msgs[0].ParentAgentID)
+	}
+}
+
+// TestGetSessionMessagesFromStore_ParentIDsAreNone verifies that top-level
+// GetSessionMessagesFromStore never sets parent ids.
+func TestGetSessionMessagesFromStore_ParentIDsAreNone(t *testing.T) {
+	store := NewInMemorySessionStore()
+	sessionID := generateUUID()
+	populateStoreSession(t, store, sessionID)
+
+	msgs, err := GetSessionMessagesFromStore(context.Background(), &GetSessionMessagesFromStoreOptions{
+		Store:     store,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("GetSessionMessagesFromStore: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	for _, m := range msgs {
+		if m.ParentToolUseID != nil || m.ParentAgentID != nil {
+			t.Errorf("parent ids should be nil for top-level messages, got %v / %v",
+				m.ParentToolUseID, m.ParentAgentID)
+		}
+	}
 }

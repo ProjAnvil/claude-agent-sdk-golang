@@ -1,5 +1,7 @@
 package claude
 
+import "fmt"
+
 // ClaudeAgentOptions configures SDK behavior.
 type ClaudeAgentOptions struct {
 	// Tools specifies the base set of tools available.
@@ -110,6 +112,47 @@ type ClaudeAgentOptions struct {
 	// IncludeHookEvents when true, the CLI emits hook events (PreToolUse, PostToolUse,
 	// Stop, etc.) as HookEventMessage objects in the message stream.
 	IncludeHookEvents bool
+	// ResumeSessionAt, when resuming, only loads the conversation up to and
+	// including the message with this UUID. Use with Resume (and usually
+	// ForkSession) to branch from an earlier point in the conversation.
+	//
+	// Accepts any transcript-entry UUID — typically an AssistantMessage UUID
+	// observed live, or a SessionMessage UUID from GetSessionMessages. See
+	// ResumeDropsTurn for guidance on choosing the fork point.
+	ResumeSessionAt string
+	// ResumeDropsTurn, with ResumeSessionAt, is the UUID of the user prompt
+	// whose turn this truncating resume intends to discard.
+	//
+	// When set, the CLI validates at load time that every transcript entry
+	// after the ResumeSessionAt point is attributable to that turn, and
+	// refuses the resume otherwise — e.g. when the discarded range contains a
+	// queued user message or task notification the session absorbed mid-turn
+	// that the caller had not yet observed. A refusal surfaces as an error
+	// returned from Query / ClaudeSDKClient (a ProcessError, or ResultError)
+	// whose message contains "Resume rejected by --resume-drops-turn:" — match
+	// on that text. Treat it as deterministic: clear the pending fork target
+	// and resume plainly rather than retrying the same request. Leave nil to
+	// keep the unvalidated truncation behavior.
+	//
+	// A non-nil pointer is always forwarded, even to an empty string, so the
+	// CLI rejects a malformed declaration instead of the SDK silently
+	// disarming the guard (mirrors the Python SDK's `is not None` forwarding).
+	//
+	// Rule of thumb: set ResumeSessionAt to the *last* transcript entry of the
+	// turn you are keeping (whatever its type), and ResumeDropsTurn to the
+	// prompt UUID of the turn immediately after it.
+	ResumeDropsTurn *string
+	// ForwardSubagentText forwards subagent text and thinking blocks as
+	// messages in the stream.
+	//
+	// By default only tool_use / tool_result blocks from subagents (spawned
+	// via the Agent tool) are emitted, as AssistantMessage / UserMessage
+	// objects whose ParentToolUseID is the spawning Agent tool_use id —
+	// enough for a progress heartbeat. When true, the subagent's text and
+	// thinking blocks are forwarded the same way, so consumers can render the
+	// full nested transcript. Matches the TypeScript SDK's
+	// forwardSubagentText.
+	ForwardSubagentText bool
 	// LoadTimeoutMs is the upper bound on SessionStore.Load / ListSubkeys calls
 	// during resume materialization, in milliseconds.
 	// A value of 0 means immediate timeout; use a large value to effectively
@@ -122,4 +165,32 @@ func DefaultOptions() *ClaudeAgentOptions {
 	return &ClaudeAgentOptions{
 		MaxBufferSize: 1024 * 1024, // 1MB default
 	}
+}
+
+// configureCanUseTool validates CanUseTool and routes permission prompts
+// over stdio.
+//
+// Shared by Query() and ClaudeSDKClient.Connect() so both entry points
+// enforce the same rules. Returns opts unchanged when no callback is set;
+// otherwise checks it is not combined with PermissionPromptToolName, emits
+// the shadowing advisory, and returns a copy with
+// PermissionPromptToolName="stdio" so the CLI sends permission requests over
+// the control protocol. Mirrors the Python SDK's _configure_can_use_tool.
+func configureCanUseTool(opts *ClaudeAgentOptions) (*ClaudeAgentOptions, error) {
+	if opts == nil || opts.CanUseTool == nil {
+		return opts, nil
+	}
+	// CanUseTool and PermissionPromptToolName are mutually exclusive.
+	if opts.PermissionPromptToolName != "" {
+		return nil, fmt.Errorf(
+			"can_use_tool callback cannot be used with permission_prompt_tool_name. " +
+				"Please use one or the other.")
+	}
+	// Advisory: warn if other options shadow the callback.
+	warnIfCanUseToolShadowed(opts)
+	// Automatically set permission_prompt_tool_name to "stdio" for the
+	// control protocol.
+	configured := *opts
+	configured.PermissionPromptToolName = "stdio"
+	return &configured, nil
 }

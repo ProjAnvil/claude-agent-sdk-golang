@@ -374,11 +374,11 @@ func rejectWindowsBatchCLIForGOOS(cliPath, goos string) error {
 //
 // With batch-script spawning refused (rejectWindowsBatchCLI), these
 // characters are harmless: os/exec quotes correctly for native executables.
-// They are rejected anyway so that Resume / SessionID values, which
-// applications commonly take from external input, stay inert even if a
-// cmd.exe hop is ever reintroduced between the SDK and the CLI. No format is
-// imposed beyond this (resume values may be arbitrary session titles, not
-// only UUIDs), and POSIX behavior is unchanged.
+// They are rejected anyway so that Resume / SessionID / ResumeSessionAt /
+// ResumeDropsTurn values, which applications commonly take from external
+// input, stay inert even if a cmd.exe hop is ever reintroduced between the
+// SDK and the CLI. No format is imposed beyond this (resume values may be
+// arbitrary session titles, not only UUIDs), and POSIX behavior is unchanged.
 func rejectWindowsCmdMetacharacters(optionName, value string) error {
 	return rejectWindowsCmdMetacharactersForGOOS(optionName, value, runtime.GOOS)
 }
@@ -536,6 +536,16 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 	}
 	if err := rejectWindowsCmdMetacharactersForGOOS("session_id", t.options.SessionID, goos); err != nil {
 		return err
+	}
+	if t.options.ResumeSessionAt != "" {
+		if err := rejectWindowsCmdMetacharactersForGOOS("resume_session_at", t.options.ResumeSessionAt, goos); err != nil {
+			return err
+		}
+	}
+	if t.options.ResumeDropsTurn != nil {
+		if err := rejectWindowsCmdMetacharactersForGOOS("resume_drops_turn", *t.options.ResumeDropsTurn, goos); err != nil {
+			return err
+		}
 	}
 	if err := validateSkillsOptions(t.options.Skills); err != nil {
 		return err
@@ -780,6 +790,19 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 
 	if t.options.ForkSession {
 		args = append(args, "--fork-session")
+	}
+
+	// Equals form so the value can never be parsed as a separate flag, even
+	// if the CLI's declaration of these options ever changes.
+	if t.options.ResumeSessionAt != "" {
+		args = append(args, "--resume-session-at="+t.options.ResumeSessionAt)
+	}
+
+	// Non-nil, not non-empty: an empty string is forwarded so the CLI rejects
+	// it as a malformed declaration instead of the SDK silently disarming the
+	// guard the caller believes is armed.
+	if t.options.ResumeDropsTurn != nil {
+		args = append(args, "--resume-drops-turn="+*t.options.ResumeDropsTurn)
 	}
 
 	// Agents

@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -13,11 +14,12 @@ import (
 
 // mockTransport is a simple mock for testing Query.
 type mockTransport struct {
-	messages chan map[string]interface{}
-	errors   chan error
-	written  []string
-	ready    bool
-	mu       sync.Mutex
+	messages  chan map[string]interface{}
+	errors    chan error
+	written   []string
+	ready     bool
+	mu        sync.Mutex
+	closeOnce sync.Once
 }
 
 func newMockTransport() *mockTransport {
@@ -55,12 +57,16 @@ func (m *mockTransport) EndInput() error {
 	return nil
 }
 
+// Close shuts the mock down. Idempotent, like the real transports: Query.Close
+// may be called more than once (closing again is a no-op).
 func (m *mockTransport) Close() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ready = false
-	close(m.messages)
-	close(m.errors)
+	m.closeOnce.Do(func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.ready = false
+		close(m.messages)
+		close(m.errors)
+	})
 	return nil
 }
 
@@ -592,10 +598,12 @@ func TestHandleMCPMessage(t *testing.T) {
 	query := NewQuery(QueryConfig{
 		Transport:       mockTrans,
 		IsStreamingMode: true,
-		SdkMCPServers: map[string]*MCPServer{
+		SdkMCPServers: testSDKServers(map[string]*MCPServer{
 			"test_server": server,
-		},
+		}),
 	})
+
+	initializeMCPServer(t, query, "test_server")
 
 	// Test tools/list
 	request := map[string]interface{}{
@@ -2058,5 +2066,341 @@ func TestSessionStateChangedDoesNotResetErrorResultText(t *testing.T) {
 	}
 	if !strings.Contains(errs[0].Error(), "Claude Code returned an error result") {
 		t.Errorf("Expected error replacement after session_state_changed: %v", errs[0])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for typed ResultError after error result (Python SDK #1205) and
+// pending-control-request error surfacing (Python SDK #1198)
+// ---------------------------------------------------------------------------
+
+// TestProcessErrorAfterErrorResultRaisesTypedResultError verifies that the
+// replacement error is a typed *ResultError carrying the result payload and
+// exit code, with the original ProcessError chained as cause — mirroring the
+// Python test of the same scenario (#1205).
+func TestProcessErrorAfterErrorResultRaisesTypedResultError(t *testing.T) {
+	tr := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       tr,
+		IsStreamingMode: false,
+	})
+	q.Start()
+
+	resultMsg := map[string]interface{}{
+		"type":      "result",
+		"subtype":   "error_max_turns",
+		"is_error":  true,
+		"num_turns": float64(60),
+		"errors":    []interface{}{"Reached maximum number of turns (60)"},
+	}
+	tr.messages <- resultMsg
+	close(tr.messages)
+	tr.errors <- &transport.ProcessError{Message: "Command failed with exit code 1", ExitCode: 1}
+	close(tr.errors)
+
+	for range q.RawMessages() {
+	}
+	errs := collectErrors(q.Errors(), 200*time.Millisecond)
+	if len(errs) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errs))
+	}
+
+	re, ok := errs[0].(*ResultError)
+	if !ok {
+		t.Fatalf("Expected *ResultError, got %T: %v", errs[0], errs[0])
+	}
+	if re.ExitCode != 1 {
+		t.Errorf("Expected ExitCode=1, got %d", re.ExitCode)
+	}
+	if !strings.Contains(re.Error(), "Claude Code returned an error result: Reached maximum number of turns (60)") {
+		t.Errorf("Expected actionable error text, got: %v", re)
+	}
+	if re.Data["subtype"] != "error_max_turns" {
+		t.Errorf("Expected payload subtype error_max_turns, got %v", re.Data["subtype"])
+	}
+	// The original ProcessError rides along as the cause.
+	var pe *transport.ProcessError
+	if !errors.As(re, &pe) {
+		t.Errorf("Expected cause chain to contain *transport.ProcessError: %v", re.Cause)
+	} else if !strings.Contains(pe.Error(), "Command failed") {
+		t.Errorf("Expected cause to be the exit error, got: %v", pe)
+	}
+}
+
+// TestNonProcessErrorTypeIsPreserved verifies that transport failures other
+// than ProcessError keep their type when forwarded to the error channel —
+// mirroring the Python test_non_process_error_type_is_preserved.
+func TestNonProcessErrorTypeIsPreserved(t *testing.T) {
+	tr := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       tr,
+		IsStreamingMode: false,
+	})
+	q.Start()
+
+	close(tr.messages)
+	tr.errors <- &transport.CLIConnectionError{Message: "lost the CLI"}
+	close(tr.errors)
+
+	for range q.RawMessages() {
+	}
+	errs := collectErrors(q.Errors(), 200*time.Millisecond)
+	if len(errs) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errs))
+	}
+	var connErr *transport.CLIConnectionError
+	if !errors.As(errs[0], &connErr) {
+		t.Fatalf("Expected *transport.CLIConnectionError, got %T: %v", errs[0], errs[0])
+	}
+	if !strings.Contains(errs[0].Error(), "lost the CLI") {
+		t.Errorf("Expected original message preserved, got: %v", errs[0])
+	}
+}
+
+// TestPendingInitializeGetsResultErrorText verifies that an error result
+// emitted during CLI startup (e.g. a refused resume), followed by exit 1
+// before the initialize response arrives, fails the in-flight initialize
+// with the actionable result error — not the bare exit code or a timeout.
+// Mirrors the Python test_pending_initialize_gets_result_error_text (#1198).
+func TestPendingInitializeGetsResultErrorText(t *testing.T) {
+	tr := newMockTransport()
+	q := NewQuery(QueryConfig{
+		Transport:       tr,
+		IsStreamingMode: true,
+	})
+	q.Start()
+
+	// Start initialize; wait until its control request has been written so
+	// the pending response entry is registered before the CLI fails.
+	initDone := make(chan error, 1)
+	go func() {
+		_, err := q.Initialize(context.Background())
+		initDone <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(tr.getWritten()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("initialize control request was never written")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	tr.messages <- map[string]interface{}{
+		"type":      "result",
+		"subtype":   "error_during_execution",
+		"is_error":  true,
+		"num_turns": float64(0),
+		"errors":    []interface{}{"Resume rejected by --resume-drops-turn: nope"},
+	}
+	close(tr.messages)
+	tr.errors <- &transport.ProcessError{Message: "Command failed with exit code 1", ExitCode: 1}
+	close(tr.errors)
+
+	select {
+	case err := <-initDone:
+		if err == nil {
+			t.Fatal("Expected initialize to fail, got nil error")
+		}
+		if !strings.Contains(err.Error(),
+			"Claude Code returned an error result: Resume rejected by --resume-drops-turn: nope") {
+			t.Errorf("Expected result error text, got: %v", err)
+		}
+		var re *ResultError
+		if !errors.As(err, &re) {
+			t.Fatalf("Expected *ResultError, got %T: %v", err, err)
+		}
+		if re.ExitCode != 1 {
+			t.Errorf("Expected ExitCode=1, got %d", re.ExitCode)
+		}
+		if re.Data["subtype"] != "error_during_execution" {
+			t.Errorf("Expected payload subtype error_during_execution, got %v", re.Data["subtype"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Initialize did not fail fast; pending control request was not signaled")
+	}
+}
+
+// TestErrorResultText unit-tests the errorResultText fallback chain,
+// mirroring the Python #1205 cases: prefer errors[], then result text (an
+// API failure arrives as subtype "success"), then a non-success subtype,
+// then the HTTP status.
+func TestErrorResultText(t *testing.T) {
+	tests := []struct {
+		name    string
+		message map[string]interface{}
+		want    string
+	}{
+		{
+			name: "errors joined",
+			message: map[string]interface{}{
+				"subtype": "error_during_execution",
+				"errors":  []interface{}{"Error one", "Error two"},
+			},
+			want: "Error one; Error two",
+		},
+		{
+			name: "bare string errors",
+			message: map[string]interface{}{
+				"subtype": "error_during_execution",
+				"errors":  "boom",
+			},
+			want: "boom",
+		},
+		{
+			name: "blank errors fall back to subtype",
+			message: map[string]interface{}{
+				"subtype": "error_during_execution",
+				"errors":  []interface{}{" "},
+			},
+			want: "error_during_execution",
+		},
+		{
+			name: "malformed errors fall back to subtype",
+			message: map[string]interface{}{
+				"subtype": "error_during_execution",
+				"errors":  float64(42),
+			},
+			want: "error_during_execution",
+		},
+		{
+			name: "api failure uses result text not success subtype",
+			message: map[string]interface{}{
+				"subtype": "success",
+				"errors":  []interface{}{},
+				"result":  "API Error: Stream idle timeout - no chunks received",
+			},
+			want: "API Error: Stream idle timeout - no chunks received",
+		},
+		{
+			name: "http status when neither errors nor result carry text",
+			message: map[string]interface{}{
+				"subtype":          "success",
+				"errors":           []interface{}{},
+				"result":           "",
+				"api_error_status": float64(529),
+			},
+			want: "API error (HTTP 529)",
+		},
+		{
+			name: "http status as int",
+			message: map[string]interface{}{
+				"subtype":          "success",
+				"api_error_status": 500,
+			},
+			want: "API error (HTTP 500)",
+		},
+		{
+			name:    "unknown error as last resort",
+			message: map[string]interface{}{"subtype": "success"},
+			want:    "unknown error",
+		},
+		{
+			name:    "missing subtype is unknown error",
+			message: map[string]interface{}{},
+			want:    "unknown error",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := errorResultText(tt.message); got != tt.want {
+				t.Errorf("errorResultText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeResultErrors mirrors the Python normalization cases: a bare
+// string is wrapped and blank or non-string entries are dropped.
+func TestNormalizeResultErrors(t *testing.T) {
+	if got := normalizeResultErrors("boom"); len(got) != 1 || got[0] != "boom" {
+		t.Errorf("bare string: got %v", got)
+	}
+	if got := normalizeResultErrors([]interface{}{" ", "x ", float64(3)}); len(got) != 1 || got[0] != "x" {
+		t.Errorf("blank/non-string entries: got %v", got)
+	}
+	if got := normalizeResultErrors([]string{"a", " ", "b"}); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("[]string input: got %v", got)
+	}
+	if got := normalizeResultErrors(float64(42)); len(got) != 0 {
+		t.Errorf("non-list: got %v", got)
+	}
+	if got := normalizeResultErrors(nil); len(got) != 0 {
+		t.Errorf("nil: got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for forwardSubagentText initialize capability (Python SDK #1206)
+// ---------------------------------------------------------------------------
+
+// initializeRequest runs the initialize handshake against a mock transport
+// and returns the inner initialize request map.
+func initializeRequest(t *testing.T, cfg QueryConfig) map[string]interface{} {
+	t.Helper()
+	mockTrans := newMockTransport()
+	cfg.Transport = mockTrans
+	cfg.IsStreamingMode = true
+
+	query := NewQuery(cfg)
+	query.Start()
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		written := mockTrans.getWritten()
+		if len(written) > 0 {
+			var req map[string]interface{}
+			json.Unmarshal([]byte(written[0]), &req)
+			if reqID, ok := req["request_id"].(string); ok {
+				mockTrans.messages <- map[string]interface{}{
+					"type": "control_response",
+					"response": map[string]interface{}{
+						"subtype":    "success",
+						"request_id": reqID,
+						"response":   map[string]interface{}{"status": "initialized"},
+					},
+				}
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	if _, err := query.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+
+	written := mockTrans.getWritten()
+	if len(written) == 0 {
+		t.Fatal("Expected a written message")
+	}
+	var req map[string]interface{}
+	if err := json.Unmarshal([]byte(written[0]), &req); err != nil {
+		t.Fatalf("Failed to parse written message: %v", err)
+	}
+	inner, ok := req["request"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected request wrapper, got: %v", req)
+	}
+	return inner
+}
+
+// TestQueryInitializeSendsForwardSubagentText mirrors the Python
+// test_initialize_sends_forward_subagent_text_when_enabled.
+func TestQueryInitializeSendsForwardSubagentText(t *testing.T) {
+	inner := initializeRequest(t, QueryConfig{ForwardSubagentText: true})
+	if val, ok := inner["forwardSubagentText"]; !ok || val != true {
+		t.Errorf("Expected forwardSubagentText=true in initialize request, got %v (ok=%v)", val, ok)
+	}
+}
+
+// TestQueryInitializeOmitsForwardSubagentTextByDefault mirrors the Python
+// test_initialize_omits_forward_subagent_text_by_default.
+func TestQueryInitializeOmitsForwardSubagentTextByDefault(t *testing.T) {
+	for _, cfg := range []QueryConfig{{}, {ForwardSubagentText: false}} {
+		inner := initializeRequest(t, cfg)
+		if _, ok := inner["forwardSubagentText"]; ok {
+			t.Errorf("Expected forwardSubagentText to be absent in initialize request, but it was present")
+		}
 	}
 }

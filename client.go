@@ -8,6 +8,7 @@ import (
 
 	"github.com/ProjAnvil/claude-agent-sdk-golang/internal"
 	"github.com/ProjAnvil/claude-agent-sdk-golang/internal/transport"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // ClaudeSDKClient provides bidirectional communication with Claude Code.
@@ -49,10 +50,6 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 		return nil
 	}
 
-	// Advisory: warn if other permission options shadow a configured
-	// can_use_tool callback (Python SDK #1081).
-	warnIfCanUseToolShadowed(c.options)
-
 	// Fail fast on invalid session_store option combinations before spawn.
 	if err := validateSessionStoreOptions(c.options); err != nil {
 		return err
@@ -71,6 +68,16 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 			c.options = applyMaterializedOptions(c.options, m)
 		}
 	}
+
+	// Validate and configure permission settings: checks CanUseTool is not
+	// combined with PermissionPromptToolName, emits the shadowing advisory,
+	// and routes permission prompts over the control protocol (mirrors the
+	// Python SDK's _configure_can_use_tool).
+	configuredOpts, err := configureCanUseTool(c.options)
+	if err != nil {
+		return err
+	}
+	c.options = configuredOpts
 
 	// Build a mirror batcher when a SessionStore is wired so that
 	// transcript_mirror frames from the subprocess are forwarded to the store.
@@ -180,13 +187,13 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 	}
 
 	// Convert SDK MCP servers
-	var sdkServers map[string]*internal.MCPServer
+	var sdkServers map[string]*mcp.Server
 	if c.options.MCPServers != nil {
-		sdkServers = make(map[string]*internal.MCPServer)
+		sdkServers = make(map[string]*mcp.Server)
 		for name, config := range c.options.MCPServers {
 			if sdkConfig, ok := config.(*MCPSdkServerConfig); ok {
-				if server, ok := sdkConfig.Instance.(*internal.MCPServer); ok {
-					sdkServers[name] = server
+				if sdkConfig.Instance != nil {
+					sdkServers[name] = sdkConfig.Instance
 				}
 			}
 		}
@@ -232,12 +239,13 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 
 	// Create query handler
 	queryConfig := internal.QueryConfig{
-		Transport:       t,
-		IsStreamingMode: true,
-		CanUseTool:      canUseTool,
-		Hooks:           internalHooks,
-		SdkMCPServers:   sdkServers,
-		Agents:          internalAgents,
+		Transport:           t,
+		IsStreamingMode:     true,
+		CanUseTool:          canUseTool,
+		Hooks:               internalHooks,
+		SdkMCPServers:       sdkServers,
+		Agents:              internalAgents,
+		ForwardSubagentText: c.options.ForwardSubagentText,
 	}
 	// Only set MirrorBatcher when non-nil to avoid a non-nil interface wrapping
 	// a nil pointer (Go interface nil semantics).

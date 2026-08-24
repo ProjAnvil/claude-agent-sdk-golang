@@ -28,9 +28,9 @@ func noopCanUseTool(toolName string, input map[string]interface{}, ctx ToolPermi
 
 func TestWholeToolAllowed(t *testing.T) {
 	tests := []struct {
-		entry   string
-		tool    string
-		ok      bool
+		entry string
+		tool  string
+		ok    bool
 	}{
 		{"Read", "Read", true},
 		{"Read()", "Read", true},
@@ -150,8 +150,8 @@ func TestWarnIfCanUseToolShadowed_BypassPermissions(t *testing.T) {
 func TestWarnIfCanUseToolShadowed_WholeToolEntry(t *testing.T) {
 	buf := captureSlog(t)
 	warnIfCanUseToolShadowed(&ClaudeAgentOptions{
-		CanUseTool:    noopCanUseTool,
-		AllowedTools:  []string{"Read", "Grep"},
+		CanUseTool:   noopCanUseTool,
+		AllowedTools: []string{"Read", "Grep"},
 	})
 	out := buf.String()
 	if !strings.Contains(out, "Read, Grep") {
@@ -189,9 +189,9 @@ func TestWarnIfCanUseToolShadowed_SkillsListDoesNotInject(t *testing.T) {
 func TestWarnIfCanUseToolShadowed_DoesNotMutateOptions(t *testing.T) {
 	captureSlog(t) // swallow the advisory
 	opts := &ClaudeAgentOptions{
-		CanUseTool:    noopCanUseTool,
-		Skills:        "all",
-		AllowedTools:  []string{"Read"},
+		CanUseTool:   noopCanUseTool,
+		Skills:       "all",
+		AllowedTools: []string{"Read"},
 	}
 	before := len(opts.AllowedTools)
 	warnIfCanUseToolShadowed(opts)

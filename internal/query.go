@@ -11,7 +11,100 @@ import (
 	"time"
 
 	"github.com/ProjAnvil/claude-agent-sdk-golang/internal/transport"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// ResultError is the internal representation of a CLI error result that
+// terminated the run. It carries the result payload so the public package
+// can rebuild a claude.ResultError from it (the internal package cannot
+// import the public one). Cause holds the original transport.ProcessError,
+// mirroring Python's `pending_error.__cause__ = e`.
+type ResultError struct {
+	Message  string
+	Data     map[string]interface{}
+	ExitCode int
+	Cause    error
+}
+
+// Error formats like transport.ProcessError: the message with the exit code.
+// stderr is deliberately not carried over: the transport's value is a
+// generic placeholder, and the result text is the real cause.
+func (e *ResultError) Error() string {
+	msg := e.Message
+	if e.ExitCode != 0 {
+		msg = fmt.Sprintf("%s (exit code: %d)", msg, e.ExitCode)
+	}
+	return msg
+}
+
+// Unwrap returns the original transport error this one replaced.
+func (e *ResultError) Unwrap() error { return e.Cause }
+
+// normalizeResultErrors normalizes the "errors" field of a "result" frame to
+// clean strings.
+//
+// The CLI emits a list of strings; tolerate a bare string (older/buggy
+// emitters) and drop non-string or blank entries so the structured
+// ResultError fields and the exception text always agree. Mirrors
+// claude.normalizeResultErrors (duplicated here because the internal package
+// cannot import the public one).
+func normalizeResultErrors(raw interface{}) []string {
+	var items []interface{}
+	switch v := raw.(type) {
+	case string:
+		items = []interface{}{v}
+	case []interface{}:
+		items = v
+	case []string:
+		items = make([]interface{}, len(v))
+		for i, s := range v {
+			items[i] = s
+		}
+	default:
+		return []string{}
+	}
+	errs := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				errs = append(errs, trimmed)
+			}
+		}
+	}
+	return errs
+}
+
+// errorResultText picks the most informative text from a "result" frame with
+// is_error.
+//
+// Terminal errors the CLI raises itself (error_max_turns,
+// error_during_execution, ...) carry their prose in errors[]. A run that
+// ends on an API failure instead arrives as subtype "success" with
+// is_error=true, an empty errors[] and the "API Error: ..." prose in
+// result — falling back to the subtype there produced the self-contradictory
+// "Claude Code returned an error result: success". Prefer errors[], then
+// result, then a non-success subtype, then the HTTP status, mirroring the
+// TypeScript SDK's choice of result for the success subtype.
+func errorResultText(message map[string]interface{}) string {
+	if errs := normalizeResultErrors(message["errors"]); len(errs) > 0 {
+		return strings.Join(errs, "; ")
+	}
+	if result, ok := message["result"].(string); ok {
+		if trimmed := strings.TrimSpace(result); trimmed != "" {
+			return trimmed
+		}
+	}
+	if subtype, ok := message["subtype"].(string); ok && subtype != "" && subtype != "success" {
+		return subtype
+	}
+	switch status := message["api_error_status"].(type) {
+	case float64:
+		return fmt.Sprintf("API error (HTTP %v)", status)
+	case int:
+		return fmt.Sprintf("API error (HTTP %d)", status)
+	}
+	return "unknown error"
+}
 
 // Query handles bidirectional control protocol on top of Transport.
 type Query struct {
@@ -19,15 +112,24 @@ type Query struct {
 	isStreamingMode        bool
 	canUseTool             CanUseToolFunc
 	hooks                  map[string][]HookMatcherInternal
-	sdkMCPServers          map[string]*MCPServer
+	sdkMCPServers          map[string]*mcp.Server
 	agents                 map[string]interface{}
 	excludeDynamicSections *bool
 	initializeTimeout      time.Duration
 	// skills is the skills allowlist (nil, "all", or []string).
 	// When it is a []string, the names are sent in the initialize request.
 	skills interface{}
+	// forwardSubagentText asks the CLI (via initialize) to forward subagent
+	// text/thinking blocks, not just tool_use/tool_result.
+	forwardSubagentText bool
 	// mirrorBatcher handles transcript_mirror frames from the CLI.
 	mirrorBatcher TranscriptMirrorBatcher
+
+	// SDK MCP bridges, one per server name, created lazily by
+	// handleMCPMessage and closed with the Query (bridge sessions own
+	// goroutines).
+	bridgeMu   sync.Mutex
+	mcpBridges map[string]*SDKMCPBridge
 
 	// Control protocol state
 	pendingResponses map[string]chan controlResult
@@ -47,11 +149,12 @@ type Query struct {
 	initializationResult map[string]interface{}
 	firstResultReceived  bool
 	firstResultCh        chan struct{}
-	// lastErrorResultText is set when the most recent message is a result
-	// with is_error=true. Used to replace the generic "exit code 1"
-	// ProcessError with the structured error the CLI already reported.
-	// Mirrors the TypeScript SDK's lastErrorResultText (Query.ts).
-	lastErrorResultText string
+	// lastErrorResult is set to the result payload when the most recent
+	// message is a result with is_error=true. Used to replace the generic
+	// "exit code 1" ProcessError with a ResultError carrying what the CLI
+	// already reported. Mirrors the TypeScript SDK's lastErrorResultText
+	// (Query.ts), but keeps the whole payload rather than just the text.
+	lastErrorResult map[string]interface{}
 }
 
 // CanUseToolFunc is the callback type for tool permission requests.
@@ -183,13 +286,16 @@ type QueryConfig struct {
 	IsStreamingMode        bool
 	CanUseTool             CanUseToolFunc
 	Hooks                  map[string][]HookMatcherInternal
-	SdkMCPServers          map[string]*MCPServer
+	SdkMCPServers          map[string]*mcp.Server
 	Agents                 map[string]interface{}
 	ExcludeDynamicSections *bool
 	InitializeTimeout      time.Duration
 	// Skills is the skills allowlist passed to the initialize request.
 	// Accepted: nil, "all", or []string{names...}.
 	Skills interface{}
+	// ForwardSubagentText asks the CLI (via initialize) to forward subagent
+	// text/thinking blocks, not just tool_use/tool_result.
+	ForwardSubagentText bool
 	// MirrorBatcher handles transcript_mirror frames from the CLI.
 	// When non-nil, transcript_mirror messages are peeled off the stream and
 	// forwarded to the batcher rather than being yielded to callers.
@@ -212,6 +318,7 @@ func NewQuery(cfg QueryConfig) *Query {
 		excludeDynamicSections: cfg.ExcludeDynamicSections,
 		initializeTimeout:      cfg.InitializeTimeout,
 		skills:                 cfg.Skills,
+		forwardSubagentText:    cfg.ForwardSubagentText,
 		mirrorBatcher:          cfg.MirrorBatcher,
 		pendingResponses:       make(map[string]chan controlResult),
 		hookCallbacks:          make(map[string]HookCallback),
@@ -276,6 +383,9 @@ func (q *Query) Initialize(ctx context.Context) (map[string]interface{}, error) 
 	// Skills list is sent only when it's a concrete []string (not nil or "all").
 	if skillsList, ok := q.skills.([]string); ok && skillsList != nil {
 		request["skills"] = skillsList
+	}
+	if q.forwardSubagentText {
+		request["forwardSubagentText"] = true
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, q.initializeTimeout)
@@ -409,7 +519,39 @@ func (q *Query) Close() error {
 		_ = q.mirrorBatcher.Close(context.Background())
 	}
 
+	// Stop the SDK MCP bridge sessions: they own goroutines that must end
+	// with the Query.
+	q.closeMCPBridges()
+
 	return q.transport.Close()
+}
+
+// bridgeForServer returns the bridge for a configured SDK MCP server,
+// creating it on first use. Bridges live in the Query's registry so Close
+// can stop their sessions.
+func (q *Query) bridgeForServer(name string, server *mcp.Server) *SDKMCPBridge {
+	q.bridgeMu.Lock()
+	defer q.bridgeMu.Unlock()
+	if q.mcpBridges == nil {
+		q.mcpBridges = make(map[string]*SDKMCPBridge)
+	}
+	if bridge, ok := q.mcpBridges[name]; ok {
+		return bridge
+	}
+	bridge := NewSDKMCPBridge(name, server)
+	q.mcpBridges[name] = bridge
+	return bridge
+}
+
+// closeMCPBridges stops every bridge the Query created.
+func (q *Query) closeMCPBridges() {
+	q.bridgeMu.Lock()
+	bridges := q.mcpBridges
+	q.mcpBridges = nil
+	q.bridgeMu.Unlock()
+	for _, bridge := range bridges {
+		bridge.Close()
+	}
 }
 
 // readMessages reads from transport and routes messages.
@@ -480,33 +622,19 @@ func (q *Query) readMessages() {
 			if q.mirrorBatcher != nil {
 				_ = q.mirrorBatcher.Flush(context.Background())
 			}
-			// Track error result text for actionable ProcessError replacement.
+			// Track error result payloads for actionable ProcessError
+			// replacement.
 			if isError, _ := data["is_error"].(bool); isError {
-				errorsRaw, _ := data["errors"].([]interface{})
-				var errorStrs []string
-				for _, e := range errorsRaw {
-					if s, ok := e.(string); ok {
-						errorStrs = append(errorStrs, s)
-					}
-				}
-				if len(errorStrs) > 0 {
-					q.lastErrorResultText = strings.Join(errorStrs, "; ")
-				} else {
-					subtype, _ := data["subtype"].(string)
-					if subtype == "" {
-						subtype = "unknown error"
-					}
-					q.lastErrorResultText = subtype
-				}
+				q.lastErrorResult = data
 			} else {
-				q.lastErrorResultText = ""
+				q.lastErrorResult = nil
 			}
 		} else if !(msgType == "system" && data["subtype"] == "session_state_changed") {
 			// Anything other than the post-turn session_state_changed
 			// marker means the conversation moved on; a ProcessError
 			// now is a fresh crash, not the expected exit from a prior
 			// error result. Mirrors the TypeScript SDK's reset logic.
-			q.lastErrorResultText = ""
+			q.lastErrorResult = nil
 		}
 
 		// Send raw data to be parsed by caller
@@ -522,19 +650,39 @@ func (q *Query) readMessages() {
 	// when the consumer goroutine has stopped reading).
 	for err := range q.transport.Errors() {
 		// When the CLI emits a result with is_error=true (e.g.
-		// error_max_turns, error_during_execution) it then exits non-zero
-		// on purpose. The trailing ProcessError carries no information
-		// beyond "exit code 1" -- replace it with the structured error
-		// the CLI already reported so the exception is actionable.
-		// Mirrors the TypeScript SDK (Query.ts readMessages).
-		if lastText := q.lastErrorResultText; lastText != "" {
+		// error_max_turns, error_during_execution, or an API failure) it
+		// then exits non-zero on purpose, for shell-script consumers. The
+		// trailing ProcessError carries no information beyond "exit code
+		// 1" — replace it with a ResultError carrying what the CLI already
+		// reported so the exception is actionable and typed. Mirrors the
+		// TypeScript SDK (Query.ts readMessages).
+		pendingErr := err
+		if q.lastErrorResult != nil {
 			if pe, ok := err.(*transport.ProcessError); ok {
-				err = fmt.Errorf("Claude Code returned an error result: %s", lastText)
-				_ = pe // suppress unused warning
+				pendingErr = &ResultError{
+					Message: fmt.Sprintf("Claude Code returned an error result: %s",
+						errorResultText(q.lastErrorResult)),
+					Data:     q.lastErrorResult,
+					ExitCode: pe.ExitCode,
+					Cause:    err,
+				}
 			}
 		}
+		// Signal all pending control requests so they fail fast instead of
+		// timing out. This includes an initialize still in flight when the
+		// CLI reports an error result during startup (e.g. a refused
+		// resume), so that path sees the same actionable error.
+		q.mu.Lock()
+		for requestID, ch := range q.pendingResponses {
+			select {
+			case ch <- controlResult{err: pendingErr}:
+			default:
+			}
+			delete(q.pendingResponses, requestID)
+		}
+		q.mu.Unlock()
 		select {
-		case q.errors <- err:
+		case q.errors <- pendingErr:
 		default:
 		}
 	}
@@ -886,105 +1034,16 @@ func (q *Query) handleMCPMessage(request map[string]interface{}) (map[string]int
 		}, nil
 	}
 
-	method, _ := message["method"].(string)
-	params, _ := message["params"].(map[string]interface{})
-
-	var mcpResponse map[string]interface{}
-
-	switch method {
-	case "initialize":
-		mcpResponse = map[string]interface{}{
-			"jsonrpc": "2.0",
-			"id":      message["id"],
-			"result": map[string]interface{}{
-				"protocolVersion": "2024-11-05",
-				"capabilities": map[string]interface{}{
-					"tools": map[string]interface{}{},
-				},
-				"serverInfo": map[string]interface{}{
-					"name":    server.Name,
-					"version": server.Version,
-				},
-			},
-		}
-	case "tools/list":
-		tools := make([]map[string]interface{}, len(server.Tools))
-		for i, tool := range server.Tools {
-			tools[i] = map[string]interface{}{
-				"name":        tool.Name,
-				"description": tool.Description,
-				"inputSchema": tool.InputSchema,
-			}
-			if tool.Annotations != nil {
-				tools[i]["annotations"] = tool.Annotations
-			}
-			// Forward maxResultSizeChars via _meta to bypass Zod annotation
-			// stripping in the CLI (#756). The CLI's toolResultStorage uses
-			// this to control large-result spill thresholds.
-			if ann, ok := tool.Annotations.(ToolAnnotations); ok && ann.MaxResultSizeChars != nil {
-				tools[i]["_meta"] = map[string]interface{}{
-					"anthropic/maxResultSizeChars": *ann.MaxResultSizeChars,
-				}
-			}
-		}
-		mcpResponse = map[string]interface{}{
-			"jsonrpc": "2.0",
-			"id":      message["id"],
-			"result": map[string]interface{}{
-				"tools": tools,
-			},
-		}
-	case "tools/call":
-		toolName, _ := params["name"].(string)
-		arguments, _ := params["arguments"].(map[string]interface{})
-
-		var found bool
-		for _, tool := range server.Tools {
-			if tool.Name == toolName {
-				found = true
-				result, err := tool.Handler(arguments)
-				if err != nil {
-					mcpResponse = map[string]interface{}{
-						"jsonrpc": "2.0",
-						"id":      message["id"],
-						"error": map[string]interface{}{
-							"code":    -32603,
-							"message": err.Error(),
-						},
-					}
-				} else {
-					mcpResponse = map[string]interface{}{
-						"jsonrpc": "2.0",
-						"id":      message["id"],
-						"result":  result,
-					}
-				}
-				break
-			}
-		}
-		if !found {
-			mcpResponse = map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      message["id"],
-				"error": map[string]interface{}{
-					"code":    -32601,
-					"message": fmt.Sprintf("Tool '%s' not found", toolName),
-				},
-			}
-		}
-	case "notifications/initialized":
+	// The JSON-RPC dispatch itself lives in sdk_mcp_bridge.go, which mirrors
+	// the wire semantics of Python's SdkMcpBridge (#1218); bridge sessions
+	// own goroutines and are closed with the Query.
+	mcpResponse := q.bridgeForServer(serverName, server).Handle(message)
+	if mcpResponse == nil {
+		// JSON-RPC notifications get no reply, but the control request that
+		// carried one still expects an ack.
 		mcpResponse = map[string]interface{}{
 			"jsonrpc": "2.0",
 			"result":  map[string]interface{}{},
-		}
-	default:
-		mcpResponse = map[string]interface{}{
-			"jsonrpc": "2.0",
-			"id":      message["id"],
-			"error": map[string]interface{}{
-				"code":    -32601,
-				"message": fmt.Sprintf("Method '%s' not found", method),
-			},
 		}
 	}
 
@@ -1070,29 +1129,4 @@ func (q *Query) sendControlError(requestID string, errMsg string) {
 
 	data, _ := json.Marshal(controlResponse)
 	q.transport.Write(string(data) + "\n")
-}
-
-// MCPServer represents an SDK MCP server.
-type MCPServer struct {
-	Name    string
-	Version string
-	Tools   []MCPTool
-}
-
-// MCPTool represents an MCP tool.
-type MCPTool struct {
-	Name        string
-	Description string
-	InputSchema interface{}
-	Annotations interface{}
-	Handler     func(args map[string]interface{}) (map[string]interface{}, error)
-}
-
-// ToolAnnotations represents hints for tool usage.
-type ToolAnnotations struct {
-	ReadOnlyHint       *bool `json:"readOnlyHint,omitempty"`
-	DestructiveHint    *bool `json:"destructiveHint,omitempty"`
-	IdempotentHint     *bool `json:"idempotentHint,omitempty"`
-	OpenWorldHint      *bool `json:"openWorldHint,omitempty"`
-	MaxResultSizeChars *int  `json:"maxResultSizeChars,omitempty"`
 }

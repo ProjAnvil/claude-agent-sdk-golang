@@ -9,6 +9,24 @@ import (
 
 // Uses mockTransport from query_test.go
 
+// initializeMCPServer performs the MCP handshake the go-sdk requires before
+// any other request on a server session.
+func initializeMCPServer(t *testing.T, q *Query, serverName string) {
+	t.Helper()
+	response, err := q.handleMCPMessage(map[string]interface{}{
+		"server_name": serverName,
+		"message": map[string]interface{}{
+			"jsonrpc": "2.0", "id": 0, "method": "initialize",
+		},
+	})
+	if err != nil {
+		t.Fatalf("initialize failed: %v", err)
+	}
+	if mcpResp := response["mcp_response"].(map[string]interface{}); mcpResp["error"] != nil {
+		t.Fatalf("initialize returned an error: %v", mcpResp["error"])
+	}
+}
+
 func TestSDKMCPServerHandlers(t *testing.T) {
 	// Track tool executions
 	var toolExecutions []map[string]interface{}
@@ -71,10 +89,12 @@ func TestSDKMCPServerHandlers(t *testing.T) {
 	q := NewQuery(QueryConfig{
 		Transport:       mt,
 		IsStreamingMode: true,
-		SdkMCPServers: map[string]*MCPServer{
+		SdkMCPServers: testSDKServers(map[string]*MCPServer{
 			"test-sdk-server": server,
-		},
+		}),
 	})
+
+	initializeMCPServer(t, q, "test-sdk-server")
 
 	// Test tools/list
 	request := map[string]interface{}{
@@ -231,10 +251,12 @@ func TestErrorHandling(t *testing.T) {
 	q := NewQuery(QueryConfig{
 		Transport:       mt,
 		IsStreamingMode: true,
-		SdkMCPServers: map[string]*MCPServer{
+		SdkMCPServers: testSDKServers(map[string]*MCPServer{
 			"error-test": server,
-		},
+		}),
 	})
+
+	initializeMCPServer(t, q, "error-test")
 
 	request := map[string]interface{}{
 		"server_name": "error-test",
@@ -254,14 +276,24 @@ func TestErrorHandling(t *testing.T) {
 		t.Fatalf("handleMCPMessage failed: %v", err)
 	}
 
+	// A handler error is an isError tool result the model can read, not a
+	// JSON-RPC protocol error (#1218 semantics).
 	mcpResp := response["mcp_response"].(map[string]interface{})
-	if mcpResp["error"] == nil {
-		t.Error("Expected error in response")
+	if mcpResp["error"] != nil {
+		t.Fatalf("Expected no protocol error, got %v", mcpResp["error"])
 	}
 
-	errObj := mcpResp["error"].(map[string]interface{})
-	if errObj["message"] != "Expected error" {
-		t.Errorf("Expected error message 'Expected error', got '%v'", errObj["message"])
+	result := mcpResp["result"].(map[string]interface{})
+	if result["isError"] != true {
+		t.Errorf("Expected isError=true, got %v", result["isError"])
+	}
+	if _, ok := result["is_error"]; ok {
+		t.Error("Expected snake_case is_error to be mapped away from the wire")
+	}
+
+	content := result["content"].([]map[string]interface{})
+	if len(content) != 1 || content[0]["text"] != "Expected error" {
+		t.Errorf("Expected error text 'Expected error', got %v", content)
 	}
 }
 
@@ -293,10 +325,12 @@ func TestImageContentSupport(t *testing.T) {
 	q := NewQuery(QueryConfig{
 		Transport:       mt,
 		IsStreamingMode: true,
-		SdkMCPServers: map[string]*MCPServer{
+		SdkMCPServers: testSDKServers(map[string]*MCPServer{
 			"image-test-server": server,
-		},
+		}),
 	})
+
+	initializeMCPServer(t, q, "image-test-server")
 
 	request := map[string]interface{}{
 		"server_name": "image-test-server",
@@ -390,10 +424,12 @@ func TestToolAnnotations(t *testing.T) {
 	q := NewQuery(QueryConfig{
 		Transport:       mt,
 		IsStreamingMode: true,
-		SdkMCPServers: map[string]*MCPServer{
+		SdkMCPServers: testSDKServers(map[string]*MCPServer{
 			"annotations-test": server,
-		},
+		}),
 	})
+
+	initializeMCPServer(t, q, "annotations-test")
 
 	request := map[string]interface{}{
 		"server_name": "annotations-test",
@@ -418,40 +454,41 @@ func TestToolAnnotations(t *testing.T) {
 		toolsByName[tool["name"].(string)] = tool
 	}
 
+	// Annotations go on the wire as camelCase maps (#1218 semantics).
 	// Verify read_data annotations
 	readDataTool := toolsByName["read_data"]
-	ann, ok := readDataTool["annotations"].(ToolAnnotations)
+	ann, ok := readDataTool["annotations"].(map[string]interface{})
 	if !ok {
-		t.Fatal("Expected ToolAnnotations struct")
+		t.Fatal("Expected annotations map on the wire")
 	}
-	if ann.ReadOnlyHint == nil || !*ann.ReadOnlyHint {
+	if ann["readOnlyHint"] != true {
 		t.Error("Expected readOnlyHint=true")
 	}
 
 	// Verify delete_item annotations
 	deleteItemTool := toolsByName["delete_item"]
-	ann = deleteItemTool["annotations"].(ToolAnnotations)
-	if ann.DestructiveHint == nil || !*ann.DestructiveHint {
+	ann = deleteItemTool["annotations"].(map[string]interface{})
+	if ann["destructiveHint"] != true {
 		t.Error("Expected destructiveHint=true")
 	}
-	if ann.IdempotentHint == nil || !*ann.IdempotentHint {
+	if ann["idempotentHint"] != true {
 		t.Error("Expected idempotentHint=true")
 	}
 
 	// Verify search annotations
 	searchTool := toolsByName["search"]
-	ann = searchTool["annotations"].(ToolAnnotations)
-	if ann.OpenWorldHint == nil || !*ann.OpenWorldHint {
+	ann = searchTool["annotations"].(map[string]interface{})
+	if ann["openWorldHint"] != true {
 		t.Error("Expected openWorldHint=true")
 	}
 
 	// Verify read_only_tool annotations
 	roTool := toolsByName["read_only_tool"]
-	ann = roTool["annotations"].(ToolAnnotations)
-	if ann.ReadOnlyHint == nil || !*ann.ReadOnlyHint {
+	ann = roTool["annotations"].(map[string]interface{})
+	if ann["readOnlyHint"] != true {
 		t.Error("Expected readOnlyHint=true")
 	}
-	if ann.OpenWorldHint == nil || *ann.OpenWorldHint {
+	if ann["openWorldHint"] != false {
 		t.Error("Expected openWorldHint=false")
 	}
 
@@ -500,10 +537,12 @@ func TestToolAnnotations_MaxResultSizeChars(t *testing.T) {
 	q := NewQuery(QueryConfig{
 		Transport:       mt,
 		IsStreamingMode: true,
-		SdkMCPServers: map[string]*MCPServer{
+		SdkMCPServers: testSDKServers(map[string]*MCPServer{
 			"meta-test": server,
-		},
+		}),
 	})
+
+	initializeMCPServer(t, q, "meta-test")
 
 	request := map[string]interface{}{
 		"server_name": "meta-test",
@@ -536,6 +575,19 @@ func TestToolAnnotations_MaxResultSizeChars(t *testing.T) {
 	}
 	if meta["anthropic/maxResultSizeChars"] != 100000 {
 		t.Errorf("Expected anthropic/maxResultSizeChars=100000, got %v", meta["anthropic/maxResultSizeChars"])
+	}
+
+	// maxResultSizeChars is not an MCP field: it must not appear inside the
+	// wire annotations, only in _meta (#1218 semantics).
+	ann, ok := largeTool["annotations"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected annotations map on tool with MaxResultSizeChars")
+	}
+	if _, leaked := ann["maxResultSizeChars"]; leaked {
+		t.Error("Expected maxResultSizeChars to be kept out of the wire annotations")
+	}
+	if ann["readOnlyHint"] != true {
+		t.Error("Expected readOnlyHint=true in the wire annotations")
 	}
 
 	// Tool without MaxResultSizeChars should NOT have _meta

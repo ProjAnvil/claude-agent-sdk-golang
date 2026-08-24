@@ -2042,3 +2042,121 @@ func TestCreatedAt_WhenFirstLineLacksTimestamp(t *testing.T) {
 		t.Errorf("Expected created_at=1768473000000, got %d", *sessions[0].CreatedAt)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// GetSubagentMessages — parent id recovery from the .meta.json sidecar (#1207)
+// ---------------------------------------------------------------------------
+
+// writeSubagentChain writes a two-turn subagent transcript (user + assistant)
+// for agentID under subagentDir, plus an optional .meta.json sidecar whose
+// content is written verbatim when non-empty.
+func writeSubagentChain(t *testing.T, subagentDir, agentID string, meta []byte) {
+	t.Helper()
+	userUUID := generateUUID()
+	assistantUUID := generateUUID()
+	lines := []string{
+		`{"type":"user","uuid":"` + userUUID + `","message":{"role":"user","content":"hi"}}`,
+		`{"type":"assistant","uuid":"` + assistantUUID + `","parentUuid":"` + userUUID + `","message":{"role":"assistant","content":"hello"}}`,
+	}
+	agentFile := filepath.Join(subagentDir, "agent-"+agentID+".jsonl")
+	if err := os.WriteFile(agentFile, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if meta != nil {
+		if err := os.WriteFile(agentMetadataSidecarPath(agentFile), meta, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestGetSubagentMessages_ParentIDsFromMetaSidecar(t *testing.T) {
+	sid := generateUUID()
+	projectPath, subagentDir, _ := setupSubagentDir(t, sid)
+
+	writeSubagentChain(t, subagentDir, "abc", []byte(
+		`{"agentType":"general-purpose","toolUseId":"toolu_01ABC","parentAgentId":"a-parent","spawnDepth":2}`))
+
+	msgs, err := GetSubagentMessages(&GetSubagentMessagesOptions{
+		SessionID: sid,
+		AgentID:   "abc",
+		Directory: &projectPath,
+	})
+	if err != nil {
+		t.Fatalf("GetSubagentMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	for _, m := range msgs {
+		if m.ParentToolUseID == nil || *m.ParentToolUseID != "toolu_01ABC" {
+			t.Errorf("ParentToolUseID: got %v, want toolu_01ABC", m.ParentToolUseID)
+		}
+		if m.ParentAgentID == nil || *m.ParentAgentID != "a-parent" {
+			t.Errorf("ParentAgentID: got %v, want a-parent", m.ParentAgentID)
+		}
+	}
+}
+
+func TestGetSubagentMessages_ParentIDsNoneWhenSidecarMissingOrUnusable(t *testing.T) {
+	cases := map[string][]byte{
+		"no sidecar":          nil,
+		"corrupt sidecar":     []byte("not json {"),
+		"sidecar without ids": []byte(`{"agentType":"general-purpose"}`),
+		"wrong types":         []byte(`{"toolUseId":42,"parentAgentId":["x"]}`),
+	}
+	for name, meta := range cases {
+		t.Run(name, func(t *testing.T) {
+			sid := generateUUID()
+			projectPath, subagentDir, _ := setupSubagentDir(t, sid)
+			writeSubagentChain(t, subagentDir, "x", meta)
+
+			msgs, err := GetSubagentMessages(&GetSubagentMessagesOptions{
+				SessionID: sid,
+				AgentID:   "x",
+				Directory: &projectPath,
+			})
+			if err != nil {
+				t.Fatalf("GetSubagentMessages: %v", err)
+			}
+			if len(msgs) != 2 {
+				t.Fatalf("expected 2 messages, got %d", len(msgs))
+			}
+			for _, m := range msgs {
+				if m.ParentToolUseID != nil {
+					t.Errorf("ParentToolUseID should be nil, got %v", *m.ParentToolUseID)
+				}
+				if m.ParentAgentID != nil {
+					t.Errorf("ParentAgentID should be nil, got %v", *m.ParentAgentID)
+				}
+			}
+		})
+	}
+}
+
+func TestGetSubagentMessages_UnreadableSidecarDegradesToNone(t *testing.T) {
+	// A sidecar that exists but cannot be read (here: a directory) must not
+	// make the best-effort read helper fail.
+	sid := generateUUID()
+	projectPath, subagentDir, _ := setupSubagentDir(t, sid)
+	writeSubagentChain(t, subagentDir, "x", nil)
+	if err := os.MkdirAll(filepath.Join(subagentDir, "agent-x.meta.json"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := GetSubagentMessages(&GetSubagentMessagesOptions{
+		SessionID: sid,
+		AgentID:   "x",
+		Directory: &projectPath,
+	})
+	if err != nil {
+		t.Fatalf("GetSubagentMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	for _, m := range msgs {
+		if m.ParentToolUseID != nil || m.ParentAgentID != nil {
+			t.Errorf("parent ids should be nil, got %v / %v", m.ParentToolUseID, m.ParentAgentID)
+		}
+	}
+}

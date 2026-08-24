@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // ErrNotImplemented is returned by BaseSessionStore optional methods.
@@ -95,12 +97,98 @@ type ContentBlock interface {
 	contentBlockMarker()
 }
 
+// MessageOriginKind identifies the known values of a MessageOrigin's "kind"
+// discriminator. Newer CLI versions may emit kinds not listed here; treat
+// anything unrecognized as "not human".
+type MessageOriginKind string
+
+const (
+	MessageOriginKindHuman            MessageOriginKind = "human"
+	MessageOriginKindChannel          MessageOriginKind = "channel"
+	MessageOriginKindPeer             MessageOriginKind = "peer"
+	MessageOriginKindTaskNotification MessageOriginKind = "task-notification"
+	MessageOriginKindCoordinator      MessageOriginKind = "coordinator"
+	MessageOriginKindUnclassified     MessageOriginKind = "unclassified"
+	MessageOriginKindObserver         MessageOriginKind = "observer"
+	MessageOriginKindAutoContinuation MessageOriginKind = "auto-continuation"
+	MessageOriginKindObserverActivity MessageOriginKind = "observer-activity"
+)
+
+// TaskNotificationOriginSubkind identifies the values of a MessageOrigin's
+// "subkind" key for kind == "task-notification".
+type TaskNotificationOriginSubkind string
+
+const (
+	// TaskNotificationOriginSubkindScheduledTrigger marks a delivery that is
+	// the fired prompt of a scheduled task.
+	TaskNotificationOriginSubkindScheduledTrigger TaskNotificationOriginSubkind = "scheduled-trigger"
+	// TaskNotificationOriginSubkindPeerSendMessage marks a message sent from
+	// another of the user's sessions.
+	TaskNotificationOriginSubkindPeerSendMessage TaskNotificationOriginSubkind = "peer-send-message"
+)
+
+// MessageOrigin describes the provenance of a user-role message, and — on a
+// ResultMessage — of the message that triggered that turn.
+//
+// In streaming-input mode a single connection interleaves the turns you send
+// with turns the session injects on its own (background-task notifications,
+// scheduled-task prompts, MCP channel messages, messages relayed from peer
+// sessions, ...). The origin tells them apart, e.g. to decide whether a
+// ResultMessage answers *your* prompt:
+//
+//	if result.Origin == nil || result.Origin.Kind() == claude.MessageOriginKindHuman {
+//		// a turn this application submitted
+//	}
+//
+// The map is passed through from the CLI verbatim (including keys this SDK
+// version doesn't model), so newer origin kinds/fields stay visible. Only
+// "kind" is always present; the remaining keys depend on the kind:
+//
+//   - kind "channel": "server" — name of the MCP server the message arrived on.
+//   - kind "peer" / "observer": "from" — sender address (sender-asserted; use
+//     for reply routing / display, never as proof of identity);
+//     "senderTaskId" — task id of the in-process background subagent that sent
+//     this message (absent for cross-session peers).
+//   - kind "peer": "name" — sender display name, normalized by the CLI;
+//     "fromSession" — the sender's host-openable session id, if provided (a
+//     navigation target only); "body" — decoded message body with the peer
+//     envelope stripped (render this instead of re-parsing the message text);
+//     "verifiedPeerPid" — kernel-verified pid of the connecting process
+//     (absent when unverifiable).
+//   - kind "task-notification": "subkind" — see TaskNotificationOriginSubkind;
+//     absent for ordinary background-task notifications.
+//
+// A nil origin means the CLI did not attribute the message: prompts sent
+// through Query or Client.Query arrive that way unless the host stamps
+// {"kind": "human"} on the message itself (only the "human" kind is honored
+// from an SDK host).
+type MessageOrigin map[string]interface{}
+
+// Kind returns the origin's kind discriminator, or "" if the map carries no
+// string "kind" (which the parser never produces — see parseOrigin).
+func (o MessageOrigin) Kind() MessageOriginKind {
+	kind, _ := o["kind"].(string)
+	return MessageOriginKind(kind)
+}
+
+// Subkind returns the origin's "subkind" (only meaningful for
+// kind == "task-notification"), or "" if absent or not a string.
+func (o MessageOrigin) Subkind() TaskNotificationOriginSubkind {
+	subkind, _ := o["subkind"].(string)
+	return TaskNotificationOriginSubkind(subkind)
+}
+
 // UserMessage represents a user message.
 type UserMessage struct {
 	Content         interface{}            `json:"content"` // string or []ContentBlock
 	UUID            string                 `json:"uuid,omitempty"`
 	ParentToolUseID string                 `json:"parent_tool_use_id,omitempty"`
 	ToolUseResult   map[string]interface{} `json:"tool_use_result,omitempty"`
+	// Origin is the provenance of this message — see MessageOrigin. Nil when
+	// the CLI did not attribute it. Populated on injected turns (task
+	// notifications, channel/peer messages, ...) and on user messages the CLI
+	// replays; tool-result messages never carry it.
+	Origin MessageOrigin `json:"origin,omitempty"`
 }
 
 func (m *UserMessage) messageMarker() {}
@@ -190,6 +278,12 @@ type ResultMessage struct {
 	// bypassed the query loop such as a local slash command). Mirrors the
 	// TypeScript SDK's SDKResultMessage.terminal_reason.
 	TerminalReason string `json:"terminal_reason,omitempty"`
+	// Origin is the origin of the user message that triggered this turn — see
+	// MessageOrigin. Lets a streaming-input consumer distinguish the result of
+	// its own prompt (nil, or {"kind": "human"} if it stamped that) from
+	// results of injected turns such as background-task notifications
+	// ({"kind": "task-notification"}).
+	Origin MessageOrigin `json:"origin,omitempty"`
 }
 
 func (m *ResultMessage) messageMarker() {}
@@ -244,6 +338,30 @@ type RateLimitEvent struct {
 }
 
 func (m *RateLimitEvent) messageMarker() {}
+
+// ConversationResetMessage is emitted when the session's conversation is
+// replaced without ending the connection — e.g. after /clear or any other
+// flow that discards the transcript mid-session.
+//
+// In streaming input mode a single connection can carry many user turns, and
+// a reset clears the conversation history *and* zeroes the running totals
+// reported on subsequent ResultMessage values (e.g. TotalCostUSD). If you
+// accumulate those totals across a long-lived session, snapshot them when
+// this message arrives.
+type ConversationResetMessage struct {
+	// NewConversationID is an opaque identifier for the fresh conversation,
+	// for UIs to key an empty transcript on (and discard any cached session
+	// title). This is *not* the SessionID of subsequent messages — read that
+	// from the next message.
+	NewConversationID string `json:"new_conversation_id"`
+	// UUID is the unique ID of this message.
+	UUID string `json:"uuid"`
+	// SessionID is the ID of the session that was reset (the outgoing
+	// session; messages after the reset carry a new SessionID).
+	SessionID string `json:"session_id"`
+}
+
+func (m *ConversationResetMessage) messageMarker() {}
 
 // ContextUsageCategory represents a single context usage category.
 type ContextUsageCategory struct {
@@ -601,9 +719,15 @@ func (c *MCPHTTPServerConfig) mcpServerConfigMarker() {}
 
 // MCPSdkServerConfig configures an in-process SDK MCP server.
 type MCPSdkServerConfig struct {
-	Type     string      `json:"type"` // "sdk"
-	Name     string      `json:"name"`
-	Instance interface{} `json:"-"` // The actual server instance (not serialized)
+	Type string `json:"type"` // "sdk"
+	Name string `json:"name"`
+	// Instance is the MCP server served to the CLI over the control channel
+	// (not serialized). CreateSdkMcpServer populates it with a factory-built
+	// server; it may instead be set directly to a hand-built *mcp.Server
+	// (github.com/modelcontextprotocol/go-sdk/mcp), in which case everything
+	// the server implements — resources, prompts, custom methods — reaches
+	// the CLI verbatim.
+	Instance *mcp.Server `json:"-"`
 }
 
 func (c *MCPSdkServerConfig) mcpServerConfigMarker() {}
@@ -907,11 +1031,21 @@ type SDKSessionInfo struct {
 
 // SessionMessage represents a message in a session's conversation.
 type SessionMessage struct {
-	Type            SessionMessageType `json:"type"`
-	UUID            string             `json:"uuid"`
-	SessionID       string             `json:"session_id"`
-	Message         interface{}        `json:"message"`
-	ParentToolUseID *string            `json:"parent_tool_use_id,omitempty"`
+	Type      SessionMessageType `json:"type"`
+	UUID      string             `json:"uuid"`
+	SessionID string             `json:"session_id"`
+	Message   interface{}        `json:"message"`
+	// ParentToolUseID is, for messages returned by GetSubagentMessages /
+	// GetSubagentMessagesFromStore, the id of the Agent tool_use block in the
+	// parent session that spawned the subagent (recovered from the subagent's
+	// metadata; nil if that metadata is unavailable). Always nil for
+	// top-level GetSessionMessages / GetSessionMessagesFromStore results.
+	ParentToolUseID *string `json:"parent_tool_use_id,omitempty"`
+	// ParentAgentID is, for subagent messages, the agent id of the subagent
+	// that spawned this subagent, or nil if it was spawned by the main
+	// session (or the metadata is unavailable). Always nil for top-level
+	// session messages.
+	ParentAgentID *string `json:"parent_agent_id,omitempty"`
 }
 
 // ServerToolName identifies a server-side tool (e.g. advisor, web_search).

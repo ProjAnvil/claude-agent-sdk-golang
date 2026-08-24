@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -1631,5 +1632,123 @@ func TestHookInputPermissionSuggestionsType(t *testing.T) {
 	}
 	if hi.PermissionSuggestions[0]["type"] != "addRules" {
 		t.Errorf("Expected type=addRules, got %v", hi.PermissionSuggestions[0]["type"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests ported from Python SDK v0.2.133..v0.2.143 (#1199, #1207)
+// ---------------------------------------------------------------------------
+
+// TestMessageOriginAccessors tests the MessageOrigin Kind/Subkind accessors
+// and the origin kind/subkind constants (ported from Python SDK #1199,
+// commit d48fa33).
+func TestMessageOriginAccessors(t *testing.T) {
+	// Kind returns the discriminator; Subkind returns "" when absent.
+	human := MessageOrigin{"kind": "human"}
+	if human.Kind() != MessageOriginKindHuman {
+		t.Errorf("Expected kind 'human', got '%s'", human.Kind())
+	}
+	if human.Subkind() != "" {
+		t.Errorf("Expected empty subkind, got '%s'", human.Subkind())
+	}
+
+	tn := MessageOrigin{"kind": "task-notification", "subkind": "scheduled-trigger"}
+	if tn.Kind() != MessageOriginKindTaskNotification {
+		t.Errorf("Expected kind 'task-notification', got '%s'", tn.Kind())
+	}
+	if tn.Subkind() != TaskNotificationOriginSubkindScheduledTrigger {
+		t.Errorf("Expected subkind 'scheduled-trigger', got '%s'", tn.Subkind())
+	}
+
+	// Non-string kind/subkind values degrade to "".
+	malformed := MessageOrigin{"kind": 42, "subkind": true}
+	if malformed.Kind() != "" {
+		t.Errorf("Expected empty kind for non-string, got '%s'", malformed.Kind())
+	}
+	if malformed.Subkind() != "" {
+		t.Errorf("Expected empty subkind for non-string, got '%s'", malformed.Subkind())
+	}
+
+	// Nil origin is safe to interrogate (unattributed turn).
+	var none MessageOrigin
+	if none.Kind() != "" || none.Subkind() != "" {
+		t.Errorf("Expected empty kind/subkind for nil origin, got '%s'/'%s'", none.Kind(), none.Subkind())
+	}
+
+	// Spot-check the full set of known kind constants against the wire values.
+	known := map[MessageOriginKind]string{
+		MessageOriginKindHuman:            "human",
+		MessageOriginKindChannel:          "channel",
+		MessageOriginKindPeer:             "peer",
+		MessageOriginKindTaskNotification: "task-notification",
+		MessageOriginKindCoordinator:      "coordinator",
+		MessageOriginKindUnclassified:     "unclassified",
+		MessageOriginKindObserver:         "observer",
+		MessageOriginKindAutoContinuation: "auto-continuation",
+		MessageOriginKindObserverActivity: "observer-activity",
+	}
+	for kind, wire := range known {
+		if string(kind) != wire {
+			t.Errorf("Expected wire value %q, got %q", wire, string(kind))
+		}
+	}
+	if string(TaskNotificationOriginSubkindPeerSendMessage) != "peer-send-message" {
+		t.Errorf("Unexpected peer-send-message wire value: %q", string(TaskNotificationOriginSubkindPeerSendMessage))
+	}
+}
+
+// TestSessionMessageParentAgentID tests the parent_agent_id field on
+// SessionMessage (ported from Python SDK #1207, commit 2bbdce6).
+func TestSessionMessageParentAgentID(t *testing.T) {
+	agentID := "agent-abc123"
+	msg := SessionMessage{
+		Type:          SessionMessageTypeAssistant,
+		UUID:          "uuid-1",
+		SessionID:     "session-1",
+		Message:       map[string]interface{}{"role": "assistant"},
+		ParentAgentID: &agentID,
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var roundTrip SessionMessage
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if roundTrip.ParentAgentID == nil || *roundTrip.ParentAgentID != agentID {
+		t.Errorf("Expected ParentAgentID %q after round-trip, got %v", agentID, roundTrip.ParentAgentID)
+	}
+
+	// Wire format uses snake_case.
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal to map failed: %v", err)
+	}
+	if raw["parent_agent_id"] != agentID {
+		t.Errorf("Expected wire key parent_agent_id=%q, got %v", agentID, raw["parent_agent_id"])
+	}
+
+	// Nil ParentAgentID is omitted from the wire and round-trips to nil.
+	top := SessionMessage{
+		Type:      SessionMessageTypeUser,
+		UUID:      "uuid-2",
+		SessionID: "session-1",
+		Message:   map[string]interface{}{"role": "user"},
+	}
+	data, err = json.Marshal(top)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if strings.Contains(string(data), "parent_agent_id") {
+		t.Errorf("Expected parent_agent_id to be omitted, got %s", data)
+	}
+	var roundTripNil SessionMessage
+	if err := json.Unmarshal(data, &roundTripNil); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if roundTripNil.ParentAgentID != nil {
+		t.Errorf("Expected nil ParentAgentID, got %v", *roundTripNil.ParentAgentID)
 	}
 }

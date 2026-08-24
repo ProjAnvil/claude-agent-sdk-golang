@@ -790,3 +790,101 @@ func TestMergeImportOptions(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// .meta.json sidecar robustness (#1207)
+// ---------------------------------------------------------------------------
+
+// TestImportSessionToStore_MetaTypeKeyCannotShadow verifies that a stray
+// "type" key in the CLI-owned sidecar can never shadow the synthetic
+// agent_metadata discriminator.
+func TestImportSessionToStore_MetaTypeKeyCannotShadow(t *testing.T) {
+	_, projectPath, projectsDir, projectDir := setupImportProject(t)
+
+	sid := generateUUID()
+	sessionFile := filepath.Join(projectDir, sid+".jsonl")
+	os.WriteFile(sessionFile, []byte(`{"type":"user","message":{"role":"user","content":"hello"}}`+"\n"), 0644)
+
+	subagentsDir := filepath.Join(projectDir, sid, "subagents")
+	os.MkdirAll(subagentsDir, 0755)
+	subLine := `{"type":"assistant","message":{"role":"assistant","content":"sub"}}`
+	os.WriteFile(filepath.Join(subagentsDir, "agent-abc.jsonl"), []byte(subLine+"\n"), 0644)
+	os.WriteFile(
+		filepath.Join(subagentsDir, "agent-abc.meta.json"),
+		[]byte(`{"type":"something-else","toolUseId":"toolu_1"}`),
+		0644,
+	)
+
+	store := NewInMemorySessionStore()
+	ctx := context.Background()
+	if _, err := ImportSessionToStore(ctx, sid, &projectPath, store, &ImportSessionToStoreOptions{
+		ProjectsDir: projectsDir,
+	}); err != nil {
+		t.Fatalf("ImportSessionToStore: %v", err)
+	}
+
+	subKey := SessionKey{
+		ProjectKey: relProjectKey(t, projectsDir, projectDir),
+		SessionID:  sid,
+		Subpath:    "subagents/agent-abc",
+	}
+	entries, err := store.Load(ctx, subKey)
+	if err != nil {
+		t.Fatalf("Load subagent: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries (transcript + meta), got %d", len(entries))
+	}
+	metaEntry := entries[1]
+	if metaEntry["type"] != "agent_metadata" {
+		t.Errorf("sidecar type key shadowed the discriminator: got %v", metaEntry["type"])
+	}
+	if metaEntry["toolUseId"] != "toolu_1" {
+		t.Errorf("expected toolUseId=toolu_1, got %v", metaEntry["toolUseId"])
+	}
+}
+
+// TestImportSessionToStore_UnusableMetaSidecarTreatedAsAbsent verifies that a
+// corrupt or non-object sidecar does not abort the import midway; it degrades
+// to a missing sidecar.
+func TestImportSessionToStore_UnusableMetaSidecarTreatedAsAbsent(t *testing.T) {
+	for _, sidecar := range []string{"not json {", "[1, 2]", "42"} {
+		t.Run(sidecar, func(t *testing.T) {
+			_, projectPath, projectsDir, projectDir := setupImportProject(t)
+
+			sid := generateUUID()
+			sessionFile := filepath.Join(projectDir, sid+".jsonl")
+			os.WriteFile(sessionFile, []byte(`{"type":"user","message":{"role":"user","content":"hello"}}`+"\n"), 0644)
+
+			subagentsDir := filepath.Join(projectDir, sid, "subagents")
+			os.MkdirAll(subagentsDir, 0755)
+			subLine := `{"type":"assistant","message":{"role":"assistant","content":"sub"}}`
+			os.WriteFile(filepath.Join(subagentsDir, "agent-abc.jsonl"), []byte(subLine+"\n"), 0644)
+			os.WriteFile(filepath.Join(subagentsDir, "agent-abc.meta.json"), []byte(sidecar), 0644)
+
+			store := NewInMemorySessionStore()
+			ctx := context.Background()
+			if _, err := ImportSessionToStore(ctx, sid, &projectPath, store, &ImportSessionToStoreOptions{
+				ProjectsDir: projectsDir,
+			}); err != nil {
+				t.Fatalf("ImportSessionToStore should tolerate unusable sidecar: %v", err)
+			}
+
+			subKey := SessionKey{
+				ProjectKey: relProjectKey(t, projectsDir, projectDir),
+				SessionID:  sid,
+				Subpath:    "subagents/agent-abc",
+			}
+			entries, err := store.Load(ctx, subKey)
+			if err != nil {
+				t.Fatalf("Load subagent: %v", err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("expected only the transcript entry, got %d entries", len(entries))
+			}
+			if entries[0]["type"] != "assistant" {
+				t.Errorf("expected the transcript entry, got type=%v", entries[0]["type"])
+			}
+		})
+	}
+}

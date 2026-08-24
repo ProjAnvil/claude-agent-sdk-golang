@@ -13,10 +13,12 @@ package claude
 // Mirrors the behavior of the Python SDK _internal/session_resume.py.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -261,8 +263,15 @@ func writeJSONL(path string, entries []SessionStoreEntry) error {
 	return nil
 }
 
-// copyAuthFiles copies .credentials.json (with refreshToken redacted) and
-// .claude.json from the caller's effective config dir to tmpBase.
+// copyAuthFiles seeds tmpBase with the caller's auth and user config:
+// .credentials.json (refreshToken redacted), .claude.json, and user
+// settings.json / cowork_settings.json (plugin declarations stripped).
+//
+// Source resolution mirrors the CLI:
+//   - .credentials.json, settings.json and cowork_settings.json live under
+//     the config dir (default ~/.claude/)
+//   - .claude.json lives at $CLAUDE_CONFIG_DIR/.claude.json when set, else
+//     ~/.claude.json (NOT ~/.claude/.claude.json)
 func copyAuthFiles(tmpBase string, optEnv map[string]string) error {
 	callerConfigDir := ""
 	if optEnv != nil {
@@ -285,8 +294,7 @@ func copyAuthFiles(tmpBase string, optEnv map[string]string) error {
 
 	// Try to read credentials JSON.
 	var credsJSON string
-	credsPath := filepath.Join(sourceConfigDir, ".credentials.json")
-	if data, err := os.ReadFile(credsPath); err == nil {
+	if data := readIfPresent(filepath.Join(sourceConfigDir, ".credentials.json")); data != nil {
 		credsJSON = string(data)
 	}
 
@@ -316,9 +324,74 @@ func copyAuthFiles(tmpBase string, optEnv map[string]string) error {
 		home, _ := os.UserHomeDir()
 		claudeJSONSrc = filepath.Join(home, ".claude.json")
 	}
-	copyIfPresent(claudeJSONSrc, filepath.Join(tmpBase, ".claude.json"))
+	copyIfPresent(claudeJSONSrc, filepath.Join(tmpBase, ".claude.json"), nil)
+
+	// User settings carry apiKeyHelper (a fourth auth mechanism alongside
+	// .credentials.json / Keychain / env) plus env/hooks/permissions. Without
+	// it the resumed subprocess sees no user settings at all, and an
+	// apiKeyHelper-only host fails with "Not logged in". cowork_settings.json
+	// is the alternate filename the CLI reads in cowork-plugins mode. Both
+	// pass through stripSettingsForResume so plugin declarations don't
+	// reconcile against the empty tmpBase plugin cache.
+	for _, name := range []string{"settings.json", "cowork_settings.json"} {
+		copyIfPresent(
+			filepath.Join(sourceConfigDir, name),
+			filepath.Join(tmpBase, name),
+			stripSettingsForResume,
+		)
+	}
 
 	return nil
+}
+
+// resumeSettingsStrippedKeys are user-settings keys that only misbehave under
+// the redirected CLAUDE_CONFIG_DIR: plugin declarations reconcile against the
+// always-empty tmp plugins cache and would network-install each declared
+// marketplace on every resume.
+var resumeSettingsStrippedKeys = []string{"enabledPlugins", "extraKnownMarketplaces"}
+
+// utf8BOM prefixes settings files written by PowerShell.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// stripSettingsForResume drops settings keys that misbehave under a
+// redirected config dir: resumeSettingsStrippedKeys and env.CLAUDE_CONFIG_DIR
+// (which would point the subprocess's config reads away from tmpBase).
+// Content that doesn't parse as a JSON object is returned untouched so the
+// subprocess sees exactly what the CLI would have read.
+func stripSettingsForResume(content []byte) []byte {
+	// Tolerate a UTF-8 BOM (PowerShell-written settings), mirroring the CLI's
+	// settings reader.
+	parsed := map[string]interface{}{}
+	if err := json.Unmarshal(bytes.TrimPrefix(content, utf8BOM), &parsed); err != nil {
+		return content
+	}
+	stripped := false
+	for _, key := range resumeSettingsStrippedKeys {
+		if _, ok := parsed[key]; ok {
+			delete(parsed, key)
+			stripped = true
+		}
+	}
+	if envBlock, ok := parsed["env"].(map[string]interface{}); ok {
+		if _, ok := envBlock["CLAUDE_CONFIG_DIR"]; ok {
+			delete(envBlock, "CLAUDE_CONFIG_DIR")
+			stripped = true
+		}
+	}
+	if !stripped {
+		return content
+	}
+	// Re-serialize compactly without HTML escaping, matching json.dumps
+	// separators=(",", ":"). Encoding cannot fail on parsed content (Go's
+	// json.Unmarshal already rejects non-finite numbers like 1e999, which
+	// therefore fall through to the byte-exact passthrough above).
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(parsed); err != nil {
+		return content
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 }
 
 // writeRedactedCredentials writes credsJSON with claudeAiOauth.refreshToken
@@ -347,13 +420,53 @@ func writeRedactedCredentials(credsJSON string, dst string) error {
 	return nil
 }
 
-// copyIfPresent copies src to dst, ignoring missing source.
-func copyIfPresent(src, dst string) {
+// readIfPresent reads a regular file, or returns nil.
+//
+// A missing source is skipped silently. Any other reason it can't be read
+// (EACCES, a directory or FIFO where a file was expected, ...) is logged and
+// skipped: these files are best-effort enrichment of the temp config dir, so
+// an unreadable one must not abort — or, for a FIFO, hang — the resume.
+func readIfPresent(src string) []byte {
+	info, err := os.Stat(src)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("[SessionStore] resume: skipping seed file", "path", src, "error", err)
+		}
+		return nil
+	}
+	if !info.Mode().IsRegular() {
+		slog.Warn("[SessionStore] resume: skipping seed file (not a regular file)", "path", src)
+		return nil
+	}
 	data, err := os.ReadFile(src)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("[SessionStore] resume: skipping seed file", "path", src, "error", err)
+		}
+		return nil
+	}
+	return data
+}
+
+// copyIfPresent copies src to dst (mode 0o600) if it exists, through an
+// optional transform. See readIfPresent for the skip policy.
+func copyIfPresent(src, dst string, transform func([]byte) []byte) {
+	content := readIfPresent(src)
+	if content == nil {
 		return
 	}
-	_ = os.WriteFile(dst, data, 0o600)
+	if transform != nil {
+		content = transform(content)
+	}
+	if err := os.WriteFile(dst, content, 0o600); err != nil {
+		// Don't leave a truncated dst behind for the subprocess to misparse.
+		_ = os.Remove(dst)
+		slog.Warn("[SessionStore] resume: skipping seed file", "path", src, "error", err)
+		return
+	}
+	// os.WriteFile only applies 0o600 when it creates the file; enforce it
+	// for a pre-existing dst too (best-effort, mirroring the Python chmod).
+	_ = os.Chmod(dst, 0o600)
 }
 
 // readKeychainCredentials reads OAuth credentials from the macOS Keychain.
@@ -401,16 +514,9 @@ func materializeSubkeys(ctx context.Context, store SessionStore, tmpBase, projec
 			continue
 		}
 
-		// Partition: agent_metadata entries → .meta.json; rest → .jsonl
-		var metadata []SessionStoreEntry
-		var transcript []SessionStoreEntry
-		for _, e := range subEntries {
-			if t, _ := e["type"].(string); t == "agent_metadata" {
-				metadata = append(metadata, e)
-			} else {
-				transcript = append(transcript, e)
-			}
-		}
+		// agent_metadata entries describe the .meta.json sidecar (last one
+		// wins); everything else is a transcript line.
+		metadata, transcript := splitAgentMetadata(subEntries)
 
 		subFile := filepath.Join(sessionDir, subpath) + ".jsonl"
 		if len(transcript) > 0 {
@@ -419,17 +525,15 @@ func materializeSubkeys(ctx context.Context, store SessionStore, tmpBase, projec
 			}
 		}
 
-		if len(metadata) > 0 {
-			// Last metadata entry wins; strip the synthetic "type" field.
-			last := map[string]interface{}(metadata[len(metadata)-1])
-			metaContent := make(map[string]interface{}, len(last))
-			for k, v := range last {
+		if metadata != nil {
+			// Strip the synthetic "type" field.
+			metaContent := make(map[string]interface{}, len(metadata))
+			for k, v := range metadata {
 				if k != "type" {
 					metaContent[k] = v
 				}
 			}
-			metaName := strings.TrimSuffix(filepath.Base(subFile), ".jsonl") + ".meta.json"
-			metaFile := filepath.Join(filepath.Dir(subFile), metaName)
+			metaFile := agentMetadataSidecarPath(subFile)
 			if data, err := json.Marshal(metaContent); err == nil {
 				_ = os.MkdirAll(filepath.Dir(metaFile), 0o700)
 				_ = os.WriteFile(metaFile, data, 0o600)

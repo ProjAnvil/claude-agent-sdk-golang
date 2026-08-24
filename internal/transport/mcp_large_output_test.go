@@ -166,15 +166,19 @@ func TestOptionsEnvOverridesOSEnviron(t *testing.T) {
 
 // TestCLAUDECODEStripped confirms CLAUDECODE is filtered out so SDK-spawned
 // subprocesses don't think they're running inside a Claude Code parent session.
+// Other inherited variables are kept.
 func TestCLAUDECODEStrippedInMCPTest(t *testing.T) {
 	os.Setenv("CLAUDECODE", "1")
 	defer os.Unsetenv("CLAUDECODE")
+	os.Setenv("OTHER_VAR", "kept")
+	defer os.Unsetenv("OTHER_VAR")
 
-	env := envFromOpts(t, &TransportOptions{CLIPath: "/fake/path/claude"})
-	for _, e := range env {
-		if strings.HasPrefix(e, "CLAUDECODE=") {
-			t.Error("CLAUDECODE must be stripped from subprocess env")
-		}
+	env := envMapFromOpts(t, &TransportOptions{CLIPath: "/fake/path/claude"})
+	if _, ok := env["CLAUDECODE"]; ok {
+		t.Error("CLAUDECODE must be stripped from subprocess env")
+	}
+	if env["OTHER_VAR"] != "kept" {
+		t.Errorf("OTHER_VAR should be inherited, got %q", env["OTHER_VAR"])
 	}
 }
 

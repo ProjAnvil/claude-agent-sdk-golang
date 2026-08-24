@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ProjAnvil/claude-agent-sdk-golang/testutil"
@@ -1675,5 +1676,210 @@ func TestParseTaskUpdatedMessageDispatch(t *testing.T) {
 	}
 	if _, ok := msg.(*SystemMessage); ok {
 		t.Fatal("Expected dispatch to NOT produce a generic *SystemMessage")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests ported from Python SDK v0.2.133..v0.2.143 (#1196, #1199)
+// ---------------------------------------------------------------------------
+
+// TestParseConversationReset tests typed ConversationResetMessage parsing
+// (ported from Python SDK #1196, commit 54dd3b4).
+func TestParseConversationReset(t *testing.T) {
+	data := map[string]interface{}{
+		"type":                "conversation_reset",
+		"new_conversation_id": "d2f4a573-ca99-42a2-bb7a-905b40c908e8",
+		"uuid":                "msg-1",
+		"session_id":          "66694129-ce74-4ee1-9b0f-994155ac97ba",
+	}
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	crm, ok := msg.(*ConversationResetMessage)
+	if !ok {
+		t.Fatalf("Expected *ConversationResetMessage, got %T", msg)
+	}
+	if crm.NewConversationID != "d2f4a573-ca99-42a2-bb7a-905b40c908e8" {
+		t.Errorf("Expected NewConversationID 'd2f4a573-ca99-42a2-bb7a-905b40c908e8', got '%s'", crm.NewConversationID)
+	}
+	if crm.UUID != "msg-1" {
+		t.Errorf("Expected UUID 'msg-1', got '%s'", crm.UUID)
+	}
+	if crm.SessionID != "66694129-ce74-4ee1-9b0f-994155ac97ba" {
+		t.Errorf("Expected SessionID '66694129-ce74-4ee1-9b0f-994155ac97ba', got '%s'", crm.SessionID)
+	}
+}
+
+// TestParseConversationResetMissingField tests that a conversation_reset
+// frame missing a required field raises a MessageParseError naming the field.
+func TestParseConversationResetMissingField(t *testing.T) {
+	full := map[string]interface{}{
+		"type":                "conversation_reset",
+		"new_conversation_id": "conv-1",
+		"uuid":                "u",
+		"session_id":          "s",
+	}
+	for _, field := range []string{"new_conversation_id", "uuid", "session_id"} {
+		t.Run(field, func(t *testing.T) {
+			data := map[string]interface{}{}
+			for k, v := range full {
+				if k != field {
+					data[k] = v
+				}
+			}
+			_, err := ParseMessage(data)
+			if err == nil {
+				t.Fatalf("Expected error for missing %s, got nil", field)
+			}
+			if !IsMessageParseError(err) {
+				t.Errorf("Expected MessageParseError, got %T", err)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Errorf("Expected error to mention %q, got %q", field, err.Error())
+			}
+		})
+	}
+}
+
+// TestParseUserMessageOrigin tests that origin is surfaced on user messages,
+// for both content shapes, and passed through with keys this SDK version
+// doesn't model (ported from Python SDK #1199, commit d48fa33).
+func TestParseUserMessageOrigin(t *testing.T) {
+	peer := map[string]interface{}{
+		"kind":            "peer",
+		"from":            "peer-addr",
+		"name":            "other-session",
+		"verifiedPeerPid": float64(4242),
+		"someFutureField": true,
+	}
+	contents := []interface{}{
+		"hi",
+		[]interface{}{map[string]interface{}{"type": "text", "text": "hi"}},
+	}
+	for _, content := range contents {
+		msg, err := ParseMessage(map[string]interface{}{
+			"type":    "user",
+			"message": map[string]interface{}{"content": content},
+			"origin":  peer,
+		})
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		um, ok := msg.(*UserMessage)
+		if !ok {
+			t.Fatalf("Expected *UserMessage, got %T", msg)
+		}
+		if um.Origin == nil {
+			t.Fatal("Expected origin to be populated")
+		}
+		if um.Origin.Kind() != MessageOriginKindPeer {
+			t.Errorf("Expected origin kind 'peer', got '%s'", um.Origin.Kind())
+		}
+		if from, _ := um.Origin["from"].(string); from != "peer-addr" {
+			t.Errorf("Expected origin from 'peer-addr', got %v", um.Origin["from"])
+		}
+		// Unmodeled keys pass through untouched.
+		if future, _ := um.Origin["someFutureField"].(bool); !future {
+			t.Errorf("Expected unmodeled key to pass through, got %v", um.Origin["someFutureField"])
+		}
+		if pid, _ := um.Origin["verifiedPeerPid"].(float64); pid != 4242 {
+			t.Errorf("Expected verifiedPeerPid 4242, got %v", um.Origin["verifiedPeerPid"])
+		}
+	}
+}
+
+// TestParseUserMessageOriginAbsentOrMalformed tests that no origin, or a
+// non-object / kind-less origin, parses to nil.
+func TestParseUserMessageOriginAbsentOrMalformed(t *testing.T) {
+	cases := map[string]map[string]interface{}{
+		"absent":     {},
+		"null":       {"origin": nil},
+		"non_object": {"origin": "human"},
+		"kind_less":  {"origin": map[string]interface{}{}},
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			data := map[string]interface{}{
+				"type":    "user",
+				"message": map[string]interface{}{"content": "hi"},
+			}
+			for k, v := range extra {
+				data[k] = v
+			}
+			msg, err := ParseMessage(data)
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+			um, ok := msg.(*UserMessage)
+			if !ok {
+				t.Fatalf("Expected *UserMessage, got %T", msg)
+			}
+			if um.Origin != nil {
+				t.Errorf("Expected nil origin, got %v", um.Origin)
+			}
+		})
+	}
+}
+
+// TestParseResultMessageOrigin tests that origin on a result identifies what
+// triggered the turn (ported from Python SDK #1199, commit d48fa33).
+func TestParseResultMessageOrigin(t *testing.T) {
+	base := map[string]interface{}{
+		"type":            "result",
+		"subtype":         "success",
+		"duration_ms":     float64(1000),
+		"duration_api_ms": float64(500),
+		"is_error":        false,
+		"num_turns":       float64(2),
+		"session_id":      "session_123",
+	}
+	withOrigin := func(origin interface{}) *ResultMessage {
+		data := map[string]interface{}{}
+		for k, v := range base {
+			data[k] = v
+		}
+		if origin != nil {
+			data["origin"] = origin
+		}
+		msg, err := ParseMessage(data)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		rm, ok := msg.(*ResultMessage)
+		if !ok {
+			t.Fatalf("Expected *ResultMessage, got %T", msg)
+		}
+		return rm
+	}
+
+	if rm := withOrigin(nil); rm.Origin != nil {
+		t.Errorf("Expected nil origin, got %v", rm.Origin)
+	}
+
+	if rm := withOrigin(map[string]interface{}{"kind": "human"}); rm.Origin == nil ||
+		rm.Origin.Kind() != MessageOriginKindHuman {
+		t.Errorf("Expected origin kind 'human', got %v", rm.Origin)
+	}
+
+	for _, subkind := range []TaskNotificationOriginSubkind{
+		TaskNotificationOriginSubkindScheduledTrigger,
+		TaskNotificationOriginSubkindPeerSendMessage,
+	} {
+		rm := withOrigin(map[string]interface{}{
+			"kind":    "task-notification",
+			"subkind": string(subkind),
+		})
+		if rm.Origin == nil || rm.Origin.Kind() != MessageOriginKindTaskNotification {
+			t.Fatalf("Expected task-notification origin, got %v", rm.Origin)
+		}
+		if rm.Origin.Subkind() != subkind {
+			t.Errorf("Expected subkind '%s', got '%s'", subkind, rm.Origin.Subkind())
+		}
+	}
+
+	if rm := withOrigin(map[string]interface{}{"kind": "unclassified"}); rm.Origin == nil ||
+		rm.Origin.Kind() != MessageOriginKindUnclassified {
+		t.Errorf("Expected origin kind 'unclassified', got %v", rm.Origin)
 	}
 }

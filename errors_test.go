@@ -253,3 +253,160 @@ func TestClaudeSDKErrorUnwrap(t *testing.T) {
 		t.Error("Expected Unwrap to return nil for error with no cause")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests ported from Python SDK v0.2.133..v0.2.143 (#1205)
+// ---------------------------------------------------------------------------
+
+// TestResultErrorCarriesPayload tests that ResultError is a ProcessError that
+// exposes the result payload (ported from Python SDK #1205, commit 90ab957).
+func TestResultErrorCarriesPayload(t *testing.T) {
+	data := map[string]interface{}{
+		"type":             "result",
+		"subtype":          "success",
+		"is_error":         true,
+		"errors":           []interface{}{},
+		"result":           "API Error: Stream idle timeout - no chunks received",
+		"api_error_status": nil,
+		"terminal_reason":  "api_error",
+		"session_id":       "s-1",
+	}
+	err := NewResultError("Claude Code returned an error result: x", data, 1)
+
+	// Behaves as a ProcessError (Python: subclass relationship).
+	if !IsProcessError(err) {
+		t.Error("IsProcessError should return true for ResultError")
+	}
+	if !IsResultError(err) {
+		t.Error("IsResultError should return true")
+	}
+	// The base ClaudeSDKError fields are reachable through the embedding.
+	if err.Message != "Claude Code returned an error result: x" {
+		t.Errorf("Unexpected base Message: %q", err.Message)
+	}
+
+	if err.ExitCode != 1 {
+		t.Errorf("Expected ExitCode=1, got %d", err.ExitCode)
+	}
+	if fmt.Sprintf("%p", err.Data) != fmt.Sprintf("%p", data) {
+		t.Error("Expected Data to be the same map passed in")
+	}
+	if err.Subtype != "success" {
+		t.Errorf("Expected Subtype 'success', got %q", err.Subtype)
+	}
+	if len(err.Errors) != 0 {
+		t.Errorf("Expected empty Errors, got %v", err.Errors)
+	}
+	if err.Result != "API Error: Stream idle timeout - no chunks received" {
+		t.Errorf("Unexpected Result: %q", err.Result)
+	}
+	if err.APIErrorStatus != nil {
+		t.Errorf("Expected nil APIErrorStatus, got %v", *err.APIErrorStatus)
+	}
+	if err.TerminalReason != "api_error" {
+		t.Errorf("Expected TerminalReason 'api_error', got %q", err.TerminalReason)
+	}
+	if err.SessionID != "s-1" {
+		t.Errorf("Expected SessionID 's-1', got %q", err.SessionID)
+	}
+	if !strings.Contains(err.Error(), "exit code: 1") {
+		t.Errorf("Expected error text to contain 'exit code: 1', got %q", err.Error())
+	}
+}
+
+// TestResultErrorToleratesMissingOrMalformedFields tests that malformed
+// payload fields degrade to zero values.
+func TestResultErrorToleratesMissingOrMalformedFields(t *testing.T) {
+	err := NewResultError("boom", map[string]interface{}{
+		"errors":           float64(42),
+		"api_error_status": "500",
+	}, 0)
+	if err.Subtype != "" {
+		t.Errorf("Expected empty Subtype, got %q", err.Subtype)
+	}
+	if len(err.Errors) != 0 {
+		t.Errorf("Expected empty Errors, got %v", err.Errors)
+	}
+	if err.Result != "" {
+		t.Errorf("Expected empty Result, got %q", err.Result)
+	}
+	if err.APIErrorStatus != nil {
+		t.Errorf("Expected nil APIErrorStatus, got %v", *err.APIErrorStatus)
+	}
+	if err.TerminalReason != "" {
+		t.Errorf("Expected empty TerminalReason, got %q", err.TerminalReason)
+	}
+	if err.SessionID != "" {
+		t.Errorf("Expected empty SessionID, got %q", err.SessionID)
+	}
+	if err.ExitCode != 0 {
+		t.Errorf("Expected ExitCode=0, got %d", err.ExitCode)
+	}
+
+	nilData := NewResultError("boom", nil, 0)
+	if nilData.Data == nil || len(nilData.Data) != 0 {
+		t.Errorf("Expected non-nil empty Data, got %v", nilData.Data)
+	}
+}
+
+// TestResultErrorNormalizesErrors tests that a bare-string "errors" is kept
+// and blank entries are dropped, so the structured field agrees with the text
+// the reader builds from it.
+func TestResultErrorNormalizesErrors(t *testing.T) {
+	bare := NewResultError("m", map[string]interface{}{"errors": "boom"}, 0)
+	if len(bare.Errors) != 1 || bare.Errors[0] != "boom" {
+		t.Errorf("Expected [boom], got %v", bare.Errors)
+	}
+
+	mixed := NewResultError("m", map[string]interface{}{
+		"errors": []interface{}{" ", "x ", float64(3)},
+	}, 0)
+	if len(mixed.Errors) != 1 || mixed.Errors[0] != "x" {
+		t.Errorf("Expected [x], got %v", mixed.Errors)
+	}
+
+	// []string payloads (Go-side construction) are accepted too.
+	goSlice := NewResultError("m", map[string]interface{}{"errors": []string{" a ", ""}}, 0)
+	if len(goSlice.Errors) != 1 || goSlice.Errors[0] != "a" {
+		t.Errorf("Expected [a], got %v", goSlice.Errors)
+	}
+}
+
+// TestResultErrorAPIErrorStatus tests that api_error_status is extracted from
+// both JSON-decoded (float64) and Go-native (int) payloads.
+func TestResultErrorAPIErrorStatus(t *testing.T) {
+	for _, raw := range []interface{}{float64(529), 529} {
+		err := NewResultError("m", map[string]interface{}{"api_error_status": raw}, 1)
+		if err.APIErrorStatus == nil || *err.APIErrorStatus != 529 {
+			t.Errorf("api_error_status=%v: expected 529, got %v", raw, err.APIErrorStatus)
+		}
+	}
+}
+
+// TestResultErrorWrapped tests errors.As behavior through a wrapped error and
+// that unrelated errors are not classified as ResultError.
+func TestResultErrorWrapped(t *testing.T) {
+	err := NewResultError("boom", map[string]interface{}{"subtype": "error_max_turns"}, 1)
+	wrapped := fmt.Errorf("query failed: %w", err)
+
+	var resultErr *ResultError
+	if !errors.As(wrapped, &resultErr) {
+		t.Fatal("errors.As should resolve *ResultError through wrapping")
+	}
+	if resultErr.Subtype != "error_max_turns" {
+		t.Errorf("Expected Subtype 'error_max_turns', got %q", resultErr.Subtype)
+	}
+	if !IsResultError(wrapped) {
+		t.Error("IsResultError should return true through wrapping")
+	}
+	if !IsProcessError(wrapped) {
+		t.Error("IsProcessError should return true for a wrapped ResultError")
+	}
+
+	if IsResultError(NewProcessError("plain", 1, "")) {
+		t.Error("IsResultError should return false for a plain ProcessError")
+	}
+	if IsResultError(errors.New("other")) {
+		t.Error("IsResultError should return false for unrelated errors")
+	}
+}

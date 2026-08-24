@@ -39,14 +39,9 @@ func TestMixedMCPServers(t *testing.T) {
 			return map[string]interface{}{"result": "from SDK"}, nil
 		},
 	}
-	sdkServerInstance := &internal.MCPServer{
-		Name:  "sdk-server",
-		Tools: []internal.MCPTool{sdkTool},
-	}
-
 	sdkServerConfig := &MCPSdkServerConfig{
 		Name:     "sdk-server",
-		Instance: sdkServerInstance,
+		Instance: internal.BuildToolServer("sdk-server", "1.0.0", []internal.MCPTool{sdkTool}),
 	}
 
 	// Create an external server config

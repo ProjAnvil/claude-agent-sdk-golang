@@ -3,6 +3,7 @@ package claude
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ClaudeSDKError is the base error type for all Claude SDK errors.
@@ -90,6 +91,124 @@ func NewProcessError(message string, exitCode int, stderr string) *ProcessError 
 		ExitCode:       exitCode,
 		Stderr:         stderr,
 	}
+}
+
+// ResultError indicates that the CLI exited after reporting a terminal error
+// result.
+//
+// The CLI ends a failed run by emitting a "result" message with
+// is_error: true (yielded to you as a ResultMessage) and then exiting
+// non-zero. This error replaces the bare "exit code 1" ProcessError for that
+// case and carries the result's payload, so callers can branch on *why* the
+// run failed without string matching:
+//
+//	var resultErr *claude.ResultError
+//	if errors.As(err, &resultErr) {
+//		if resultErr.TerminalReason == "api_error" { // e.g. overloaded / timeout
+//			retry()
+//		} else if resultErr.Subtype == "error_max_turns" {
+//			...
+//		}
+//	}
+//
+// It embeds ProcessError, so ExitCode/Stderr and the "(exit code: N)" error
+// text behave exactly as for a plain ProcessError, and IsProcessError reports
+// true for it (mirroring Python, where ResultError subclasses ProcessError).
+type ResultError struct {
+	ProcessError
+	// Subtype is the result subtype ("error_max_turns",
+	// "error_during_execution", ... — or "success" when the agent loop itself
+	// completed but the last turn was an API error). Empty when absent or not
+	// a string.
+	Subtype string
+	// Errors holds the error strings reported by the CLI (never nil; may be
+	// empty). Bare-string "errors" payloads are wrapped, and non-string or
+	// blank entries are dropped, so this field always agrees with the text
+	// the SDK builds the error message from.
+	Errors []string
+	// Result is the result text, if any. For API failures this holds the
+	// "API Error: ..." prose.
+	Result string
+	// APIErrorStatus is the HTTP status of the failing API call, or nil.
+	APIErrorStatus *int
+	// TerminalReason reports why the run ended (e.g. "api_error",
+	// "max_turns"), if reported by the CLI.
+	TerminalReason string
+	// SessionID is the session the result belongs to, if reported.
+	SessionID string
+	// Data is the raw "result" message payload as emitted by the CLI.
+	Data map[string]interface{}
+}
+
+// NewResultError creates a new ResultError from the raw "result" message
+// payload. A nil (or otherwise unusable) data map is treated as empty, and
+// each structured field is extracted only when it has the expected type, so
+// malformed payloads degrade to zero values instead of failing.
+func NewResultError(message string, data map[string]interface{}, exitCode int) *ResultError {
+	if data == nil {
+		data = map[string]interface{}{}
+	}
+	err := &ResultError{
+		ProcessError: ProcessError{
+			ClaudeSDKError: ClaudeSDKError{Message: message},
+			ExitCode:       exitCode,
+		},
+		Data:   data,
+		Errors: normalizeResultErrors(data["errors"]),
+	}
+	if subtype, ok := data["subtype"].(string); ok {
+		err.Subtype = subtype
+	}
+	if result, ok := data["result"].(string); ok {
+		err.Result = result
+	}
+	switch status := data["api_error_status"].(type) {
+	case float64:
+		v := int(status)
+		err.APIErrorStatus = &v
+	case int:
+		v := status
+		err.APIErrorStatus = &v
+	}
+	if reason, ok := data["terminal_reason"].(string); ok {
+		err.TerminalReason = reason
+	}
+	if sessionID, ok := data["session_id"].(string); ok {
+		err.SessionID = sessionID
+	}
+	return err
+}
+
+// normalizeResultErrors normalizes the "errors" field of a "result" frame to
+// clean strings.
+//
+// The CLI emits a list of strings; tolerate a bare string (older/buggy
+// emitters) and drop non-string or blank entries so the structured
+// ResultError.Errors and the error text always agree.
+func normalizeResultErrors(raw interface{}) []string {
+	var items []interface{}
+	switch v := raw.(type) {
+	case string:
+		items = []interface{}{v}
+	case []interface{}:
+		items = v
+	case []string:
+		items = make([]interface{}, len(v))
+		for i, s := range v {
+			items[i] = s
+		}
+	default:
+		return []string{}
+	}
+	errs := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				errs = append(errs, trimmed)
+			}
+		}
+	}
+	return errs
 }
 
 // CLIJSONDecodeError indicates that JSON parsing from CLI output failed.
@@ -184,9 +303,20 @@ func IsCLIConnectionError(err error) bool {
 	return errors.As(err, &e)
 }
 
-// IsProcessError checks if the error is a ProcessError.
+// IsProcessError checks if the error is a ProcessError. ResultError embeds
+// ProcessError (mirroring the Python subclass relationship), so it counts.
 func IsProcessError(err error) bool {
 	var e *ProcessError
+	if errors.As(err, &e) {
+		return true
+	}
+	var re *ResultError
+	return errors.As(err, &re)
+}
+
+// IsResultError checks if the error is a ResultError.
+func IsResultError(err error) bool {
+	var e *ResultError
 	return errors.As(err, &e)
 }
 

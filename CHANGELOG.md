@@ -5,6 +5,124 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.143] - 2026-08-24
+
+This release ships two bodies of work: **(A)** the port of Python SDK
+v0.2.132..v0.2.143, and **(B)** Go-only feature work (below) that puts the
+in-process MCP support on `github.com/modelcontextprotocol/go-sdk` (v1.7.0),
+closing the last 1:1-port gap with the Python SDK —
+`McpSdkServerConfig["instance"]` being a real MCP server users can
+hand-build.
+
+### Added (Go-only: real MCP types via go-sdk)
+
+- **`MCPSdkServerConfig.Instance *mcp.Server`**: the previously opaque
+  `Instance interface{}` is now a real `*mcp.Server`
+  (`github.com/modelcontextprotocol/go-sdk/mcp`). `CreateSdkMcpServer` keeps
+  its signature and populates `Instance` with a factory-built server, and
+  users may instead assign a hand-built `*mcp.Server` directly: resources,
+  prompts, and custom methods then reach the CLI verbatim over the control
+  channel, at full go-sdk fidelity. Additive for users of
+  `CreateSdkMcpServer`; code that type-asserted `Instance` to
+  `*internal.MCPServer` must switch to the `*mcp.Server` value.
+- **New dependency**: `github.com/modelcontextprotocol/go-sdk` v1.7.0
+  (plus its transitive modules: `jsonschema-go`, `golang-jwt/jwt`,
+  `segmentio/encoding`, `oauth2`, `x/tools`, `uritemplate`, `x/time`,
+  `go-cmp`).
+
+### Changed (Go-only: real MCP types via go-sdk)
+
+- **SDK MCP bridge rewritten over go-sdk's in-memory transport**
+  (`internal/sdk_mcp_bridge.go`): the hand-rolled JSON-RPC dispatch is
+  replaced by one `*mcp.Server` session per server over
+  `mcp.NewInMemoryTransports()`, with pending-waiter response routing —
+  mirroring Python's `SdkMcpBridge` (#1218) one architectural level up.
+  Factory wire semantics are preserved via a receiving middleware on the
+  factory-built server: `initialize` echoes the client's `protocolVersion`
+  with capabilities `{"experimental": {}, "tools": {"listChanged": false}}`,
+  `tools/list`/`tools/call` keep the exact payloads (annotation spellings,
+  `maxResultSizeChars` in `_meta`, `isError` always present, content
+  conversion, validation, panic mapping), and `resources/*`/`prompts/*` on a
+  tools-only factory server are refused with `-32601`. go-sdk's own result
+  marshaling cannot express these (`isError` is `omitempty`, tool
+  annotations always carry hint defaults), so the middleware renders those
+  payloads itself; every other method is dispatched by go-sdk.
+  Server-initiated traffic is handled like Python: `ping` answered with
+  `{}`, other server→client requests refused with `-32601` ("... is not
+  supported for SDK servers"), server→client notifications dropped.
+- **Bridge lifecycle is now per-`Query`**: bridge sessions own goroutines,
+  so the package-level registry was replaced by a registry on the `Query`
+  that `Close` drains (bounded 5s grace, mirroring Python's
+  `SHUTDOWN_GRACE_SECONDS`, then abandon).
+
+### Behavior deltas (wire-visible, go-sdk-legitimated)
+
+- The MCP handshake is now enforced: requests other than
+  `initialize`/`ping` sent before `initialize` are refused instead of being
+  served (the CLI always initializes first, so real sessions are
+  unaffected).
+- `initialize` protocol negotiation follows go-sdk: a client
+  `protocolVersion` go-sdk does not support now negotiates to the latest
+  legacy version instead of being echoed verbatim; supported versions
+  (including `2024-11-05`, `2025-03-26`, `2025-06-18`) are echoed as
+  before, and a missing `protocolVersion` still defaults to `2024-11-05`.
+- A repeated `initialize` on a live session is answered from the first
+  handshake's result (go-sdk rejects duplicate handshakes; the CLI
+  re-initializes SDK servers at turn starts). In-flight calls are
+  undisturbed.
+- The `-32601` error for `resources/*`/`prompts/*` on a tools-only factory
+  server now carries go-sdk's message text (`method not found: "<method>"`)
+  instead of `Method '<method>' not found`; the code is unchanged.
+- Integral numbers on the wire now decode as Go `int` inside the SDK
+  (JSON round-trips make every number a `float64`; re-marshaling renders
+  integral floats identically, so the CLI-facing bytes are unchanged).
+
+---
+
+**(A)** Port of Python SDK v0.2.132..v0.2.143 changes. Of the 11 tagged releases in
+this range, nine non-bump commits were reviewed: all nine were ported (one,
+#1218, partially — see "Not Ported"). Bundled CLI version bumps
+(2.1.225 → 2.1.238) and changelog/release housekeeping are not applicable —
+the Go SDK does not bundle a CLI.
+
+### Added
+
+- **`ConversationResetMessage` (#1196)**: the CLI's `conversation_reset` frame now parses into a dedicated message type with `NewConversationID`, `UUID`, and `SessionID`, letting applications detect when a `/clear` or other transcript-discarding flow resets the conversation mid-session. This widens the `Message` union — exhaustive switches need a new case. Ported from Python SDK #1196 (v0.2.137, commit `54dd3b4`).
+- **Message origin on `UserMessage` and `ResultMessage` (#1199)**: new `Origin` field surfaces why a turn was initiated — distinguishing application-submitted prompts (`"human"`) from background-task notifications, scheduled triggers, peer messages, and other session-injected turns. New exported types: `MessageOrigin` (pass-through map with `Kind()`/`Subkind()` accessors), `MessageOriginKind`, `TaskNotificationOriginSubkind`. Ported from Python SDK #1199 (v0.2.137, commit `d48fa33`).
+- **`ResumeSessionAt` / `ResumeDropsTurn` options for truncating resume (#1198)**: fork a session at an earlier transcript entry (`--resume-session-at=<uuid>`) and validate that only entries from a specific turn are discarded (`--resume-drops-turn=<prompt uuid>`). Both are forwarded in equals form with the same Windows cmd-metacharacter rejection as `Resume`/`SessionID`; `ResumeDropsTurn` is a `*string` forwarded whenever non-nil — an empty string reaches the CLI and is rejected as malformed rather than silently disarming the guard. Ported from Python SDK #1198 (v0.2.137, commit `be2d0df`).
+- **`ResultError` (#1205)**: when the CLI exits after a terminal error result, the SDK now returns a typed `ResultError` (embedding `ProcessError`) instead of a bare "exit code 1" error. Carries `Subtype`, `Errors`, `Result`, `APIErrorStatus`, `TerminalReason`, `SessionID`, and the raw `Data` payload so callers can branch on the failure reason without string matching. `IsResultError` works through wrapping; `IsProcessError` also matches `*ResultError` (mirroring the Python subclass relationship). Ported from Python SDK #1205 (v0.2.140, commit `90ab957`).
+- **`CanUseTool` with `Query()` and string prompts (#1204)**: the permission callback no longer requires the streaming client — a new internal `configureCanUseTool` step auto-routes the permission prompt tool over stdio when a callback is set, and returns an error when `CanUseTool` is combined with `PermissionPromptToolName` (mutually exclusive). Ported from Python SDK #1204 (v0.2.140, commit `fcdae22`).
+- **`ForwardSubagentText` option (#1206)**: forwards a subagent's text and thinking blocks as messages in the stream so consumers can render the full nested transcript (sent as the `forwardSubagentText` initialize capability). Matches the TypeScript SDK's `forwardSubagentText`. Ported from Python SDK #1206 (v0.2.140, commit `c97420c`).
+- **Subagent transcript parentage (#1207)**: `GetSubagentMessages` and `GetSubagentMessagesFromStore` now recover `ParentToolUseID` from the subagent's metadata (`.meta.json` sidecar / synthetic `agent_metadata` entry, last wins), linking each subagent's messages to the Agent `tool_use` block in the parent session. `SessionMessage` also gains `ParentAgentID` for the spawning agent's id. Ported from Python SDK #1207 (v0.2.140, commit `2bbdce6`).
+- **SDK MCP server full-fidelity JSON-RPC bridge (#1218)**: the hand-rolled MCP dispatch was replaced by a bridge (`internal/sdk_mcp_bridge.go`) mirroring mcp's own in-memory transport semantics: `initialize` echoes the client's `protocolVersion` and reports real capabilities; `ping` is answered; `resources/*` and `prompts/*` return `-32601` (tools-only server, exactly what the Python factory server answers); `notifications/cancelled` settles the in-flight request with `-32800`; request-id reuse in flight is refused; tool arguments are validated against `inputSchema` before the handler runs; tool results pass through with `isError` (camelCase, always present on success), `resource_link`/text-resource flattening, and panics mapped to `isError` results. New public API: `SdkMcpTool.Annotations`, `ToolBuilder.WithAnnotations`, and the `ToolAnnotations` alias — map-form annotations accept camelCase or snake_case hint names, and wire annotations carry only the four standard hints (`maxResultSizeChars` stays in `_meta`). Ported from Python SDK #1218 (v0.2.140, commit `0f005fa`).
+
+### Fixed
+
+- **Pending control requests receive the real error text on failed resume (#1198)**: when the CLI rejects a resume (nonexistent session, `--resume-drops-turn` guard failure) it prints an error result then exits 1 before answering `initialize`; pending control requests now fail fast with the `Claude Code returned an error result: ...` text instead of a bare "exit code 1" (or hanging until timeout).
+- **`settings.json` seeded into the temp config dir on `SessionStore` resume (#1197)**: resume now copies `settings.json` and `cowork_settings.json` alongside the credentials (stripping `enabledPlugins`/`extraKnownMarketplaces`/`env.CLAUDE_CONFIG_DIR`), preserving `apiKeyHelper` auth, user hooks, env vars, and permissions. Previously hosts authenticating solely via `apiKeyHelper` failed with "Not logged in" on resume. Seed files that are directories/FIFOs/unreadable are skipped with a warning instead of aborting the resume. Ported from Python SDK #1197 (v0.2.137, commit `b4d65f5`).
+- **Trailing stream errors no longer lost in `Query`**: the read loop forwards errors before closing the message channel, but the main `select` could observe the close first and drop the error; the loop now drains `Errors()` non-blockingly at stream end.
+- **Test-suite livelock in `internal/transport`**: the `setupTestTransport` cleanup drain loop spun forever once `readStdout` closed both channels (receive on a closed channel always won over `default:`); it now checks the channel-closed flag.
+
+### Breaking
+
+- **SDK MCP wire semantics**: unknown tools and handler errors are now `isError` tool results (matching the Python SDK and real mcp servers) instead of JSON-RPC `-32601`/`-32603` errors; tool-result content is normalized (`is_error` → `isError`, `resource_link`/text resources flattened to text, unknown/binary content dropped with a warning); wire annotations are camelCase-only. Callers that matched on the old JSON-RPC error codes for tool failures should check `isError` results instead.
+- The `Message` union gained `ConversationResetMessage` — exhaustive switches over `Message` need a new case.
+
+### Not Ported (analyzed, ruled out)
+
+- **#1218 mcp 1.x/2.x compatibility shim (`_mcp_compat.py`)**: the Go SDK has no mcp library dependency — its in-process MCP server is hand-rolled Go, so per-major-version compat has no equivalent. Hand-built `mcp.server.Server` pass-through and server-lifespan semantics are likewise N/A (Go MCP servers are factory funcs + handlers). The user-visible wire behaviors were ported (see above).
+- **Python `stream_input` "prompt iterable raised → close stdin" guard (#1204)**: Go channel prompts cannot raise, and Go's transport never closes stdin early, so no equivalent exists or is needed. Go's one-shot `Query` already holds stdin open until a result with no in-flight tasks — strictly stronger than the Python `wait_for_result_and_end_input` fix.
+
+### Test Coverage
+
+Statement coverage is now **≥95% in every library package** (root 97.3%, `internal` 99.9%, `internal/transport` 98.8%), up from 77.5%/88.7%/84.7% before this release:
+
+- Port tests mirroring the new Python tests: conversation_reset parsing, origin parsing (all kinds/subkinds/malformed), `ResultError` payload/normalization/wrapping, `--resume-session-at=`/`--resume-drops-turn=` argv + Windows metacharacter rejection + empty-string forwarding, typed-error wiring (incl. pending-initialize fast fail), `configureCanUseTool` (mutual exclusion, stdio routing), `forwardSubagentText` initialize capability, settings seeding (BOM, overflow float, FIFO/unreadable seeds), subagent parent-id recovery (sidecar + store metadata, last-wins), and the full SDK MCP bridge suite (handshake, cancellation, id reuse, argument validation, content conversion, annotations spellings).
+- New `coverage_*_test.go` files across all three packages covering pre-existing gaps: every control-protocol method (`GetServerInfo`/`Interrupt`/`SetModel`/`StopTask`/etc.), `Client.Connect`/`Send`/`Close` paths, `Query` lifecycle paths, session listing/fork/import/mutation paths, resume candidate loading, transport Connect/Write/streamInput/readStdout/Close escalation, and the mirror batcher's retry/overflow/flush paths. Windows-only branches are exercised through the existing `goos` test seam where possible; the remaining uncovered lines are provably unreachable on POSIX (home-dir failure, never-erroring `canonicalizePath`, closed-channel arms nothing can close).
+
+- `version.go` / `internal/transport/version.go`: bumped to `0.2.143`.
+- Full suite: `go build ./...`, `go vet ./...`, `go test . ./internal ./internal/transport -race` all clean.
+
 ## [0.2.132] - 2026-08-07
 
 Port of Python SDK v0.2.120..v0.2.132 changes. Of the 12 tagged releases in

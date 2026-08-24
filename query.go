@@ -7,6 +7,7 @@ import (
 
 	"github.com/ProjAnvil/claude-agent-sdk-golang/internal"
 	"github.com/ProjAnvil/claude-agent-sdk-golang/internal/transport"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // makeTransport is a factory function for creating transports.
@@ -19,6 +20,18 @@ var makeTransport = func(prompt interface{}, opts *transport.TransportOptions) (
 func wrapTransportError(err error) error {
 	if err == nil {
 		return nil
+	}
+
+	// internal.ResultError carries the CLI's error-result payload; rebuild
+	// the public ResultError from it. Checked first because its Unwrap chain
+	// contains the original transport.ProcessError.
+	var resultErr *internal.ResultError
+	if errors.As(err, &resultErr) {
+		re := NewResultError(resultErr.Message, resultErr.Data, resultErr.ExitCode)
+		if resultErr.Cause != nil {
+			re.Cause = wrapTransportError(resultErr.Cause)
+		}
+		return re
 	}
 
 	var cliNotFound *transport.CLINotFoundError
@@ -161,13 +174,20 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 		opts = DefaultOptions()
 	}
 
-	// Advisory: warn if other permission options shadow a configured
-	// can_use_tool callback (Python SDK #1081).
-	warnIfCanUseToolShadowed(opts)
-
 	go func() {
 		defer close(messages)
 		defer close(errs)
+
+		// Validate and configure permission settings: checks CanUseTool is
+		// not combined with PermissionPromptToolName, emits the shadowing
+		// advisory, and routes permission prompts over the control protocol
+		// (mirrors the Python SDK's _configure_can_use_tool).
+		configuredOpts, err := configureCanUseTool(opts)
+		if err != nil {
+			errs <- err
+			return
+		}
+		opts = configuredOpts
 
 		// Convert to transport options
 		transportOpts := convertToTransportOptions(opts)
@@ -311,9 +331,22 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 		}
 
 	End:
-		// Drain any remaining errors?
-		// internal.Query closes both channels when it stops?
-		// q.Close() sets closed flag and closes transport.
+		// Drain errors the read loop delivered before closing rawMessages:
+		// it forwards transport errors first, but the select above may
+		// observe the channel close before picking the buffered error up.
+		// q.Errors() is never closed (by design), so drain non-blockingly.
+		for {
+			select {
+			case err := <-q.Errors():
+				select {
+				case errs <- wrapTransportError(err):
+				case <-ctx.Done():
+					return
+				}
+			default:
+				return
+			}
+		}
 	}()
 
 	return messages, errs
@@ -398,13 +431,13 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 	}
 
 	// Convert SDK MCP servers
-	var sdkServers map[string]*internal.MCPServer
+	var sdkServers map[string]*mcp.Server
 	if opts.MCPServers != nil {
-		sdkServers = make(map[string]*internal.MCPServer)
+		sdkServers = make(map[string]*mcp.Server)
 		for name, config := range opts.MCPServers {
 			if sdkConfig, ok := config.(*MCPSdkServerConfig); ok {
-				if server, ok := sdkConfig.Instance.(*internal.MCPServer); ok {
-					sdkServers[name] = server
+				if sdkConfig.Instance != nil {
+					sdkServers[name] = sdkConfig.Instance
 				}
 			}
 		}
@@ -457,6 +490,7 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 		Agents:                 internalAgents,
 		ExcludeDynamicSections: excludeDynamicSectionsFromOpts(opts),
 		Skills:                 opts.Skills,
+		ForwardSubagentText:    opts.ForwardSubagentText,
 	}, nil
 }
 
@@ -487,6 +521,8 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 		StderrCallback:           opts.StderrCallback,
 		IncludePartialMessages:   opts.IncludePartialMessages,
 		ForkSession:              opts.ForkSession,
+		ResumeSessionAt:          opts.ResumeSessionAt,
+		ResumeDropsTurn:          opts.ResumeDropsTurn,
 		MaxThinkingTokens:        opts.MaxThinkingTokens,
 		OutputFormat:             opts.OutputFormat,
 		EnableFileCheckpointing:  opts.EnableFileCheckpointing,

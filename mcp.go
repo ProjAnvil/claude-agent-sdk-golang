@@ -4,11 +4,18 @@ import (
 	"github.com/ProjAnvil/claude-agent-sdk-golang/internal"
 )
 
+// ToolAnnotations represents hints for tool usage, mirroring
+// claude_agent_sdk.ToolAnnotations. Hints serialize with their camelCase
+// wire names; MaxResultSizeChars is not an MCP field and travels in _meta
+// under "anthropic/maxResultSizeChars" instead of the wire annotations.
+type ToolAnnotations = internal.ToolAnnotations
+
 // SdkMcpTool defines a custom MCP tool.
 type SdkMcpTool struct {
 	Name        string
 	Description string
 	InputSchema interface{}
+	Annotations *ToolAnnotations
 	Handler     func(args map[string]interface{}) (map[string]interface{}, error)
 }
 
@@ -17,6 +24,7 @@ type ToolBuilder struct {
 	name        string
 	description string
 	inputSchema interface{}
+	annotations *ToolAnnotations
 }
 
 // Tool creates a new ToolBuilder for defining an MCP tool.
@@ -46,17 +54,31 @@ func Tool(name, description string, inputSchema interface{}) *ToolBuilder {
 	}
 }
 
+// WithAnnotations sets optional usage hints for the tool (for example
+// MaxResultSizeChars to keep large results inline).
+func (b *ToolBuilder) WithAnnotations(annotations ToolAnnotations) *ToolBuilder {
+	b.annotations = &annotations
+	return b
+}
+
 // Handler sets the handler function for the tool and returns the completed SdkMcpTool.
 func (b *ToolBuilder) Handler(fn func(args map[string]interface{}) (map[string]interface{}, error)) SdkMcpTool {
 	return SdkMcpTool{
 		Name:        b.name,
 		Description: b.description,
 		InputSchema: b.inputSchema,
+		Annotations: b.annotations,
 		Handler:     fn,
 	}
 }
 
 // CreateSdkMcpServer creates an in-process MCP server.
+//
+// The returned config's Instance is a real *mcp.Server
+// (github.com/modelcontextprotocol/go-sdk/mcp) serving the tools under the
+// factory wire semantics; users who need resources, prompts or custom
+// methods may instead build their own *mcp.Server and assign it to
+// MCPSdkServerConfig.Instance directly.
 //
 // Example:
 //
@@ -72,7 +94,7 @@ func (b *ToolBuilder) Handler(fn func(args map[string]interface{}) (map[string]i
 //	    AllowedTools: []string{"mcp__calc__add", "mcp__calc__subtract"},
 //	}
 func CreateSdkMcpServer(name, version string, tools []SdkMcpTool) *MCPSdkServerConfig {
-	// Convert to internal MCP server
+	// Convert to internal MCP tool specs
 	internalTools := make([]internal.MCPTool, len(tools))
 	for i, tool := range tools {
 		tool := tool // capture
@@ -80,20 +102,15 @@ func CreateSdkMcpServer(name, version string, tools []SdkMcpTool) *MCPSdkServerC
 			Name:        tool.Name,
 			Description: tool.Description,
 			InputSchema: tool.InputSchema,
+			Annotations: tool.Annotations,
 			Handler:     tool.Handler,
 		}
-	}
-
-	server := &internal.MCPServer{
-		Name:    name,
-		Version: version,
-		Tools:   internalTools,
 	}
 
 	return &MCPSdkServerConfig{
 		Type:     "sdk",
 		Name:     name,
-		Instance: server,
+		Instance: internal.BuildToolServer(name, version, internalTools),
 	}
 }
 
