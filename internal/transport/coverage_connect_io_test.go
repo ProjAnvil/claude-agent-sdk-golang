@@ -160,7 +160,7 @@ func TestCoverage_ConnectChannelPromptStreamsInput(t *testing.T) {
 // TestCoverage_StreamInputStopsOnWriteError verifies streamInput exits its
 // loop when writing to stdin fails, without draining the channel.
 func TestCoverage_StreamInputStopsOnWriteError(t *testing.T) {
-	tr := &SubprocessTransport{ready: true, stdin: coverageFailWriter{}}
+	tr := &SubprocessTransport{options: &TransportOptions{}, ready: true, stdin: coverageFailWriter{}}
 
 	ch := make(chan map[string]interface{}, 2)
 	ch <- map[string]interface{}{"type": "user", "content": "one"}

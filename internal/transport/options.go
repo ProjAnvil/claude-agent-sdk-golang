@@ -72,6 +72,11 @@ type TransportOptions struct {
 	// The interface uses interface{} here to avoid circular imports with the
 	// claude package; the actual value must satisfy the claude.SessionStore interface.
 	SessionStore interface{}
+	// VerbatimPrompts marks every user message the transport writes as
+	// client_composed so the CLI delivers it as written (see
+	// StampUserMessage, applied in streamInput). Requires CLI 2.1.248+;
+	// older CLIs ignore the field (Connect warns about them).
+	VerbatimPrompts bool
 }
 
 // SystemPromptFile represents a file-based system prompt.

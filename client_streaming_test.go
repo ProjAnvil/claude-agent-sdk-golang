@@ -1000,3 +1000,183 @@ func TestGetMCPStatusNotConnected(t *testing.T) {
 		t.Errorf("Expected CLIConnectionError, got %T", err)
 	}
 }
+
+// --- verbatim_prompts (Python SDK v0.2.165, tests/test_verbatim_prompts.py) ---
+
+// connectVerbatimClient wires a ClaudeSDKClient to a mock transport whose
+// writes are captured, with verbatim_prompts set to enabled. For channel
+// prompts it drains the channel exactly the way SubprocessTransport's
+// streamInput does (stamping each message with the TransportOptions the SDK
+// handed over — the real stamping is covered by
+// TestStreamInputStampsChannelPrompts in internal/transport).
+func connectVerbatimClient(t *testing.T, enabled bool, prompt interface{}) (*ClaudeSDKClient, *syncWriteCapture) {
+	t.Helper()
+	mockT := newMockTransport()
+	handleInitialization(mockT, nil)
+	capture := captureWrites(mockT)
+
+	client := NewClient(&ClaudeAgentOptions{VerbatimPrompts: enabled})
+	client.transportFactory = func(p interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+		if opts.VerbatimPrompts != enabled {
+			t.Errorf("expected transport options VerbatimPrompts=%v, got %v", enabled, opts.VerbatimPrompts)
+		}
+		if ch, ok := p.(chan map[string]interface{}); ok {
+			go func() {
+				for msg := range ch {
+					data, err := json.Marshal(transport.StampUserMessage(msg, opts.VerbatimPrompts))
+					if err != nil {
+						continue
+					}
+					mockT.Write(string(data) + "\n")
+				}
+			}()
+		}
+		return mockT, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx, prompt); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	return client, capture
+}
+
+func TestClientVerbatimPromptsConnectStringPrompt(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		client, capture := connectVerbatimClient(t, enabled, "hello @/etc/hostname")
+		frames := verbatimUserFrames(t, capture.snapshot())
+		if len(frames) != 1 {
+			t.Fatalf("enabled=%v: expected 1 user frame at Connect, got %d", enabled, len(frames))
+		}
+		if enabled {
+			if v, ok := frames[0]["client_composed"].(bool); !ok || !v {
+				t.Errorf("enabled=true: expected client_composed=true, got %v", frames[0]["client_composed"])
+			}
+		} else if _, marked := frames[0]["client_composed"]; marked {
+			t.Errorf("enabled=false: expected no client_composed, got %v", frames[0]["client_composed"])
+		}
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	}
+}
+
+func TestClientVerbatimPromptsConnectStreamedPrompt(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		first := map[string]interface{}{
+			"type":    "user",
+			"message": map[string]interface{}{"role": "user", "content": "one"},
+		}
+		second := map[string]interface{}{
+			"type":            "user",
+			"client_composed": false,
+			"message":         map[string]interface{}{"role": "user", "content": "two"},
+		}
+		promptCh := make(chan map[string]interface{})
+
+		client, capture := connectVerbatimClient(t, enabled, promptCh)
+		promptCh <- first
+		promptCh <- second
+		close(promptCh)
+
+		waitUntil(t, 5*time.Second, func() bool {
+			return len(verbatimUserFrames(t, capture.snapshot())) == 2
+		}, "streamed prompts were not all written to the transport")
+
+		frames := verbatimUserFrames(t, capture.snapshot())
+		for i, frame := range frames {
+			if enabled {
+				if v, ok := frame["client_composed"].(bool); !ok || !v {
+					t.Errorf("enabled=true: frame %d expected client_composed=true, got %v", i, frame["client_composed"])
+				}
+			} else if i == 0 {
+				if _, marked := frame["client_composed"]; marked {
+					t.Errorf("enabled=false: frame %d expected no client_composed, got %v", i, frame["client_composed"])
+				}
+			}
+		}
+		if !enabled {
+			if v, _ := frames[1]["client_composed"].(bool); v {
+				t.Errorf("enabled=false: expected caller's client_composed=false preserved, got %v", frames[1]["client_composed"])
+			}
+		}
+		// The caller's maps are never mutated.
+		if _, marked := first["client_composed"]; marked {
+			t.Errorf("caller's first map must not be mutated, got client_composed=%v", first["client_composed"])
+		}
+		if v, ok := second["client_composed"].(bool); !ok || v {
+			t.Errorf("caller's second map must keep client_composed=false, got %v", second["client_composed"])
+		}
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	}
+}
+
+// TestClientVerbatimPromptsCapturedAtConnect mirrors Python's
+// test_option_is_captured_at_connect: Send and Query stamp with the
+// verbatim_prompts value captured at Connect, so flipping options afterwards
+// must not change the behavior.
+func TestClientVerbatimPromptsCapturedAtConnect(t *testing.T) {
+	t.Run("captured on stays on", func(t *testing.T) {
+		client, capture := connectVerbatimClient(t, true, nil)
+
+		// Flip the options after Connect; behavior must not change.
+		client.options.VerbatimPrompts = false
+
+		ctx := context.Background()
+		if err := client.Send(ctx, "via send"); err != nil {
+			t.Fatalf("Send failed: %v", err)
+		}
+		if _, err := client.Query(ctx, "via query"); err != nil {
+			t.Fatalf("Query failed: %v", err)
+		}
+		// Drain the Query message channel so its forwarder goroutine can exit.
+		msgs, err := client.Query(ctx, "via query two")
+		if err != nil {
+			t.Fatalf("Query failed: %v", err)
+		}
+		client.Close()
+		for range msgs {
+		}
+
+		frames := verbatimUserFrames(t, capture.snapshot())
+		if len(frames) != 3 {
+			t.Fatalf("expected 3 user frames (Send + Query + Query), got %d", len(frames))
+		}
+		for i, frame := range frames {
+			if v, ok := frame["client_composed"].(bool); !ok || !v {
+				t.Errorf("frame %d: expected client_composed=true from the connect-time capture, got %v", i, frame["client_composed"])
+			}
+		}
+	})
+
+	t.Run("captured off stays off", func(t *testing.T) {
+		client, capture := connectVerbatimClient(t, false, nil)
+
+		client.options.VerbatimPrompts = true
+
+		ctx := context.Background()
+		if err := client.Send(ctx, "via send"); err != nil {
+			t.Fatalf("Send failed: %v", err)
+		}
+		msgs, err := client.Query(ctx, "via query")
+		if err != nil {
+			t.Fatalf("Query failed: %v", err)
+		}
+		client.Close()
+		for range msgs {
+		}
+
+		frames := verbatimUserFrames(t, capture.snapshot())
+		if len(frames) != 2 {
+			t.Fatalf("expected 2 user frames (Send + Query), got %d", len(frames))
+		}
+		for i, frame := range frames {
+			if _, marked := frame["client_composed"]; marked {
+				t.Errorf("frame %d: expected no client_composed (option was off at Connect), got %v", i, frame["client_composed"])
+			}
+		}
+	})
+}

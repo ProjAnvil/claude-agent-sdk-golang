@@ -239,7 +239,10 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 				},
 				"parent_tool_use_id": nil,
 			}
-			data, err := json.Marshal(userMessage)
+			// verbatim_prompts: mark the prompt client_composed so the CLI
+			// delivers it as written. Channel prompts are stamped by the
+			// transport's streamInput.
+			data, err := json.Marshal(transport.StampUserMessage(userMessage, opts.VerbatimPrompts))
 			if err != nil {
 				errs <- err
 				return
@@ -530,6 +533,7 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 		Effort:                   opts.Effort,
 		StrictMCPConfig:          opts.StrictMCPConfig,
 		IncludeHookEvents:        opts.IncludeHookEvents,
+		VerbatimPrompts:          opts.VerbatimPrompts,
 	}
 
 	if opts.SessionID != "" {

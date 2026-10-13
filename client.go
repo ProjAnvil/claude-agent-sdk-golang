@@ -21,6 +21,11 @@ type ClaudeSDKClient struct {
 	connected        bool
 	materialized     *MaterializedResume
 	mirrorBatcher    *internal.SimpleMirrorBatcher
+	// verbatimPrompts is VerbatimPrompts captured at Connect (Python
+	// client.py: self._verbatim_prompts) so every prompt in a session is
+	// stamped consistently — Send/Query use this value, not a later-mutated
+	// options field.
+	verbatimPrompts bool
 }
 
 // NewClient creates a new ClaudeSDKClient.
@@ -241,6 +246,10 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 	// at connect time; capture them once here before building the config.
 	excludeDynamicSections := excludeDynamicSectionsFromOpts(c.options)
 	systemPromptSnapshot := systemPromptSnapshotFromOpts(c.options)
+	// Capture verbatim_prompts at connect (Python client.py:205) so Send and
+	// Query stamp with the connect-time value even if the caller mutates
+	// options afterwards.
+	c.verbatimPrompts = c.options.VerbatimPrompts
 	queryConfig := internal.QueryConfig{
 		Transport:              t,
 		IsStreamingMode:        true,
@@ -279,7 +288,10 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 			"parent_tool_use_id": nil,
 			"session_id":         "default",
 		}
-		data, err := json.Marshal(message)
+		// verbatim_prompts: mark the prompt client_composed so the CLI
+		// delivers it as written. Streamed channel prompts are stamped by the
+		// transport's streamInput.
+		data, err := json.Marshal(transport.StampUserMessage(message, c.verbatimPrompts))
 		if err != nil {
 			c.transport.Close()
 			return err
@@ -334,7 +346,9 @@ func (c *ClaudeSDKClient) Send(ctx context.Context, prompt string, opts ...Query
 		"session_id":         qOpts.sessionID,
 	}
 
-	data, err := json.Marshal(message)
+	// Stamp with the verbatim_prompts value captured at Connect, not the
+	// current options field.
+	data, err := json.Marshal(transport.StampUserMessage(message, c.verbatimPrompts))
 	if err != nil {
 		return err
 	}
@@ -369,7 +383,9 @@ func (c *ClaudeSDKClient) Query(ctx context.Context, prompt string, opts ...Quer
 		"session_id":         qOpts.sessionID,
 	}
 
-	data, err := json.Marshal(message)
+	// Stamp with the verbatim_prompts value captured at Connect, not the
+	// current options field.
+	data, err := json.Marshal(transport.StampUserMessage(message, c.verbatimPrompts))
 	if err != nil {
 		return nil, err
 	}

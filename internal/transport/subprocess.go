@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +26,15 @@ const (
 	DefaultMaxBufferSize = 1024 * 1024
 	// MinimumCLIVersion is the minimum supported Claude Code version.
 	MinimumCLIVersion = "2.0.0"
+	// VerbatimPromptsMinimumCLIVersion is the first Claude Code version that
+	// honors `client_composed` on user messages, which
+	// TransportOptions.VerbatimPrompts relies on.
+	VerbatimPromptsMinimumCLIVersion = "2.1.248"
+	// sdkReadsSessionStateEnv asks the CLI for `session_state_changed`
+	// frames marked `sdk_host_only`, which the SDK reads to tell when a run
+	// is over and keeps out of the caller's stream. CLIs that predate it
+	// send no frames. Mirrors Python's _SDK_READS_SESSION_STATE_ENV.
+	sdkReadsSessionStateEnv = "CLAUDE_CODE_SDK_READS_SESSION_STATE"
 )
 
 // cmdExeMetacharacters are the cmd.exe metacharacters (plus the quote
@@ -39,6 +49,105 @@ const cmdExeMetacharacters = `&|<>^%!"`
 // in a skill directory name. U+FEFF is here rather than with the whitespace
 // check because the CLI trims it as whitespace and unicode.IsSpace does not.
 var skillNameInvalidChars = regexp.MustCompile(`[(),\x00-\x1f\x7f-\x9f\x{feff}]`)
+
+// cliVersionPattern matches the first x.y.z version in the CLI's `-v`
+// output (e.g. "2.1.248 (Claude Code)").
+var cliVersionPattern = regexp.MustCompile(`\d+\.\d+\.\d+`)
+
+// runCLIVersionCommand runs `<path> -v` and returns its stdout, bounded by a
+// 2s timeout. It is a package-level variable so tests can substitute a fake
+// instead of needing a real CLI binary.
+var runCLIVersionCommand = func(path string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "-v").Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// StampUserMessage applies TransportOptions.VerbatimPrompts to an outgoing
+// user message: it returns msg unchanged when verbatim is off, and otherwise
+// a shallow copy with client_composed set to true (overwriting any
+// caller-supplied value) so the CLI delivers the text exactly as written —
+// no @path file-mention expansion and no slash-command dispatch. The
+// caller's map is never mutated. Mirrors the Python SDK's stamp_user_message
+// (_internal/query.py); it lives in the transport package because
+// streamInput needs it and internal cannot be imported here.
+func StampUserMessage(msg map[string]interface{}, verbatim bool) map[string]interface{} {
+	if !verbatim {
+		return msg
+	}
+	stamped := make(map[string]interface{}, len(msg)+1)
+	for k, v := range msg {
+		stamped[k] = v
+	}
+	stamped["client_composed"] = true
+	return stamped
+}
+
+// checkCLIVersion probes the CLI's version and warns when it predates the
+// minimum supported version, or — when VerbatimPrompts is on — the first
+// version that honors client_composed. Mirrors Python's _check_claude_version
+// (subprocess_cli.py): the probe is best-effort — every error is swallowed
+// and it can never fail connect.
+func (t *SubprocessTransport) checkCLIVersion() {
+	out, err := runCLIVersionCommand(t.cliPath)
+	if err != nil {
+		return
+	}
+	version := cliVersionPattern.FindString(out)
+	if version == "" {
+		return
+	}
+	if compareCLIVersions(version, MinimumCLIVersion) < 0 {
+		slog.Warn(fmt.Sprintf(
+			"Claude Code version %s at %s is unsupported in the Agent SDK. "+
+				"Minimum required version is %s. "+
+				"Some features may not work correctly.",
+			version, t.cliPath, MinimumCLIVersion))
+	}
+	if t.options.VerbatimPrompts &&
+		compareCLIVersions(version, VerbatimPromptsMinimumCLIVersion) < 0 {
+		slog.Warn(fmt.Sprintf(
+			"verbatim_prompts is enabled, but Claude Code version %s at %s "+
+				"ignores it: prompts will still have @path mentions expanded "+
+				"and slash commands dispatched. Claude Code %s or later is "+
+				"required.",
+			version, t.cliPath, VerbatimPromptsMinimumCLIVersion))
+	}
+}
+
+// compareCLIVersions compares two dot-separated numeric version strings
+// component-wise, returning -1 when a < b, 0 when equal, and 1 when a > b.
+// Missing or non-numeric components count as 0; callers pass either a
+// regex-extracted x.y.z or one of the fixed minimum-version constants, so
+// both sides are always three numeric components in practice.
+func compareCLIVersions(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		var av, bv int
+		if i < len(as) {
+			av, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			bv, _ = strconv.Atoi(bs[i])
+		}
+		if av != bv {
+			if av < bv {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
 
 // SubprocessTransport implements Transport using Claude Code CLI subprocess.
 type SubprocessTransport struct {
@@ -583,6 +692,11 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 
 	t.ready = true
 
+	// Best-effort version probe after the main spawn (Python calls it in
+	// connect): warns on unsupported CLIs and on verbatim_prompts being
+	// ignored, and never fails connect.
+	t.checkCLIVersion()
+
 	go t.readStdout()
 	go t.readStderr()
 
@@ -598,13 +712,18 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 }
 
 // streamInput reads messages from the channel and writes them to stdin.
+// Every user frame is stamped with client_composed when
+// VerbatimPrompts is on (StampUserMessage), covering channel prompts for
+// both Query() and ClaudeSDKClient.Connect, which hand their prompt channel
+// to the transport. Stamping is idempotent, so a caller that also stamps
+// (or a future stamping site upstream) cannot double-mark a message.
 // NOTE: Does NOT close stdin when the channel is drained. Stdin must remain
 // open so the SDK can write MCP control_response messages back to the CLI.
 // Stdin will be closed when Transport.Close() is called.
 func (t *SubprocessTransport) streamInput(ch chan map[string]interface{}) {
 
 	for msg := range ch {
-		data, err := json.Marshal(msg)
+		data, err := json.Marshal(StampUserMessage(msg, t.options.VerbatimPrompts))
 		if err != nil {
 			// Skip invalid messages
 			continue
@@ -918,6 +1037,17 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		}
 	}
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	// Ask the CLI for the session_state_changed frames the SDK reads to tell
+	// when a run is over — unless the caller chose a value for the variable,
+	// in any letter case, in either the inherited process env or options.Env.
+	// Scanning BOTH sources is load-bearing: options.Env is appended after
+	// the inherited env below, so appending "=1" unconditionally would
+	// clobber a caller's "0" opt-out riding in options.Env.
+	// CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS is never set by the SDK; it stays
+	// the caller's own opt-in to seeing the frames.
+	if !sessionStateEnvChosen(env, t.options.Env) {
+		env = append(env, sdkReadsSessionStateEnv+"=1")
+	}
 	for k, v := range t.options.Env {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
@@ -934,6 +1064,30 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	cmd.Env = env
 
 	return cmd
+}
+
+// sessionStateEnvChosen reports whether any entry already names the
+// CLAUDE_CODE_SDK_READS_SESSION_STATE variable, comparing
+// case-insensitively so an opt-out is honored in any letter case: inherited
+// process env entries ("KEY=VALUE" strings) and options.Env keys are both
+// scanned, because Go appends options.Env after the inherited env and an
+// unconditional SDK entry would win positionally over a caller's value.
+func sessionStateEnvChosen(inheritedEnv []string, userEnv map[string]string) bool {
+	for _, entry := range inheritedEnv {
+		key := entry
+		if i := strings.IndexByte(entry, '='); i >= 0 {
+			key = entry[:i]
+		}
+		if strings.ToUpper(key) == sdkReadsSessionStateEnv {
+			return true
+		}
+	}
+	for key := range userEnv {
+		if strings.ToUpper(key) == sdkReadsSessionStateEnv {
+			return true
+		}
+	}
+	return false
 }
 
 // buildMCPConfig builds the MCP configuration JSON.

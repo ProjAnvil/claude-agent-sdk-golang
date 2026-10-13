@@ -2,6 +2,8 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -715,5 +717,236 @@ func TestResultWithNoInflightTasksClosesStdin(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Query() did not complete within 5 seconds")
+	}
+}
+
+// --- verbatim_prompts (Python SDK v0.2.165, tests/test_verbatim_prompts.py) ---
+
+// verbatimUserFrames decodes the captured transport writes and returns the
+// frames of type "user" (initializes control_requests are dropped).
+func verbatimUserFrames(t *testing.T, written []string) []map[string]interface{} {
+	t.Helper()
+	var frames []map[string]interface{}
+	for _, w := range written {
+		var frame map[string]interface{}
+		if err := json.Unmarshal([]byte(w), &frame); err != nil {
+			continue
+		}
+		if frame["type"] == "user" {
+			frames = append(frames, frame)
+		}
+	}
+	return frames
+}
+
+// waitUntil polls cond until it holds or the timeout hits.
+func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal(msg)
+}
+
+func TestQueryVerbatimPromptsStringPrompt(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		originalMakeTransport := makeTransport
+		defer func() { makeTransport = originalMakeTransport }()
+
+		mockTrans := newMockTransport()
+		var written []string
+		handleInitialization(mockTrans, &written)
+
+		makeTransport = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+			if opts.VerbatimPrompts != enabled {
+				t.Errorf("expected transport options VerbatimPrompts=%v, got %v", enabled, opts.VerbatimPrompts)
+			}
+			return mockTrans, nil
+		}
+
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			mockTrans.readCh <- resultFrame("uuid-vp")
+			mockTrans.Close()
+		}()
+
+		opts := &ClaudeAgentOptions{VerbatimPrompts: enabled}
+		messages, errs := Query(context.Background(), "read @/etc/hostname", opts)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for range messages {
+			}
+			for range errs {
+			}
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Query() did not complete within 5 seconds")
+		}
+
+		frames := verbatimUserFrames(t, written)
+		if len(frames) != 1 {
+			t.Fatalf("enabled=%v: expected 1 user frame, got %d (%v)", enabled, len(frames), written)
+		}
+		frame := frames[0]
+		if enabled {
+			if v, ok := frame["client_composed"].(bool); !ok || !v {
+				t.Errorf("enabled=%v: expected client_composed=true on the prompt, got %v", enabled, frame["client_composed"])
+			}
+		} else if _, marked := frame["client_composed"]; marked {
+			t.Errorf("enabled=false: expected no client_composed on the prompt, got %v", frame["client_composed"])
+		}
+		content, _ := frame["message"].(map[string]interface{})
+		if content["content"] != "read @/etc/hostname" {
+			t.Errorf("expected prompt text preserved, got %v", frame)
+		}
+	}
+}
+
+// syncWriteCapture records transport writes from any goroutine safely; the
+// channel-prompt tests drain the prompt channel on a helper goroutine while
+// the test polls, so the capture must be mutex-guarded.
+type syncWriteCapture struct {
+	mu      sync.Mutex
+	written []string
+}
+
+func (c *syncWriteCapture) add(s string) {
+	c.mu.Lock()
+	c.written = append(c.written, s)
+	c.mu.Unlock()
+}
+
+func (c *syncWriteCapture) snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.written...)
+}
+
+// captureWrites wraps a mock transport (already set up for initialization
+// with handleInitialization(m, nil)) so every write is recorded.
+func captureWrites(m *MockTransport) *syncWriteCapture {
+	c := &syncWriteCapture{}
+	orig := m.WriteFunc
+	m.WriteFunc = func(data string) error {
+		c.add(data)
+		if orig != nil {
+			return orig(data)
+		}
+		return nil
+	}
+	return c
+}
+
+// TestQueryVerbatimPromptsChannelPrompt covers the channel form. The real
+// stamping for channel prompts happens in SubprocessTransport.streamInput
+// (covered by TestStreamInputStampsChannelPrompts in internal/transport);
+// this test drains the prompt channel exactly the way the subprocess
+// transport does — stamping each message with the TransportOptions the SDK
+// handed over — so it verifies Query()'s half of the contract: the option is
+// propagated to the transport and every channel prompt carries the stamp.
+func TestQueryVerbatimPromptsChannelPrompt(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		originalMakeTransport := makeTransport
+		defer func() { makeTransport = originalMakeTransport }()
+
+		mockTrans := newMockTransport()
+		handleInitialization(mockTrans, nil)
+		capture := captureWrites(mockTrans)
+
+		makeTransport = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+			if opts.VerbatimPrompts != enabled {
+				t.Errorf("expected transport options VerbatimPrompts=%v, got %v", enabled, opts.VerbatimPrompts)
+			}
+			if ch, ok := prompt.(chan map[string]interface{}); ok {
+				// Mimic SubprocessTransport.streamInput's contract for the
+				// mock: stamp and forward every channel message.
+				go func() {
+					for msg := range ch {
+						data, err := json.Marshal(transport.StampUserMessage(msg, opts.VerbatimPrompts))
+						if err != nil {
+							continue
+						}
+						mockTrans.Write(string(data) + "\n")
+					}
+				}()
+			}
+			return mockTrans, nil
+		}
+
+		first := map[string]interface{}{
+			"type":    "user",
+			"message": map[string]interface{}{"role": "user", "content": "one"},
+		}
+		second := map[string]interface{}{
+			"type":            "user",
+			"client_composed": false,
+			"message":         map[string]interface{}{"role": "user", "content": "two"},
+		}
+		promptCh := make(chan map[string]interface{})
+
+		messages, errs := Query(context.Background(), promptCh, &ClaudeAgentOptions{VerbatimPrompts: enabled})
+
+		promptCh <- first
+		promptCh <- second
+		close(promptCh)
+
+		waitUntil(t, 5*time.Second, func() bool {
+			return len(verbatimUserFrames(t, capture.snapshot())) == 2
+		}, "channel prompts were not all written to the transport")
+
+		go func() {
+			mockTrans.readCh <- resultFrame("uuid-vp-ch")
+			mockTrans.Close()
+		}()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for range messages {
+			}
+			for range errs {
+			}
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Query() did not complete within 5 seconds")
+		}
+
+		frames := verbatimUserFrames(t, capture.snapshot())
+		if len(frames) != 2 {
+			t.Fatalf("enabled=%v: expected 2 user frames, got %d", enabled, len(frames))
+		}
+		for i, frame := range frames {
+			_, marked := frame["client_composed"]
+			if enabled {
+				if v, ok := frame["client_composed"].(bool); !ok || !v {
+					t.Errorf("enabled=true: frame %d expected client_composed=true, got %v", i, frame["client_composed"])
+				}
+			} else if marked && i == 0 {
+				t.Errorf("enabled=false: frame %d expected no client_composed, got %v", i, frame["client_composed"])
+			}
+		}
+		if !enabled {
+			// The caller's explicit value still rides through unchanged.
+			if v, _ := frames[1]["client_composed"].(bool); v {
+				t.Errorf("enabled=false: expected caller's client_composed=false preserved, got %v", frames[1]["client_composed"])
+			}
+		}
+		// The caller's maps are never mutated.
+		if _, marked := first["client_composed"]; marked {
+			t.Errorf("caller's first map must not be mutated, got client_composed=%v", first["client_composed"])
+		}
+		if v, ok := second["client_composed"].(bool); !ok || v {
+			t.Errorf("caller's second map must keep client_composed=false, got %v", second["client_composed"])
+		}
 	}
 }
