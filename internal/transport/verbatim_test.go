@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -277,6 +278,23 @@ func TestCheckCLIVersionWarnings(t *testing.T) {
 			versionOutput:   "not a version at all",
 			wantWarnings:    0,
 		},
+		{
+			// Python anchors re.match on the stripped output: a version
+			// anywhere but the start is not the CLI's version, so the probe
+			// treats the output as unknown — no warnings, no crash.
+			name:            "version not at the start is unknown and silent",
+			verbatimPrompts: true,
+			versionOutput:   "build 2026.10.13\n2.1.100",
+			wantWarnings:    0,
+		},
+		{
+			name:            "leading whitespace is trimmed before the anchored match",
+			verbatimPrompts: true,
+			versionOutput:   "  \n2.1.247 (Claude Code)",
+			wantWarnings:    1,
+			wantContains:    []string{"verbatim_prompts"},
+			wantNotContains: []string{"unsupported"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -320,6 +338,102 @@ func TestCheckCLIVersionProbePath(t *testing.T) {
 	tr.checkCLIVersion()
 	if probedPath != tr.cliPath {
 		t.Errorf("expected probe to run on %q, got %q", tr.cliPath, probedPath)
+	}
+}
+
+// TestCheckCLIVersionSkipEnvEscapeHatch mirrors Python's gate: a non-empty
+// CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK disables the version probe entirely —
+// the probe command never runs and nothing is logged. An empty value or an
+// unset variable still probes (os.environ.get is falsy in both cases).
+func TestCheckCLIVersionSkipEnvEscapeHatch(t *testing.T) {
+	probeCalls := 0
+	orig := runCLIVersionCommand
+	runCLIVersionCommand = func(path string) (string, error) {
+		probeCalls++
+		return "1.9.0 (Claude Code)", nil // old enough to warn on both minima
+	}
+	t.Cleanup(func() { runCLIVersionCommand = orig })
+
+	run := func(t *testing.T) (int, string) {
+		t.Helper()
+		probeCalls = 0
+		buf := captureSlogWarnings(t)
+		tr := newTestTransport(t, &TransportOptions{VerbatimPrompts: true})
+		tr.checkCLIVersion()
+		return probeCalls, buf.String()
+	}
+
+	t.Run("set non-empty skips the probe entirely", func(t *testing.T) {
+		t.Setenv(skipVersionCheckEnv, "1")
+		calls, out := run(t)
+		if calls != 0 {
+			t.Errorf("expected no probe run with %s set, got %d call(s)", skipVersionCheckEnv, calls)
+		}
+		if out != "" {
+			t.Errorf("expected no warnings with the probe skipped, got: %s", out)
+		}
+	})
+	t.Run("set to an empty string still probes", func(t *testing.T) {
+		t.Setenv(skipVersionCheckEnv, "")
+		calls, out := run(t)
+		if calls != 1 {
+			t.Errorf("expected the probe to run with %s empty, got %d call(s)", skipVersionCheckEnv, calls)
+		}
+		if !strings.Contains(out, "unsupported") {
+			t.Errorf("expected the unsupported-version warning with %s empty, got: %s", skipVersionCheckEnv, out)
+		}
+	})
+	t.Run("unset still probes", func(t *testing.T) {
+		unsetEnvForTest(t, skipVersionCheckEnv)
+		calls, _ := run(t)
+		if calls != 1 {
+			t.Errorf("expected the probe to run with %s unset, got %d call(s)", skipVersionCheckEnv, calls)
+		}
+	})
+}
+
+// writeProbeScript writes an executable POSIX sh script standing in for the
+// CLI at path `-v` probe time and returns its path.
+func writeProbeScript(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-cli")
+	script := "#!/bin/sh\n" + body + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing probe script: %v", err)
+	}
+	return path
+}
+
+// TestRunCLIVersionCommandBoundsOutput verifies the probe reads at most 8 KiB
+// of stdout, so a binary parked at the CLI path cannot inflate SDK memory for
+// the probe's 2s lifetime. The fake writes 12000 bytes — above the cap but
+// below any pipe buffer, so it exits immediately and Wait stays clean.
+func TestRunCLIVersionCommandBoundsOutput(t *testing.T) {
+	script := writeProbeScript(t, `printf '2.1.248\n'; head -c 12000 /dev/zero | tr '\0' A`)
+	out, err := runCLIVersionCommand(script)
+	if err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	if len(out) != 8*1024 {
+		t.Errorf("expected stdout capped at %d bytes, got %d", 8*1024, len(out))
+	}
+	if !strings.HasPrefix(out, "2.1.248") {
+		t.Errorf("expected the first bytes of stdout to survive the cap, got %q", out[:min(32, len(out))])
+	}
+}
+
+// TestRunCLIVersionCommandStripsCLAUDECODE verifies the probe child gets the
+// same env contract as the real child (buildCommand): CLAUDECODE never
+// reaches it, so a probe spawned from inside Claude Code does not look nested.
+func TestRunCLIVersionCommandStripsCLAUDECODE(t *testing.T) {
+	t.Setenv("CLAUDECODE", "1")
+	script := writeProbeScript(t, `printf '%s\n' "${CLAUDECODE-unset}"`)
+	out, err := runCLIVersionCommand(script)
+	if err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "unset" {
+		t.Errorf("expected CLAUDECODE stripped from the probe env, child saw %q", got)
 	}
 }
 

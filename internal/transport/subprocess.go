@@ -35,6 +35,10 @@ const (
 	// is over and keeps out of the caller's stream. CLIs that predate it
 	// send no frames. Mirrors Python's _SDK_READS_SESSION_STATE_ENV.
 	sdkReadsSessionStateEnv = "CLAUDE_CODE_SDK_READS_SESSION_STATE"
+	// skipVersionCheckEnv mirrors Python's CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK
+	// (subprocess_cli.py): set to any non-empty value, it disables the
+	// connect-time CLI version probe entirely.
+	skipVersionCheckEnv = "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"
 )
 
 // cmdExeMetacharacters are the cmd.exe metacharacters (plus the quote
@@ -50,9 +54,11 @@ const cmdExeMetacharacters = `&|<>^%!"`
 // check because the CLI trims it as whitespace and unicode.IsSpace does not.
 var skillNameInvalidChars = regexp.MustCompile(`[(),\x00-\x1f\x7f-\x9f\x{feff}]`)
 
-// cliVersionPattern matches the first x.y.z version in the CLI's `-v`
-// output (e.g. "2.1.248 (Claude Code)").
-var cliVersionPattern = regexp.MustCompile(`\d+\.\d+\.\d+`)
+// cliVersionPattern matches an x.y.z version at the very start of the CLI's
+// `-v` output (e.g. "2.1.248 (Claude Code)"). Python anchors the same pattern
+// with re.match on the stripped output, so a version appearing anywhere other
+// than the beginning is not the CLI's version.
+var cliVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+`)
 
 // runCLIVersionCommand runs `<path> -v` and returns its stdout, bounded by a
 // 2s timeout. It is a package-level variable so tests can substitute a fake
@@ -60,9 +66,28 @@ var cliVersionPattern = regexp.MustCompile(`\d+\.\d+\.\d+`)
 var runCLIVersionCommand = func(path string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "-v").Output()
+	cmd := exec.CommandContext(ctx, path, "-v")
+	// Same env contract as the real child (buildCommand): the probe child
+	// must not see CLAUDECODE and believe it runs inside a Claude Code
+	// parent. Nothing from options.Env is applied — Python's probe inherits
+	// the parent env otherwise unchanged.
+	cmd.Env = withoutCLAUDECODE(os.Environ())
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	// 8 KiB is far beyond any version string: a binary parked at the CLI
+	// path cannot inflate SDK memory for the probe's 2s lifetime.
+	out, readErr := io.ReadAll(io.LimitReader(stdout, 8*1024))
+	waitErr := cmd.Wait()
+	if readErr != nil {
+		return "", readErr
+	}
+	if waitErr != nil {
+		return "", waitErr
 	}
 	return string(out), nil
 }
@@ -90,14 +115,20 @@ func StampUserMessage(msg map[string]interface{}, verbatim bool) map[string]inte
 // checkCLIVersion probes the CLI's version and warns when it predates the
 // minimum supported version, or — when VerbatimPrompts is on — the first
 // version that honors client_composed. Mirrors Python's _check_claude_version
-// (subprocess_cli.py): the probe is best-effort — every error is swallowed
-// and it can never fail connect.
+// (subprocess_cli.py): the probe is gated on CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK
+// being unset/empty, best-effort — every error is swallowed and it can never
+// fail connect.
 func (t *SubprocessTransport) checkCLIVersion() {
+	if v, ok := os.LookupEnv(skipVersionCheckEnv); ok && v != "" {
+		return
+	}
 	out, err := runCLIVersionCommand(t.cliPath)
 	if err != nil {
 		return
 	}
-	version := cliVersionPattern.FindString(out)
+	// Python anchors re.match on the stripped output: the x.y.z version must
+	// lead, otherwise the output is treated as an unknown version.
+	version := cliVersionPattern.FindString(strings.TrimSpace(out))
 	if version == "" {
 		return
 	}
@@ -1032,12 +1063,7 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	// Set environment: inherit → default ENTRYPOINT → user env → SDK required.
 	// Filter out CLAUDECODE so SDK-spawned subprocesses don't think
 	// they're running inside a Claude Code parent.
-	var env []string
-	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "CLAUDECODE=") {
-			env = append(env, e)
-		}
-	}
+	env := withoutCLAUDECODE(os.Environ())
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
 	// Ask the CLI for the session_state_changed frames the SDK reads to tell
 	// when a run is over — unless the caller chose a value for the variable,
@@ -1066,6 +1092,20 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	cmd.Env = env
 
 	return cmd
+}
+
+// withoutCLAUDECODE returns env with any CLAUDECODE entry removed, so
+// SDK-spawned subprocesses don't think they're running inside a Claude Code
+// parent. Both the real child (buildCommand) and the connect-time version
+// probe use it.
+func withoutCLAUDECODE(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, "CLAUDECODE=") {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
 
 // sessionStateEnvChosen reports whether any entry already names the
