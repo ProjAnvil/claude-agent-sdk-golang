@@ -261,9 +261,11 @@ func TestQueryDeadlockRegression(t *testing.T) {
 	}
 
 	// Send messages WITHOUT calling mockTrans.Close() — the key difference
-	// from existing tests. The transport only closes after EndInput().
+	// from existing tests. The transport only closes after EndInput(). The
+	// frames are fed immediately (readCh is buffered): stdin now closes
+	// right after the prompt write when no bidirectional needs exist, which
+	// shuts the mock down 10ms later.
 	go func() {
-		time.Sleep(20 * time.Millisecond)
 		mockTrans.readCh <- map[string]interface{}{
 			"type": "assistant",
 			"message": map[string]interface{}{
@@ -358,7 +360,6 @@ func TestQuerySyncDeadlockRegression(t *testing.T) {
 	}
 
 	go func() {
-		time.Sleep(20 * time.Millisecond)
 		mockTrans.readCh <- map[string]interface{}{
 			"type": "assistant",
 			"message": map[string]interface{}{
@@ -432,118 +433,39 @@ func resultFrame(uuid string) map[string]interface{} {
 	}
 }
 
-// TestTaskLifecycleTracker unit-tests the tracker transitions, mirroring
-// python test_track_task_lifecycle_unit and
-// test_shell_and_monitor_tasks_never_defer_the_close (#1088).
-func TestTaskLifecycleTracker(t *testing.T) {
-	tracker := newTaskLifecycleTracker()
-
-	// task_started with a deferring task_type adds the task.
-	tracker.track(taskStartedFrame("task-1", "local_agent"))
-	if !tracker.hasInflight() {
-		t.Error("Expected task-1 in flight after task_started(local_agent)")
+// sessionStateFrame returns a system/session_state_changed frame; marked
+// frames (sdk_host_only) are the ones the CLI sends only because the SDK's
+// transport asked for them (mirrors _session_state in python test_query.py).
+func sessionStateFrame(state string, sdkHostOnly bool) map[string]interface{} {
+	frame := map[string]interface{}{
+		"type":       "system",
+		"subtype":    "session_state_changed",
+		"state":      state,
+		"uuid":       "uuid-state-" + state,
+		"session_id": "test",
 	}
-
-	// Non-terminal patch does not clear the task.
-	tracker.track(map[string]interface{}{
-		"subtype": "task_updated",
-		"task_id": "task-1",
-		"patch":   map[string]interface{}{"status": "running"},
-	})
-	if !tracker.hasInflight() {
-		t.Error("Non-terminal task_updated patch must not clear the task")
+	if sdkHostOnly {
+		frame["sdk_host_only"] = true
 	}
+	return frame
+}
 
-	// Patch without a map payload is ignored.
-	tracker.track(map[string]interface{}{
-		"subtype": "task_updated",
-		"task_id": "task-1",
-		"patch":   nil,
-	})
-	if !tracker.hasInflight() {
-		t.Error("task_updated with nil patch must not clear the task")
-	}
-
-	// Terminal patch clears it.
-	tracker.track(map[string]interface{}{
-		"subtype": "task_updated",
-		"task_id": "task-1",
-		"patch":   map[string]interface{}{"status": "completed"},
-	})
-	if tracker.hasInflight() {
-		t.Error("Terminal task_updated patch must clear the task")
-	}
-
-	// Draining an unknown/already-cleared task is a no-op, not an error.
-	tracker.track(map[string]interface{}{
-		"subtype":   "task_notification",
-		"task_id":   "task-1",
-		"status":    "completed",
-		"task_type": "local_agent",
-	})
-	if tracker.hasInflight() {
-		t.Error("Draining an unknown task must be a no-op")
-	}
-
-	// Frames without a task_id are ignored.
-	tracker.track(map[string]interface{}{"subtype": "task_started", "task_type": "local_agent"})
-	if tracker.hasInflight() {
-		t.Error("Frame without task_id must be ignored")
-	}
-
-	// Only delegated agent work defers the close: background shells, monitors
-	// and teammates can run forever, so tracking one would withhold the stdin
-	// close permanently rather than briefly (#1088).
-	for _, taskType := range []string{"local_bash", "monitor_mcp", "monitor_ws", "in_process_teammate"} {
-		tracker.track(taskStartedFrame(taskType+"-1", taskType))
-		if tracker.hasInflight() {
-			t.Errorf("task_started(%s) must not be tracked", taskType)
-		}
-	}
-
-	// A start frame with no task_type at all is not assumed to be an agent.
-	tracker.track(map[string]interface{}{"subtype": "task_started", "task_id": "unknown-1"})
-	if tracker.hasInflight() {
-		t.Error("task_started without task_type must not be tracked")
-	}
-
-	// Agent work still defers, alongside the ignored shell.
-	tracker.track(taskStartedFrame("task-2", "local_workflow"))
-	if !tracker.hasInflight() {
-		t.Error("Expected task-2 in flight after task_started(local_workflow)")
-	}
-
-	// task_notification drains it.
-	tracker.track(map[string]interface{}{
-		"subtype":   "task_notification",
-		"task_id":   "task-2",
-		"status":    "completed",
-		"task_type": "local_workflow",
-	})
-	if tracker.hasInflight() {
-		t.Error("task_notification must clear the task")
-	}
-
-	// background_tasks_changed is deliberately ignored in both directions: it
-	// cannot add, and not even an empty snapshot clears a tracked task (#1088).
-	tracker.track(map[string]interface{}{
-		"type":    "system",
-		"subtype": "background_tasks_changed",
-		"tasks": []interface{}{
-			map[string]interface{}{"task_id": "task-3", "task_type": "local_agent"},
+// runEndHookOptions mirrors python _run_query_over, which always runs query()
+// with a PreToolUse hook so the run-end state machine has bidirectional
+// needs and holds stdin until the run's end (idle-after-result, or the first
+// result with no tracked task from a CLI that reports no state).
+func runEndHookOptions() *ClaudeAgentOptions {
+	return &ClaudeAgentOptions{
+		Hooks: map[HookEvent][]HookMatcher{
+			HookEventPreToolUse: {{
+				Matcher: ".*",
+				Hooks: []HookCallback{
+					func(input HookInput, toolUseID string, ctx HookContext) (HookOutput, error) {
+						return HookOutput{}, nil
+					},
+				},
+			}},
 		},
-	})
-	if tracker.hasInflight() {
-		t.Error("background_tasks_changed must not add tasks")
-	}
-	tracker.track(taskStartedFrame("task-4", "local_agent"))
-	tracker.track(map[string]interface{}{
-		"type":    "system",
-		"subtype": "background_tasks_changed",
-		"tasks":   []interface{}{},
-	})
-	if !tracker.hasInflight() {
-		t.Error("background_tasks_changed must not clear tracked tasks")
 	}
 }
 
@@ -617,7 +539,7 @@ func TestResultWithInflightTaskKeepsStdinOpen(t *testing.T) {
 			}()
 
 			ctx := context.Background()
-			messages, errs := Query(ctx, "Hello", nil)
+			messages, errs := Query(ctx, "Hello", runEndHookOptions())
 
 			var resultCount int
 			done := make(chan struct{})
@@ -695,7 +617,9 @@ func TestResultWithNoInflightTasksClosesStdin(t *testing.T) {
 	}()
 
 	ctx := context.Background()
-	messages, errs := Query(ctx, "Hello", nil)
+	// A hook gives the query bidirectional needs, so stdin is held until the
+	// result with no tracked task in flight (python _run_query_over shape).
+	messages, errs := Query(ctx, "Hello", runEndHookOptions())
 
 	done := make(chan struct{})
 	go func() {
@@ -845,13 +769,13 @@ func captureWrites(m *MockTransport) *syncWriteCapture {
 	return c
 }
 
-// TestQueryVerbatimPromptsChannelPrompt covers the channel form. The real
-// stamping for channel prompts happens in SubprocessTransport.streamInput
-// (covered by TestStreamInputStampsChannelPrompts in internal/transport);
-// this test drains the prompt channel exactly the way the subprocess
-// transport does — stamping each message with the TransportOptions the SDK
-// handed over — so it verifies Query()'s half of the contract: the option is
-// propagated to the transport and every channel prompt carries the stamp.
+// TestQueryVerbatimPromptsChannelPrompt covers the channel form through the
+// REAL StreamInput drain: Query() hands the transport a pre-closed
+// placeholder channel (so the transport's own streamInput is a no-op) and
+// streams the caller's channel through internal.Query.StreamInput, which
+// stamps each message with the configured verbatim_prompts. This is the
+// end-to-end composition of the stamping with the rerouted drain (follow-up
+// owed from the Tasks 3+4 verbatim port).
 func TestQueryVerbatimPromptsChannelPrompt(t *testing.T) {
 	for _, enabled := range []bool{true, false} {
 		originalMakeTransport := makeTransport
@@ -865,18 +789,14 @@ func TestQueryVerbatimPromptsChannelPrompt(t *testing.T) {
 			if opts.VerbatimPrompts != enabled {
 				t.Errorf("expected transport options VerbatimPrompts=%v, got %v", enabled, opts.VerbatimPrompts)
 			}
-			if ch, ok := prompt.(chan map[string]interface{}); ok {
-				// Mimic SubprocessTransport.streamInput's contract for the
-				// mock: stamp and forward every channel message.
-				go func() {
-					for msg := range ch {
-						data, err := json.Marshal(transport.StampUserMessage(msg, opts.VerbatimPrompts))
-						if err != nil {
-							continue
-						}
-						mockTrans.Write(string(data) + "\n")
-					}
-				}()
+			// The reroute: the transport must receive a pre-closed
+			// placeholder channel, never the caller's prompt channel.
+			ch, ok := prompt.(chan map[string]interface{})
+			if !ok {
+				t.Fatalf("expected a channel prompt for the transport, got %T", prompt)
+			}
+			if _, open := <-ch; open {
+				t.Error("transport prompt channel must be pre-closed (placeholder for StreamInput)")
 			}
 			return mockTrans, nil
 		}
@@ -923,7 +843,7 @@ func TestQueryVerbatimPromptsChannelPrompt(t *testing.T) {
 
 		frames := verbatimUserFrames(t, capture.snapshot())
 		if len(frames) != 2 {
-			t.Fatalf("enabled=%v: expected 2 user frames, got %d", enabled, len(frames))
+			t.Fatalf("enabled=%v: expected 2 user frames, got %d (%v)", enabled, len(frames), capture.snapshot())
 		}
 		for i, frame := range frames {
 			_, marked := frame["client_composed"]
@@ -948,5 +868,88 @@ func TestQueryVerbatimPromptsChannelPrompt(t *testing.T) {
 		if v, ok := second["client_composed"].(bool); !ok || v {
 			t.Errorf("caller's second map must keep client_composed=false, got %v", second["client_composed"])
 		}
+	}
+}
+
+// TestQueryStdinClosesOnlyAfterIdleWithHook is the public-level regression
+// for the run-end state machine (#1190): with a hook configured (bidirectional
+// needs), a result while the CLI still reports "running" must not close
+// stdin; the marked session_state_changed frames must never reach the
+// caller; and stdin closes at the idle after the result.
+func TestQueryStdinClosesOnlyAfterIdleWithHook(t *testing.T) {
+	originalMakeTransport := makeTransport
+	defer func() { makeTransport = originalMakeTransport }()
+
+	mockTrans := newMockTransport()
+	handleInitialization(mockTrans, nil)
+
+	endInputCalled := make(chan struct{})
+	mockTrans.EndInputFunc = func() error {
+		select {
+		case <-endInputCalled:
+		default:
+			close(endInputCalled)
+		}
+		return nil
+	}
+
+	makeTransport = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+		return mockTrans, nil
+	}
+
+	// proceed gates the idle phase: the test closes it after asserting stdin
+	// stayed open across the result.
+	proceed := make(chan struct{})
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		mockTrans.readCh <- sessionStateFrame("running", true)
+		mockTrans.readCh <- resultFrame("uuid-r1")
+		<-proceed
+		mockTrans.readCh <- sessionStateFrame("idle", true)
+	}()
+
+	ctx := context.Background()
+	messages, errs := Query(ctx, "Hello", runEndHookOptions())
+
+	var sawStateFrame bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for msg := range messages {
+			if sys, ok := msg.(*SystemMessage); ok && sys.Subtype == "session_state_changed" {
+				sawStateFrame = true
+			}
+			if _, ok := msg.(*ResultMessage); ok {
+				// The result arrived with the CLI still "running": give the
+				// waiter a chance to (wrongly) close stdin, then assert it
+				// did not and let the idle phase run.
+				time.Sleep(50 * time.Millisecond)
+				select {
+				case <-endInputCalled:
+					t.Error("EndInput called at the result while the CLI reports running")
+				default:
+				}
+				close(proceed)
+			}
+		}
+		for range errs {
+		}
+	}()
+
+	select {
+	case <-endInputCalled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("EndInput was never called after idle")
+	}
+	mockTrans.Close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Query() did not complete within 5 seconds")
+	}
+
+	if sawStateFrame {
+		t.Error("a marked session_state_changed frame leaked to the caller")
 	}
 }

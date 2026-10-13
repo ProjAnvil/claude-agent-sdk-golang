@@ -740,12 +740,29 @@ func TestQueryResultWithInflightTask(t *testing.T) {
 	defer cleanupMakeTransport(original)
 
 	mockT := newMockTransport()
+	// EndInput while the transport is still open is the bug this test guards;
+	// once the reader is gone (transport closed) waking the waiter is the
+	// documented behavior, so only closes before that are recorded.
 	endInputCalled := make(chan struct{}, 1)
+	transportClosed := make(chan struct{})
 	mockT.EndInputFunc = func() error {
 		select {
-		case endInputCalled <- struct{}{}:
+		case <-transportClosed:
 		default:
+			select {
+			case endInputCalled <- struct{}{}:
+			default:
+			}
 		}
+		return nil
+	}
+	mockT.CloseFunc = func() error {
+		select {
+		case <-transportClosed:
+		default:
+			close(transportClosed)
+		}
+		mockT.shutdown()
 		return nil
 	}
 	handleInitialization(mockT, nil)
@@ -778,7 +795,10 @@ func TestQueryResultWithInflightTask(t *testing.T) {
 		mockT.Close()
 	}()
 
-	messages, errs := Query(context.Background(), "hi", nil)
+	// A hook gives the query bidirectional needs so stdin is held past the
+	// prompt write (python _run_query_over shape); the inflight task must
+	// still keep it open past the result.
+	messages, errs := Query(context.Background(), "hi", runEndHookOptions())
 	msgs, errorsOut := drainQueryChannels(t, messages, errs)
 	if len(errorsOut) != 0 {
 		t.Fatalf("unexpected errors: %v", errorsOut)

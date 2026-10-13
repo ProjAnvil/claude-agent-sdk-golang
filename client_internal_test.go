@@ -33,6 +33,9 @@ type MockTransport struct {
 	done    chan struct{}
 
 	closeOnce sync.Once
+
+	endInputMu    sync.Mutex
+	endInputCount int
 }
 
 func (m *MockTransport) Connect(ctx context.Context) error {
@@ -64,10 +67,20 @@ func (m *MockTransport) Errors() <-chan error {
 }
 
 func (m *MockTransport) EndInput() error {
+	m.endInputMu.Lock()
+	m.endInputCount++
+	m.endInputMu.Unlock()
 	if m.EndInputFunc != nil {
 		return m.EndInputFunc()
 	}
 	return nil
+}
+
+// endInputCalls reports how many times EndInput (stdin close) was invoked.
+func (m *MockTransport) endInputCalls() int {
+	m.endInputMu.Lock()
+	defer m.endInputMu.Unlock()
+	return m.endInputCount
 }
 
 func (m *MockTransport) Close() error {

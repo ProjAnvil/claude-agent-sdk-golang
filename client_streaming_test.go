@@ -98,27 +98,26 @@ func TestConnectWithChannel(t *testing.T) {
 		t.Fatalf("Connect failed: %v", err)
 	}
 
-	if capturedPrompt != ch {
-		t.Errorf("Expected prompt channel to be passed")
+	// Channel prompts are rerouted through the internal Query's StreamInput:
+	// the transport gets a pre-closed placeholder channel, never the
+	// caller's channel.
+	factoryCh, ok := capturedPrompt.(chan map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected channel prompt for the transport, got %T", capturedPrompt)
+	}
+	if factoryCh == ch {
+		t.Error("Transport must not receive the caller's prompt channel")
+	}
+	if _, open := <-factoryCh; open {
+		t.Error("Transport prompt channel must be pre-closed")
 	}
 }
 
 func TestQueryWithChannel(t *testing.T) {
 	mockT := createMockTransport()
 
-	receivedMessages := make(chan map[string]interface{}, 10)
-	done := make(chan bool)
-
 	client := NewClient(nil)
 	client.transportFactory = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
-		if ch, ok := prompt.(chan map[string]interface{}); ok {
-			go func() {
-				defer close(done)
-				for msg := range ch {
-					receivedMessages <- msg
-				}
-			}()
-		}
 		return mockT, nil
 	}
 
@@ -129,34 +128,47 @@ func TestQueryWithChannel(t *testing.T) {
 		t.Fatalf("Connect failed: %v", err)
 	}
 
+	// The client's StreamInput drains the channel and writes each message to
+	// the transport; the transport itself got a pre-closed placeholder. The
+	// feeder's maps are bare {"role","content"} frames, so capture whatever
+	// JSON is written once the handshake is done.
+	receivedMessages := make(chan map[string]interface{}, 10)
+	mockT.WriteFunc = func(data string) error {
+		var frame map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &frame); err == nil {
+			if _, isControl := frame["request_id"]; !isControl && frame["type"] != "control_request" {
+				receivedMessages <- frame
+			}
+		}
+		return nil
+	}
+
 	go func() {
 		ch <- map[string]interface{}{"role": "user", "content": "First"}
 		ch <- map[string]interface{}{"role": "user", "content": "Second"}
 		close(ch)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(1 * time.Second):
-		t.Fatal("Timeout waiting for channel processing")
-	}
-
-	close(receivedMessages)
 	var msgs []map[string]interface{}
-	for msg := range receivedMessages {
-		msgs = append(msgs, msg)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(msgs) < 2 {
+		select {
+		case msg := <-receivedMessages:
+			msgs = append(msgs, msg)
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 
 	if len(msgs) != 2 {
-		t.Errorf("Expected 2 messages, got %d", len(msgs))
-	} else {
-		if content, ok := msgs[0]["content"].(string); !ok || content != "First" {
-			t.Errorf("Expected content 'First', got '%v'", msgs[0]["content"])
-		}
-		if content, ok := msgs[1]["content"].(string); !ok || content != "Second" {
-			t.Errorf("Expected content 'Second', got '%v'", msgs[1]["content"])
-		}
+		t.Fatalf("Expected 2 messages streamed through StreamInput, got %d", len(msgs))
 	}
+	if content, ok := msgs[0]["content"].(string); !ok || content != "First" {
+		t.Errorf("Expected content 'First', got '%v'", msgs[0]["content"])
+	}
+	if content, ok := msgs[1]["content"].(string); !ok || content != "Second" {
+		t.Errorf("Expected content 'Second', got '%v'", msgs[1]["content"])
+	}
+	client.Close()
 }
 
 func TestReceiveResponseNotConnected(t *testing.T) {

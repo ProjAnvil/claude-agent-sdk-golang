@@ -62,105 +62,16 @@ func wrapTransportError(err error) error {
 	return err
 }
 
-// deferringTaskTypes holds the task types whose completion runs a follow-up
-// turn, and which therefore may still need the control channel after the
-// turn's result frame.
-//
-// This mirrors the set the CLI itself holds a result back for, which is
-// narrower than its notion of "delegated agent work". The types left out are
-// left out on purpose, and none of them is merely an oversight:
-//   - background shells and monitors run indefinitely by design, so deferring
-//     the close on one withholds it forever rather than briefly;
-//   - teammates are long-lived too — their status stays running for their whole
-//     lifetime, so they never settle the ledger;
-//   - remote agents can be long-running monitors the CLI likewise refuses to
-//     wait on.
-//
-// Anything added here must be a type that reliably reaches a terminal status,
-// or it will hang the query (see taskLifecycleTracker.track).
-var deferringTaskTypes = map[string]bool{
-	"local_agent":    true,
-	"local_workflow": true,
-}
-
-// taskLifecycleTracker tracks in-flight tasks from "system" task lifecycle
-// frames so a result frame can tell "one turn ended" apart from "the run is
-// done" (see #1088).
-//
-// task_started marks a task in flight; task_notification or a task_updated
-// patch with a terminal status clears it. Terminal completion can arrive as
-// either frame (not every terminal task emits a notification), so both are
-// handled; deleting from a map keeps the pair idempotent.
-//
-// This is a mitigation, not a complete answer to #1088. An empty set means
-// "nothing we know of is running", which is not the same as "the run is
-// over": a task that settles *before* the turn's result frame leaves the set
-// empty at that result, so stdin closes even though the completion may still
-// wake the parent for a continuation turn. No ledger can close that gap,
-// because the ledger cannot distinguish a settled task whose continuation is
-// pending from no work at all — that needs a run-boundary signal from the CLI
-// rather than an inference from task bookkeeping. What this does fix is the
-// common ordering, where the task outlives the turn that spawned it.
-//
-// Only delegated agent work is tracked (deferringTaskTypes). A background
-// *shell* — Bash(run_in_background=true) on a dev server or tail -f — is also
-// reported through these frames, but it may never reach a terminal status,
-// and the CLI in stream-json mode only exits on stdin EOF. Tracking one would
-// therefore withhold the close forever rather than briefly. Agent tasks are
-// the ones whose completion wakes the parent for the follow-up turn this
-// relies on; shells and monitors are bounded by the CLI's own post-close
-// cleanup instead.
-//
-// background_tasks_changed is deliberately *not* consumed, in either
-// direction. Its payload is the live *background* set, while a subagent is
-// registered in the foreground and only flips to backgrounded later, without
-// a second task_started. So the snapshot omits tracked work that is still
-// running: narrowing against it would drop an agent that goes on to outlive
-// its turn, which is the very close-too-early bug this tracker exists to
-// prevent. Widening from it is no better — the snapshot spans every
-// background task type and carries nothing marking an observer agent, whose
-// start and terminal frames are both suppressed, so it could admit an id no
-// later frame ever clears. The lifecycle frames are the only self-consistent
-// source here (see #1088).
-//
-// Not safe for concurrent use; the Query message loop is single-goroutine.
-type taskLifecycleTracker struct {
-	inflightTasks map[string]bool
-}
-
-func newTaskLifecycleTracker() *taskLifecycleTracker {
-	return &taskLifecycleTracker{inflightTasks: make(map[string]bool)}
-}
-
-// track consumes one raw "system" frame, updating the in-flight task set.
-// Frames without a task_id, and non-lifecycle subtypes, are ignored.
-func (t *taskLifecycleTracker) track(message map[string]interface{}) {
-	subtype, _ := message["subtype"].(string)
-	taskID, _ := message["task_id"].(string)
-	if taskID == "" {
-		return
+// runEndCeilingForQuery maps the env-parsed run-end ceiling onto
+// internal.QueryConfig.RunEndCeilingMS. internal.RunEndCeilingMS returns 0
+// for "no limit", but NewQuery treats 0 as "unset" (default 10 minutes), so
+// the unlimited case crosses as a negative, which armRunEndCeiling likewise
+// treats as "never arm" (Python: run_end_ceiling_ms <= 0).
+func runEndCeilingForQuery(opts *ClaudeAgentOptions) int {
+	if ceiling := internal.RunEndCeilingMS(opts.Env); ceiling != 0 {
+		return ceiling
 	}
-	switch subtype {
-	case "task_started":
-		if taskType, _ := message["task_type"].(string); deferringTaskTypes[taskType] {
-			t.inflightTasks[taskID] = true
-		}
-	case "task_notification":
-		delete(t.inflightTasks, taskID)
-	case "task_updated":
-		var status string
-		if patch, ok := message["patch"].(map[string]interface{}); ok {
-			status, _ = patch["status"].(string)
-		}
-		if TerminalTaskStatuses[status] {
-			delete(t.inflightTasks, taskID)
-		}
-	}
-}
-
-// hasInflight reports whether any tracked task is still running.
-func (t *taskLifecycleTracker) hasInflight() bool {
-	return len(t.inflightTasks) > 0
+	return -1
 }
 
 // Query performs a one-shot query to Claude Code.
@@ -192,8 +103,22 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 		// Convert to transport options
 		transportOpts := convertToTransportOptions(opts)
 
+		// Channel prompts are rerouted through the internal Query's
+		// StreamInput, which stamps each message (verbatim prompts) and
+		// closes stdin at the end of the run, so the transport itself gets a
+		// pre-closed placeholder channel whose own streamInput drain is a
+		// no-op.
+		var promptCh chan map[string]interface{}
+		transportPrompt := prompt
+		if ch, ok := prompt.(chan map[string]interface{}); ok {
+			promptCh = ch
+			placeholder := make(chan map[string]interface{})
+			close(placeholder)
+			transportPrompt = placeholder
+		}
+
 		// Create transport
-		t, err := makeTransport(prompt, transportOpts)
+		t, err := makeTransport(transportPrompt, transportOpts)
 		if err != nil {
 			errs <- wrapTransportError(err)
 			return
@@ -251,19 +176,30 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 				errs <- wrapTransportError(err)
 				return
 			}
-			// NOTE: Do NOT call EndInput() here. Closing stdin prevents
-			// the SDK from writing MCP control_response messages back to
-			// the CLI when SDK MCP servers are configured. The CLI
-			// processes user messages from stream-json stdin immediately;
-			// it does not require an EOF to begin. Stdin will be closed
-			// when q.Close() is called via defer above.
+			// Keep stdin open until the run ends — the CLI's "idle" session
+			// state after a result when hooks / can_use_tool / SDK MCP
+			// servers need bidirectional control, the first result otherwise
+			// (the CLI processes user messages from stream-json stdin
+			// immediately; it does not require an EOF to begin) — then close
+			// it so the CLI process can exit (#1190).
+			go q.WaitForResultAndEndInput()
+		} else if promptCh != nil {
+			// Stream the channel prompt through the internal Query: each
+			// message is stamped (verbatim prompts) and, once the channel
+			// closes, stdin closes at the end of the last prompt's run.
+			go q.StreamInput(promptCh)
 		}
 
 		// Read messages
 		// q.RawMessages() gives us raw JSON.
 		// All channel sends use select with ctx.Done() to prevent
 		// goroutine leaks when QuerySync returns early on timeout.
-		tracker := newTaskLifecycleTracker()
+		// The run-end state machine inside internal.Query decides when stdin
+		// closes (WaitForResultAndEndInput / StreamInput above); task
+		// lifecycle tracking and the result-driven EndInput that used to
+		// live here moved into it. Keep reading and draining until the
+		// channels close: EndInput only closes stdin, and the CLI can still
+		// flush remaining output before it exits.
 		for {
 			select {
 			case <-ctx.Done():
@@ -276,11 +212,6 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 				if !ok {
 					// Stream closed
 					goto End
-				}
-				// Track task lifecycle frames so results can tell "one turn
-				// ended" apart from "the run is done" (see #1088).
-				if msgType, _ := rawMsg["type"].(string); msgType == "system" {
-					tracker.track(rawMsg)
 				}
 				msg, err := ParseMessage(rawMsg)
 				if err != nil || msg == nil {
@@ -297,28 +228,6 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 				case messages <- msg:
 				case <-ctx.Done():
 					return
-				}
-
-				// After forwarding a ResultMessage with no tasks in flight,
-				// close stdin so the CLI process can exit. This breaks the
-				// deadlock where the goroutine waits for rawMessages to
-				// close, but rawMessages only closes when the CLI exits, and
-				// the CLI only exits when stdin closes (via defer q.Close),
-				// which only fires when the goroutine exits.
-				//
-				// A result frame ends one turn, not necessarily the run:
-				// background tasks keep running past it and still need stdin
-				// for hook/SDK-MCP control responses (#1088), so a result
-				// that arrives while tasks are in flight must not close
-				// stdin. Each task completion wakes the parent for a
-				// follow-up turn, so a later result frame arrives with no
-				// tasks in flight and closes stdin then.
-				//
-				// EndInput() only closes stdin; the CLI can still flush
-				// remaining output before it exits, so we keep reading
-				// until the channels close naturally.
-				if _, isResult := msg.(*ResultMessage); isResult && !tracker.hasInflight() {
-					q.EndInput()
 				}
 			case err, ok := <-q.Errors():
 				if !ok {
@@ -495,6 +404,8 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 		SystemPromptSnapshot:   systemPromptSnapshotFromOpts(opts),
 		Skills:                 opts.Skills,
 		ForwardSubagentText:    opts.ForwardSubagentText,
+		VerbatimPrompts:        opts.VerbatimPrompts,
+		RunEndCeilingMS:        runEndCeilingForQuery(opts),
 	}, nil
 }
 

@@ -101,12 +101,23 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 
 	var promptArg interface{}
 	var stringPrompt string
+	var channelPrompt chan map[string]interface{}
 	if len(prompt) > 0 {
 		if s, ok := prompt[0].(string); ok {
 			// String prompts are sent via transport.write() after initialize,
 			// so the transport only needs an empty channel.
 			stringPrompt = s
 			promptArg = make(chan map[string]interface{})
+		} else if ch, ok := prompt[0].(chan map[string]interface{}); ok {
+			// Channel prompts are rerouted through the internal Query's
+			// StreamInput, which stamps each message (verbatim prompts) and
+			// closes stdin at the end of the run; the transport gets a
+			// pre-closed placeholder channel whose own streamInput drain is
+			// a no-op.
+			channelPrompt = ch
+			placeholder := make(chan map[string]interface{})
+			close(placeholder)
+			promptArg = placeholder
 		} else {
 			promptArg = prompt[0]
 		}
@@ -261,6 +272,8 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 		SystemPromptSnapshot:   systemPromptSnapshot,
 		Skills:                 c.options.Skills,
 		ForwardSubagentText:    c.options.ForwardSubagentText,
+		VerbatimPrompts:        c.verbatimPrompts,
+		RunEndCeilingMS:        runEndCeilingForQuery(c.options),
 	}
 	// Only set MirrorBatcher when non-nil to avoid a non-nil interface wrapping
 	// a nil pointer (Go interface nil semantics).
@@ -289,8 +302,10 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 			"session_id":         "default",
 		}
 		// verbatim_prompts: mark the prompt client_composed so the CLI
-		// delivers it as written. Streamed channel prompts are stamped by the
-		// transport's streamInput.
+		// delivers it as written. Streamed channel prompts are stamped by
+		// the Query's StreamInput. Python's public ClaudeSDKClient does not
+		// spawn wait_for_result_and_end_input either: stdin stays open for
+		// Send/Query and closes on Close().
 		data, err := json.Marshal(transport.StampUserMessage(message, c.verbatimPrompts))
 		if err != nil {
 			c.transport.Close()
@@ -300,6 +315,11 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 			c.transport.Close()
 			return err
 		}
+	} else if channelPrompt != nil {
+		// Stream the channel prompt through the internal Query: each message
+		// is stamped (verbatim prompts) and, once the channel closes, stdin
+		// closes at the end of the last prompt's run.
+		go c.query.StreamInput(channelPrompt)
 	}
 
 	c.connected = true
