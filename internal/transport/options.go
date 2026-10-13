@@ -45,6 +45,10 @@ type TransportOptions struct {
 	TaskBudget *int
 	// SystemPromptFile is the path to a file containing the system prompt.
 	SystemPromptFile *SystemPromptFile
+	// SystemPromptCustom is a custom system prompt (sent as
+	// --system-prompt <prompt>). Snapshot is not a CLI flag — it travels in
+	// the initialize request — so buildCommand ignores it.
+	SystemPromptCustom *SystemPromptCustom
 	// Skills is an optional skill allowlist. Accepted values:
 	//   nil  → no SDK auto-configuration (CLI defaults apply)
 	//   "all" → enable every discovered skill (Skill tool injected)
@@ -81,6 +85,15 @@ type SystemPromptPreset struct {
 	Type   string
 	Preset string
 	Append string
+}
+
+// SystemPromptCustom represents a custom system prompt that can also carry
+// snapshot semantics. Snapshot is kept for parity with the public type but
+// is not a CLI flag: it only travels in the initialize request.
+type SystemPromptCustom struct {
+	Type     string
+	Prompt   string
+	Snapshot *bool
 }
 
 // ToolsPreset represents a tools preset.

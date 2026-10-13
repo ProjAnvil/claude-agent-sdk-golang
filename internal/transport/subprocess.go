@@ -689,9 +689,13 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	// without it the CLI enters interactive TUI mode.
 	args := []string{"-p", "", "--output-format", "stream-json", "--verbose"}
 
-	// System prompt
+	// System prompt. Precedence: file > custom > plain string > preset
+	// append. Snapshot is not a CLI flag — it only travels in the
+	// initialize request.
 	if t.options.SystemPromptFile != nil && t.options.SystemPromptFile.Path != "" {
 		args = append(args, "--system-prompt-file", t.options.SystemPromptFile.Path)
+	} else if t.options.SystemPromptCustom != nil {
+		args = append(args, "--system-prompt", t.options.SystemPromptCustom.Prompt)
 	} else if t.options.SystemPrompt == "" && t.options.SystemPromptPreset == nil {
 		args = append(args, "--system-prompt", "")
 	} else if t.options.SystemPrompt != "" {

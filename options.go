@@ -16,6 +16,13 @@ type ClaudeAgentOptions struct {
 	SystemPromptPreset *SystemPromptPreset
 	// SystemPromptFile specifies a system prompt from a file.
 	SystemPromptFile *SystemPromptFile
+	// SystemPromptCustom specifies a custom system prompt that can also
+	// carry snapshot semantics (Python's {"type":"custom"} form). Same wire
+	// meaning as SystemPrompt, but this form supports Snapshot.
+	//
+	// When several system prompt fields are set, precedence is:
+	// file > custom > plain string > preset append.
+	SystemPromptCustom *SystemPromptCustom
 	// MCPServers configures MCP servers (external or SDK).
 	MCPServers map[string]MCPServerConfig
 	// PermissionMode sets the permission level for tool execution.

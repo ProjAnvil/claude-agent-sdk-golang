@@ -625,6 +625,87 @@ func TestClaudeAgentOptionsWithSystemPromptFile(t *testing.T) {
 	}
 }
 
+// TestSystemPromptPresetSnapshotMarshal tests that SystemPromptPreset
+// marshals its snapshot field when set and omits it when nil (v0.2.165).
+func TestSystemPromptPresetSnapshotMarshal(t *testing.T) {
+	snapshot := true
+	data, err := json.Marshal(&SystemPromptPreset{
+		Type:     "preset",
+		Preset:   "claude_code",
+		Append:   "Be concise.",
+		Snapshot: &snapshot,
+	})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	want := `{"type":"preset","preset":"claude_code","append":"Be concise.","snapshot":true}`
+	if string(data) != want {
+		t.Errorf("Expected %s, got %s", want, data)
+	}
+
+	// Nil snapshot must be omitted entirely.
+	data, err = json.Marshal(&SystemPromptPreset{Type: "preset", Preset: "claude_code"})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	want = `{"type":"preset","preset":"claude_code"}`
+	if string(data) != want {
+		t.Errorf("Expected %s, got %s", want, data)
+	}
+}
+
+// TestSystemPromptCustomMarshal tests SystemPromptCustom serialization:
+// snapshot is included when set and omitted when nil (v0.2.165).
+func TestSystemPromptCustomMarshal(t *testing.T) {
+	snapshot := false
+	data, err := json.Marshal(&SystemPromptCustom{
+		Type:     "custom",
+		Prompt:   "Be helpful",
+		Snapshot: &snapshot,
+	})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	want := `{"type":"custom","prompt":"Be helpful","snapshot":false}`
+	if string(data) != want {
+		t.Errorf("Expected %s, got %s", want, data)
+	}
+
+	data, err = json.Marshal(&SystemPromptCustom{Type: "custom", Prompt: "Be helpful"})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	want = `{"type":"custom","prompt":"Be helpful"}`
+	if string(data) != want {
+		t.Errorf("Expected %s, got %s", want, data)
+	}
+}
+
+// TestClaudeAgentOptionsWithSystemPromptCustom tests SystemPromptCustom on options.
+func TestClaudeAgentOptionsWithSystemPromptCustom(t *testing.T) {
+	snapshot := true
+	opts := ClaudeAgentOptions{
+		SystemPromptCustom: &SystemPromptCustom{
+			Type:     "custom",
+			Prompt:   "Be helpful",
+			Snapshot: &snapshot,
+		},
+	}
+
+	if opts.SystemPromptCustom == nil {
+		t.Fatal("Expected SystemPromptCustom to be set")
+	}
+	if opts.SystemPromptCustom.Type != "custom" {
+		t.Errorf("Expected type 'custom', got %v", opts.SystemPromptCustom.Type)
+	}
+	if opts.SystemPromptCustom.Prompt != "Be helpful" {
+		t.Errorf("Expected prompt, got %v", opts.SystemPromptCustom.Prompt)
+	}
+	if opts.SystemPromptCustom.Snapshot == nil || *opts.SystemPromptCustom.Snapshot != true {
+		t.Errorf("Expected snapshot=true, got %v", opts.SystemPromptCustom.Snapshot)
+	}
+}
+
 // TestAgentDefinitionMinimal tests minimal AgentDefinition serialization.
 func TestAgentDefinitionMinimal(t *testing.T) {
 	agent := AgentDefinition{

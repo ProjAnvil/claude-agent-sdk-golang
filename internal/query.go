@@ -115,6 +115,7 @@ type Query struct {
 	sdkMCPServers          map[string]*mcp.Server
 	agents                 map[string]interface{}
 	excludeDynamicSections *bool
+	systemPromptSnapshot   *bool
 	initializeTimeout      time.Duration
 	// skills is the skills allowlist (nil, "all", or []string).
 	// When it is a []string, the names are sent in the initialize request.
@@ -289,6 +290,7 @@ type QueryConfig struct {
 	SdkMCPServers          map[string]*mcp.Server
 	Agents                 map[string]interface{}
 	ExcludeDynamicSections *bool
+	SystemPromptSnapshot   *bool
 	InitializeTimeout      time.Duration
 	// Skills is the skills allowlist passed to the initialize request.
 	// Accepted: nil, "all", or []string{names...}.
@@ -316,6 +318,7 @@ func NewQuery(cfg QueryConfig) *Query {
 		sdkMCPServers:          cfg.SdkMCPServers,
 		agents:                 cfg.Agents,
 		excludeDynamicSections: cfg.ExcludeDynamicSections,
+		systemPromptSnapshot:   cfg.SystemPromptSnapshot,
 		initializeTimeout:      cfg.InitializeTimeout,
 		skills:                 cfg.Skills,
 		forwardSubagentText:    cfg.ForwardSubagentText,
@@ -379,6 +382,9 @@ func (q *Query) Initialize(ctx context.Context) (map[string]interface{}, error) 
 	}
 	if q.excludeDynamicSections != nil {
 		request["excludeDynamicSections"] = *q.excludeDynamicSections
+	}
+	if q.systemPromptSnapshot != nil {
+		request["systemPromptSnapshot"] = *q.systemPromptSnapshot
 	}
 	// Skills list is sent only when it's a concrete []string (not nil or "all").
 	if skillsList, ok := q.skills.([]string); ok && skillsList != nil {

@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -111,6 +112,7 @@ func TestWrapTransportErrorCoverage(t *testing.T) {
 
 func TestConvertToTransportOptionsFull(t *testing.T) {
 	excludeDynamic := true
+	snapshot := true
 	opts := &ClaudeAgentOptions{
 		Tools:                  []string{"Read"},
 		AllowedTools:           []string{"Bash"},
@@ -137,6 +139,7 @@ func TestConvertToTransportOptionsFull(t *testing.T) {
 		MaxThinkingTokens:      2048,
 		TaskBudget:             &TaskBudget{Total: 5000},
 		SystemPromptFile:       &SystemPromptFile{Type: "file", Path: "/p.txt"},
+		SystemPromptCustom:     &SystemPromptCustom{Type: "custom", Prompt: "custom prompt", Snapshot: &snapshot},
 		ToolsPreset:            &ToolsPreset{Type: "preset", Preset: "claude_code"},
 		SystemPromptPreset: &SystemPromptPreset{
 			Type:                   "preset",
@@ -180,6 +183,10 @@ func TestConvertToTransportOptionsFull(t *testing.T) {
 	}
 	if to.SystemPromptFile == nil || to.SystemPromptFile.Path != "/p.txt" {
 		t.Errorf("SystemPromptFile: got %+v", to.SystemPromptFile)
+	}
+	if to.SystemPromptCustom == nil || to.SystemPromptCustom.Prompt != "custom prompt" ||
+		to.SystemPromptCustom.Snapshot == nil || *to.SystemPromptCustom.Snapshot != true {
+		t.Errorf("SystemPromptCustom: got %+v", to.SystemPromptCustom)
 	}
 	if to.ToolsPreset == nil || to.ToolsPreset.Preset != "claude_code" {
 		t.Errorf("ToolsPreset: got %+v", to.ToolsPreset)
@@ -256,6 +263,52 @@ func TestExcludeDynamicSectionsFromOpts(t *testing.T) {
 	})
 	if got == nil || *got != false {
 		t.Errorf("preset with flag: got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// systemPromptSnapshotFromOpts
+// ---------------------------------------------------------------------------
+
+func TestSystemPromptSnapshotFromOpts(t *testing.T) {
+	if got := systemPromptSnapshotFromOpts(&ClaudeAgentOptions{}); got != nil {
+		t.Errorf("nothing set: got %v", *got)
+	}
+	if got := systemPromptSnapshotFromOpts(&ClaudeAgentOptions{
+		SystemPromptFile: &SystemPromptFile{Type: "file", Path: "/p.md"},
+	}); got != nil {
+		t.Errorf("file form: got %v", *got)
+	}
+	if got := systemPromptSnapshotFromOpts(&ClaudeAgentOptions{
+		SystemPrompt: "Be helpful",
+	}); got != nil {
+		t.Errorf("plain string: got %v", *got)
+	}
+	if got := systemPromptSnapshotFromOpts(&ClaudeAgentOptions{
+		SystemPromptPreset: &SystemPromptPreset{Type: "preset", Preset: "claude_code"},
+	}); got != nil {
+		t.Errorf("preset without snapshot: got %v", *got)
+	}
+	if got := systemPromptSnapshotFromOpts(&ClaudeAgentOptions{
+		SystemPromptCustom: &SystemPromptCustom{Type: "custom", Prompt: "Be helpful"},
+	}); got != nil {
+		t.Errorf("custom without snapshot: got %v", *got)
+	}
+
+	snapshot := true
+	got := systemPromptSnapshotFromOpts(&ClaudeAgentOptions{
+		SystemPromptPreset: &SystemPromptPreset{Type: "preset", Preset: "claude_code", Snapshot: &snapshot},
+	})
+	if got == nil || *got != true {
+		t.Errorf("preset with snapshot: got %v", got)
+	}
+
+	snapshotFalse := false
+	got = systemPromptSnapshotFromOpts(&ClaudeAgentOptions{
+		SystemPromptCustom: &SystemPromptCustom{Type: "custom", Prompt: "Be helpful", Snapshot: &snapshotFalse},
+	})
+	if got == nil || *got != false {
+		t.Errorf("custom with snapshot: got %v", got)
 	}
 }
 
@@ -904,5 +957,102 @@ func TestQueryErrorDrainPath(t *testing.T) {
 		if len(errorsOut) == 0 {
 			t.Fatalf("iteration %d: expected the transport error", i)
 		}
+	}
+}
+
+// TestQuerySendsSystemPromptSnapshotInInitialize mirrors the Python
+// tests/test_client.py parameterization (test_query_passes_system_prompt_snapshot,
+// v0.2.165): Query() sends systemPromptSnapshot in the initialize request
+// only when the system prompt is the preset or custom form with an explicit
+// bool; other forms omit the field entirely.
+func TestQuerySendsSystemPromptSnapshotInInitialize(t *testing.T) {
+	falseVal, trueVal := false, true
+	cases := []struct {
+		name string
+		opts *ClaudeAgentOptions
+		want interface{} // nil means the field must be absent
+	}{
+		{
+			name: "custom with snapshot false",
+			opts: &ClaudeAgentOptions{SystemPromptCustom: &SystemPromptCustom{Type: "custom", Prompt: "Be helpful", Snapshot: &falseVal}},
+			want: false,
+		},
+		{
+			name: "preset with snapshot true",
+			opts: &ClaudeAgentOptions{SystemPromptPreset: &SystemPromptPreset{Type: "preset", Preset: "claude_code", Snapshot: &trueVal}},
+			want: true,
+		},
+		{
+			name: "preset without snapshot",
+			opts: &ClaudeAgentOptions{SystemPromptPreset: &SystemPromptPreset{Type: "preset", Preset: "claude_code"}},
+			want: nil,
+		},
+		{
+			name: "file form",
+			opts: &ClaudeAgentOptions{SystemPromptFile: &SystemPromptFile{Type: "file", Path: "/p.md"}},
+			want: nil,
+		},
+		{
+			name: "plain string",
+			opts: &ClaudeAgentOptions{SystemPrompt: "Be helpful"},
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			original := makeTransport
+			defer cleanupMakeTransport(original)
+
+			mockT := newMockTransport()
+			var writes []string
+			handleInitialization(mockT, &writes)
+			makeTransport = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
+				return mockT, nil
+			}
+
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				mockT.readCh <- map[string]interface{}{
+					"type":        "result",
+					"subtype":     "success",
+					"is_error":    false,
+					"duration_ms": float64(1),
+					"num_turns":   float64(1),
+					"session_id":  "s1",
+				}
+				mockT.Close()
+			}()
+
+			messages, errs := Query(context.Background(), "hi", tc.opts)
+			drainQueryChannels(t, messages, errs)
+
+			var inner map[string]interface{}
+			for _, w := range writes {
+				if !strings.Contains(w, `"initialize"`) {
+					continue
+				}
+				var payload map[string]interface{}
+				if err := json.Unmarshal([]byte(w), &payload); err != nil {
+					continue
+				}
+				if req, ok := payload["request"].(map[string]interface{}); ok {
+					inner = req
+				}
+			}
+			if inner == nil {
+				t.Fatal("no initialize request captured")
+			}
+			got, present := inner["systemPromptSnapshot"]
+			if tc.want == nil {
+				if present {
+					t.Errorf("systemPromptSnapshot must be absent, got %v", got)
+				}
+				return
+			}
+			if !present || got != tc.want {
+				t.Errorf("systemPromptSnapshot: want %v, got %v (present=%v)", tc.want, got, present)
+			}
+		})
 	}
 }

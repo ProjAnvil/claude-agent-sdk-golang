@@ -489,6 +489,7 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 		SdkMCPServers:          sdkServers,
 		Agents:                 internalAgents,
 		ExcludeDynamicSections: excludeDynamicSectionsFromOpts(opts),
+		SystemPromptSnapshot:   systemPromptSnapshotFromOpts(opts),
 		Skills:                 opts.Skills,
 		ForwardSubagentText:    opts.ForwardSubagentText,
 	}, nil
@@ -544,6 +545,14 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 		transportOpts.SystemPromptFile = &transport.SystemPromptFile{
 			Type: opts.SystemPromptFile.Type,
 			Path: opts.SystemPromptFile.Path,
+		}
+	}
+
+	if opts.SystemPromptCustom != nil {
+		transportOpts.SystemPromptCustom = &transport.SystemPromptCustom{
+			Type:     opts.SystemPromptCustom.Type,
+			Prompt:   opts.SystemPromptCustom.Prompt,
+			Snapshot: opts.SystemPromptCustom.Snapshot,
 		}
 	}
 
@@ -684,6 +693,20 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 func excludeDynamicSectionsFromOpts(opts *ClaudeAgentOptions) *bool {
 	if opts.SystemPromptPreset != nil && opts.SystemPromptPreset.ExcludeDynamicSections != nil {
 		return opts.SystemPromptPreset.ExcludeDynamicSections
+	}
+	return nil
+}
+
+// systemPromptSnapshotFromOpts extracts Snapshot from the preset or custom
+// system prompt; nil for file/plain-string/unset forms. Mirrors the Python
+// SDK's client.py extraction: snapshot is read only from the preset and
+// custom forms, and only when the value is set.
+func systemPromptSnapshotFromOpts(opts *ClaudeAgentOptions) *bool {
+	if opts.SystemPromptPreset != nil && opts.SystemPromptPreset.Snapshot != nil {
+		return opts.SystemPromptPreset.Snapshot
+	}
+	if opts.SystemPromptCustom != nil && opts.SystemPromptCustom.Snapshot != nil {
+		return opts.SystemPromptCustom.Snapshot
 	}
 	return nil
 }

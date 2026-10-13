@@ -237,15 +237,21 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 		}
 	}
 
-	// Create query handler
+	// Create query handler. Python reads the initialize-request fields below
+	// at connect time; capture them once here before building the config.
+	excludeDynamicSections := excludeDynamicSectionsFromOpts(c.options)
+	systemPromptSnapshot := systemPromptSnapshotFromOpts(c.options)
 	queryConfig := internal.QueryConfig{
-		Transport:           t,
-		IsStreamingMode:     true,
-		CanUseTool:          canUseTool,
-		Hooks:               internalHooks,
-		SdkMCPServers:       sdkServers,
-		Agents:              internalAgents,
-		ForwardSubagentText: c.options.ForwardSubagentText,
+		Transport:              t,
+		IsStreamingMode:        true,
+		CanUseTool:             canUseTool,
+		Hooks:                  internalHooks,
+		SdkMCPServers:          sdkServers,
+		Agents:                 internalAgents,
+		ExcludeDynamicSections: excludeDynamicSections,
+		SystemPromptSnapshot:   systemPromptSnapshot,
+		Skills:                 c.options.Skills,
+		ForwardSubagentText:    c.options.ForwardSubagentText,
 	}
 	// Only set MirrorBatcher when non-nil to avoid a non-nil interface wrapping
 	// a nil pointer (Go interface nil semantics).

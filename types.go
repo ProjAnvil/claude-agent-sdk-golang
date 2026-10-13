@@ -676,6 +676,30 @@ type SystemPromptPreset struct {
 	// Requires a Claude Code CLI version that supports this option; older
 	// CLIs silently ignore it.
 	ExcludeDynamicSections *bool `json:"excludeDynamicSections,omitempty"`
+	// Snapshot controls whether the session keeps the system prompt it
+	// recorded on its first request. When true, every later request
+	// (including after resume) sends the recorded prompt, so changing Append
+	// has no effect until the session is compacted or a new session starts.
+	// When false, the prompt is rebuilt on every request — for example while
+	// iterating on Append text across calls that resume the same session.
+	// When omitted it acts as true, except in bare mode (--bare), where it
+	// acts as false.
+	//
+	// Requires Claude Code CLI 2.1.257 or later. Before 2.1.265, a session
+	// with an Append or custom prompt recorded it only when Snapshot was
+	// true.
+	Snapshot *bool `json:"snapshot,omitempty"`
+}
+
+// SystemPromptCustom is a custom system prompt that can also set Snapshot.
+// It has the same wire meaning as a plain custom prompt string, but this
+// form can carry snapshot semantics (Python's {"type":"custom"} form).
+type SystemPromptCustom struct {
+	Type   string `json:"type"` // "custom"
+	Prompt string `json:"prompt"`
+	// Snapshot has the same meaning as SystemPromptPreset.Snapshot,
+	// applied to Prompt.
+	Snapshot *bool `json:"snapshot,omitempty"`
 }
 
 // ToolsPreset represents a tools preset configuration.

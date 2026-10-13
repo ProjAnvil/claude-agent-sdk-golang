@@ -2404,3 +2404,23 @@ func TestQueryInitializeOmitsForwardSubagentTextByDefault(t *testing.T) {
 		}
 	}
 }
+
+// TestQueryInitializeSendsSystemPromptSnapshot mirrors the Python
+// test_initialize_sends_system_prompt_snapshot: systemPromptSnapshot is
+// included in the initialize request when configured, even when it is false.
+func TestQueryInitializeSendsSystemPromptSnapshot(t *testing.T) {
+	falseVal := false
+	inner := initializeRequest(t, QueryConfig{SystemPromptSnapshot: &falseVal})
+	if val, ok := inner["systemPromptSnapshot"]; !ok || val != false {
+		t.Errorf("Expected systemPromptSnapshot=false in initialize request, got %v (ok=%v)", val, ok)
+	}
+}
+
+// TestQueryInitializeOmitsSystemPromptSnapshotWhenUnset mirrors the Python
+// test_initialize_omits_system_prompt_snapshot_when_unset.
+func TestQueryInitializeOmitsSystemPromptSnapshotWhenUnset(t *testing.T) {
+	inner := initializeRequest(t, QueryConfig{})
+	if _, ok := inner["systemPromptSnapshot"]; ok {
+		t.Errorf("Expected systemPromptSnapshot to be absent in initialize request, but it was present")
+	}
+}

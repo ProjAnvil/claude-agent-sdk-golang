@@ -286,6 +286,98 @@ func TestConnectWithFullOptions(t *testing.T) {
 	}
 }
 
+// initializeRequestMatches reports whether any captured write is an
+// initialize control request whose inner payload satisfies pred.
+func initializeRequestMatches(writes *writeLog, pred func(inner map[string]interface{}) bool) bool {
+	return writes.any(func(w string) bool {
+		if !strings.Contains(w, `"initialize"`) {
+			return false
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(w), &payload); err != nil {
+			return false
+		}
+		inner, _ := payload["request"].(map[string]interface{})
+		return inner != nil && pred(inner)
+	})
+}
+
+// TestConnectSendsSystemPromptSnapshotInInitialize mirrors the Python
+// tests/test_client.py connect-path parameterization
+// (test_connect_sends_snapshot / test_connect_omits_snapshot_when_unset,
+// v0.2.165): the client's initialize request carries systemPromptSnapshot
+// exactly when the caller's system prompt is the preset or custom form with
+// an explicit bool.
+func TestConnectSendsSystemPromptSnapshotInInitialize(t *testing.T) {
+	falseVal, trueVal := false, true
+	cases := []struct {
+		name string
+		opts *ClaudeAgentOptions
+		want interface{} // nil means the field must be absent
+	}{
+		{
+			name: "custom with snapshot false",
+			opts: &ClaudeAgentOptions{SystemPromptCustom: &SystemPromptCustom{Type: "custom", Prompt: "Be helpful", Snapshot: &falseVal}},
+			want: false,
+		},
+		{
+			name: "preset with snapshot true",
+			opts: &ClaudeAgentOptions{SystemPromptPreset: &SystemPromptPreset{Type: "preset", Preset: "claude_code", Snapshot: &trueVal}},
+			want: true,
+		},
+		{
+			name: "preset without snapshot",
+			opts: &ClaudeAgentOptions{SystemPromptPreset: &SystemPromptPreset{Type: "preset", Preset: "claude_code"}},
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, writes := connectedClient(t, tc.opts, nil)
+			matched := initializeRequestMatches(writes, func(inner map[string]interface{}) bool {
+				got, present := inner["systemPromptSnapshot"]
+				if tc.want == nil {
+					return !present
+				}
+				return present && got == tc.want
+			})
+			if !matched {
+				t.Errorf("initialize request systemPromptSnapshot: want %v", tc.want)
+			}
+		})
+	}
+}
+
+// TestConnectSendsExcludeDynamicSectionsAndSkills locks the pre-existing
+// client Connect gap fix (Python client.py sends all three initialize
+// fields): the streaming client now forwards excludeDynamicSections and the
+// skills allowlist from ClaudeAgentOptions, not just the one-shot Query().
+func TestConnectSendsExcludeDynamicSectionsAndSkills(t *testing.T) {
+	excludeDynamic := true
+	_, _, writes := connectedClient(t, &ClaudeAgentOptions{
+		SystemPromptPreset: &SystemPromptPreset{
+			Type:                   "preset",
+			Preset:                 "claude_code",
+			ExcludeDynamicSections: &excludeDynamic,
+		},
+		Skills: []string{"pdf", "docx"},
+	}, nil)
+
+	if !initializeRequestMatches(writes, func(inner map[string]interface{}) bool {
+		val, ok := inner["excludeDynamicSections"]
+		return ok && val == true
+	}) {
+		t.Error("expected excludeDynamicSections=true in client initialize request")
+	}
+	if !initializeRequestMatches(writes, func(inner map[string]interface{}) bool {
+		val, ok := inner["skills"].([]interface{})
+		return ok && len(val) == 2 && val[0] == "pdf" && val[1] == "docx"
+	}) {
+		t.Error("expected skills list in client initialize request")
+	}
+}
+
 func TestSendConnected(t *testing.T) {
 	client, _, writes := connectedClient(t, nil, nil)
 	if err := client.Send(context.Background(), "ping", WithSessionID("sess-42")); err != nil {

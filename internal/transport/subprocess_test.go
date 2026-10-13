@@ -630,6 +630,131 @@ func TestSystemPromptFileFlag(t *testing.T) {
 	}
 }
 
+// hasFlagPair reports whether args contains flag immediately followed by value.
+func hasFlagPair(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSystemPromptCustomFlag tests that the custom system prompt form maps to
+// --system-prompt <prompt>, identically whether snapshot is set or not:
+// snapshot is not a CLI flag, it only travels in the initialize request.
+func TestSystemPromptCustomFlag(t *testing.T) {
+	snapshot := true
+	cases := []struct {
+		name   string
+		custom *SystemPromptCustom
+	}{
+		{"snapshot unset", &SystemPromptCustom{Type: "custom", Prompt: "Be helpful"}},
+		{"snapshot set", &SystemPromptCustom{Type: "custom", Prompt: "Be helpful", Snapshot: &snapshot}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr, err := NewSubprocessTransport("test", &TransportOptions{
+				CLIPath:            "/fake/path/claude",
+				SystemPromptCustom: tc.custom,
+			})
+			if err != nil {
+				t.Fatalf("NewSubprocessTransport failed: %v", err)
+			}
+
+			cmd := tr.buildCommand(context.Background())
+			args := cmd.Args[1:]
+
+			if !hasFlagPair(args, "--system-prompt", "Be helpful") {
+				t.Errorf("Expected --system-prompt Be helpful in args: %v", args)
+			}
+			// The empty-string default must not fire when custom is set.
+			if hasFlagPair(args, "--system-prompt", "") {
+				t.Errorf("Should not have --system-prompt \"\" when custom prompt is set: %v", args)
+			}
+			// snapshot never leaks onto the command line.
+			if strings.Contains(strings.Join(args, " "), "snapshot") {
+				t.Errorf("snapshot is not a CLI flag but appeared in args: %v", args)
+			}
+		})
+	}
+}
+
+// TestSystemPromptPrecedenceFileBeatsCustom tests that --system-prompt-file
+// wins over the custom prompt form.
+func TestSystemPromptPrecedenceFileBeatsCustom(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+		SystemPromptFile: &SystemPromptFile{
+			Type: "file",
+			Path: "/path/to/prompt.md",
+		},
+		SystemPromptCustom: &SystemPromptCustom{Type: "custom", Prompt: "Be helpful"},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := tr.buildCommand(context.Background())
+	args := cmd.Args[1:]
+
+	if !hasFlagPair(args, "--system-prompt-file", "/path/to/prompt.md") {
+		t.Errorf("Expected --system-prompt-file /path/to/prompt.md in args: %v", args)
+	}
+	if hasFlagPair(args, "--system-prompt", "Be helpful") {
+		t.Errorf("Custom prompt should lose to --system-prompt-file: %v", args)
+	}
+}
+
+// TestSystemPromptCustomBeatsPresetAppend tests that the custom prompt form
+// wins over the preset append branch.
+func TestSystemPromptCustomBeatsPresetAppend(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+		SystemPromptCustom: &SystemPromptCustom{
+			Type:   "custom",
+			Prompt: "Be helpful",
+		},
+		SystemPromptPreset: &SystemPromptPreset{
+			Type:   "preset",
+			Preset: "claude_code",
+			Append: "extra",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := tr.buildCommand(context.Background())
+	args := cmd.Args[1:]
+
+	if !hasFlagPair(args, "--system-prompt", "Be helpful") {
+		t.Errorf("Expected --system-prompt Be helpful in args: %v", args)
+	}
+	if hasFlagPair(args, "--append-system-prompt", "extra") {
+		t.Errorf("Preset append should lose to custom prompt: %v", args)
+	}
+}
+
+// TestSystemPromptDefaultOnlyWhenAllUnset tests that the --system-prompt ""
+// default fires only when file, custom, plain-string, and preset-append are
+// all unset.
+func TestSystemPromptDefaultOnlyWhenAllUnset(t *testing.T) {
+	tr, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath: "/fake/path/claude",
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := tr.buildCommand(context.Background())
+	args := cmd.Args[1:]
+
+	if !hasFlagPair(args, "--system-prompt", "") {
+		t.Errorf("Expected --system-prompt \"\" default when nothing is set: %v", args)
+	}
+}
+
 // TestSettingSourcesOmittedWhenNil tests that --setting-sources is NOT passed
 // when SettingSources is nil (fixing the bug where an empty string was passed,
 // causing the CLI to misparse subsequent flags).

@@ -124,6 +124,25 @@ func TestOptionsWithSystemPromptPresetAndExcludeDynamicSections(t *testing.T) {
 	}
 }
 
+// TestOptionsWithSystemPromptPresetAndSnapshot tests Options with preset and
+// snapshot (v0.2.165).
+func TestOptionsWithSystemPromptPresetAndSnapshot(t *testing.T) {
+	snapshot := false
+	opts := &ClaudeAgentOptions{
+		SystemPromptPreset: &SystemPromptPreset{
+			Type:     "preset",
+			Preset:   "claude_code",
+			Snapshot: &snapshot,
+		},
+	}
+	if opts.SystemPromptPreset.Snapshot == nil {
+		t.Fatal("Expected Snapshot to be non-nil")
+	}
+	if *opts.SystemPromptPreset.Snapshot != false {
+		t.Errorf("Expected Snapshot=false, got %v", *opts.SystemPromptPreset.Snapshot)
+	}
+}
+
 // TestOptionsWithSessionContinuation tests Options with session continuation.
 func TestOptionsWithSessionContinuation(t *testing.T) {
 	opts := &ClaudeAgentOptions{
