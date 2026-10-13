@@ -46,7 +46,7 @@ type TransportOptions struct {
 	// SystemPromptFile is the path to a file containing the system prompt.
 	SystemPromptFile *SystemPromptFile
 	// SystemPromptCustom is a custom system prompt (sent as
-	// --system-prompt <prompt>). Snapshot is not a CLI flag — it travels in
+	// --system-prompt=<prompt>). Snapshot is not a CLI flag — it travels in
 	// the initialize request — so buildCommand ignores it.
 	SystemPromptCustom *SystemPromptCustom
 	// Skills is an optional skill allowlist. Accepted values:

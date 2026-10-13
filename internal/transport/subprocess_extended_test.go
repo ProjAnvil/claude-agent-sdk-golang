@@ -35,7 +35,7 @@ func TestBuildCommand_Extended(t *testing.T) {
 					Append: "Be concise.",
 				},
 			},
-			expected: []string{"--append-system-prompt", "Be concise."},
+			expected: []string{"--append-system-prompt=Be concise."},
 			missing:  []string{"--system-prompt"},
 		},
 		{

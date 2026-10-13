@@ -810,17 +810,19 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 
 	// System prompt. Precedence: file > custom > plain string > preset
 	// append. Snapshot is not a CLI flag — it only travels in the
-	// initialize request.
+	// initialize request. The value-carrying forms use --flag=value so a
+	// dash-leading prompt can never be parsed as a separate CLI flag (the
+	// same injection the --resume/--session-id handling below closes).
 	if t.options.SystemPromptFile != nil && t.options.SystemPromptFile.Path != "" {
 		args = append(args, "--system-prompt-file", t.options.SystemPromptFile.Path)
 	} else if t.options.SystemPromptCustom != nil {
-		args = append(args, "--system-prompt", t.options.SystemPromptCustom.Prompt)
+		args = append(args, "--system-prompt="+t.options.SystemPromptCustom.Prompt)
 	} else if t.options.SystemPrompt == "" && t.options.SystemPromptPreset == nil {
-		args = append(args, "--system-prompt", "")
+		args = append(args, "--system-prompt=")
 	} else if t.options.SystemPrompt != "" {
-		args = append(args, "--system-prompt", t.options.SystemPrompt)
+		args = append(args, "--system-prompt="+t.options.SystemPrompt)
 	} else if t.options.SystemPromptPreset != nil && t.options.SystemPromptPreset.Append != "" {
-		args = append(args, "--append-system-prompt", t.options.SystemPromptPreset.Append)
+		args = append(args, "--append-system-prompt="+t.options.SystemPromptPreset.Append)
 	}
 
 	// Tools

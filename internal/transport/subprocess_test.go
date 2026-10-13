@@ -36,7 +36,7 @@ func TestBuildCommand(t *testing.T) {
 			expected: []string{
 				"--output-format", "stream-json",
 				"--verbose",
-				"--system-prompt", "",
+				"--system-prompt=",
 				"--input-format", "stream-json",
 			},
 		},
@@ -47,7 +47,7 @@ func TestBuildCommand(t *testing.T) {
 				SystemPrompt: "You are helpful",
 			},
 			expected: []string{
-				"--system-prompt", "You are helpful",
+				"--system-prompt=You are helpful",
 			},
 		},
 		{
@@ -625,7 +625,8 @@ func TestSystemPromptFileFlag(t *testing.T) {
 		t.Errorf("Expected --system-prompt-file flag in args: %s", args)
 	}
 	// Should NOT have --system-prompt when --system-prompt-file is set
-	if strings.Contains(args, "--system-prompt \"\"") || strings.Contains(args, "--system-prompt  ") {
+	if strings.Contains(args, "--system-prompt \"\"") || strings.Contains(args, "--system-prompt  ") ||
+		strings.Contains(args, "--system-prompt=") {
 		t.Errorf("Should not have --system-prompt when --system-prompt-file is set: %s", args)
 	}
 }
@@ -641,7 +642,8 @@ func hasFlagPair(args []string, flag, value string) bool {
 }
 
 // TestSystemPromptCustomFlag tests that the custom system prompt form maps to
-// --system-prompt <prompt>, identically whether snapshot is set or not:
+// --system-prompt=<prompt> (equals form, so a dash-leading prompt can never
+// inject a separate flag), identically whether snapshot is set or not:
 // snapshot is not a CLI flag, it only travels in the initialize request.
 func TestSystemPromptCustomFlag(t *testing.T) {
 	snapshot := true
@@ -665,12 +667,12 @@ func TestSystemPromptCustomFlag(t *testing.T) {
 			cmd := tr.buildCommand(context.Background())
 			args := cmd.Args[1:]
 
-			if !hasFlagPair(args, "--system-prompt", "Be helpful") {
-				t.Errorf("Expected --system-prompt Be helpful in args: %v", args)
+			if !containsToken(args, "--system-prompt=Be helpful") {
+				t.Errorf("Expected --system-prompt=Be helpful in args: %v", args)
 			}
 			// The empty-string default must not fire when custom is set.
-			if hasFlagPair(args, "--system-prompt", "") {
-				t.Errorf("Should not have --system-prompt \"\" when custom prompt is set: %v", args)
+			if containsToken(args, "--system-prompt=") {
+				t.Errorf("Should not have --system-prompt= when custom prompt is set: %v", args)
 			}
 			// snapshot never leaks onto the command line.
 			if strings.Contains(strings.Join(args, " "), "snapshot") {
@@ -701,7 +703,7 @@ func TestSystemPromptPrecedenceFileBeatsCustom(t *testing.T) {
 	if !hasFlagPair(args, "--system-prompt-file", "/path/to/prompt.md") {
 		t.Errorf("Expected --system-prompt-file /path/to/prompt.md in args: %v", args)
 	}
-	if hasFlagPair(args, "--system-prompt", "Be helpful") {
+	if containsToken(args, "--system-prompt=Be helpful") {
 		t.Errorf("Custom prompt should lose to --system-prompt-file: %v", args)
 	}
 }
@@ -728,15 +730,15 @@ func TestSystemPromptCustomBeatsPresetAppend(t *testing.T) {
 	cmd := tr.buildCommand(context.Background())
 	args := cmd.Args[1:]
 
-	if !hasFlagPair(args, "--system-prompt", "Be helpful") {
-		t.Errorf("Expected --system-prompt Be helpful in args: %v", args)
+	if !containsToken(args, "--system-prompt=Be helpful") {
+		t.Errorf("Expected --system-prompt=Be helpful in args: %v", args)
 	}
-	if hasFlagPair(args, "--append-system-prompt", "extra") {
+	if containsToken(args, "--append-system-prompt=extra") {
 		t.Errorf("Preset append should lose to custom prompt: %v", args)
 	}
 }
 
-// TestSystemPromptDefaultOnlyWhenAllUnset tests that the --system-prompt ""
+// TestSystemPromptDefaultOnlyWhenAllUnset tests that the --system-prompt=
 // default fires only when file, custom, plain-string, and preset-append are
 // all unset.
 func TestSystemPromptDefaultOnlyWhenAllUnset(t *testing.T) {
@@ -750,8 +752,8 @@ func TestSystemPromptDefaultOnlyWhenAllUnset(t *testing.T) {
 	cmd := tr.buildCommand(context.Background())
 	args := cmd.Args[1:]
 
-	if !hasFlagPair(args, "--system-prompt", "") {
-		t.Errorf("Expected --system-prompt \"\" default when nothing is set: %v", args)
+	if !containsToken(args, "--system-prompt=") {
+		t.Errorf("Expected --system-prompt= default when nothing is set: %v", args)
 	}
 }
 

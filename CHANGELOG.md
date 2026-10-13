@@ -23,7 +23,7 @@ housekeeping are not applicable — the Go SDK does not bundle a CLI.
   recorded it only when `Snapshot` was true. The new `SystemPromptCustom` type
   and `ClaudeAgentOptions.SystemPromptCustom` carry the same wire meaning as a
   plain custom prompt string, but this form can also set `Snapshot`; the
-  subprocess sends `--system-prompt <prompt>` for it. When several system
+  subprocess sends `--system-prompt=<prompt>` for it. When several system
   prompt fields are set, precedence is file > custom > plain string > preset
   append. The initialize request now carries `systemPromptSnapshot`, extracted
   only from the preset and custom forms with an explicit bool (older CLIs
