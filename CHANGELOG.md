@@ -79,7 +79,11 @@ housekeeping are not applicable — the Go SDK does not bundle a CLI.
   pre-closed placeholder channel so its own drain is a no-op).
   `ClaudeSDKClient.Connect` reroutes channel prompts the same way; its string
   prompts still do not spawn the waiter, since the public client closes stdin
-  on `Close()`. A main-thread assistant/stream_event frame reopens the run and
+  on `Close()`. With a channel prompt, `ClaudeSDKClient` now closes stdin at
+  the end of the last prompt's run (Python parity; previously the client
+  never closed stdin on channel drain), so a `Send()` after the prompt
+  channel is closed returns a write error, same as Python. A main-thread
+  assistant/stream_event frame reopens the run and
   stops the ceiling timer, and a reader exit marks the run final so waiters
   never stall. The public-package task lifecycle tracker is deleted in favor
   of the internal ledger. Ported from Python SDK #1190 (v0.2.160, commit
