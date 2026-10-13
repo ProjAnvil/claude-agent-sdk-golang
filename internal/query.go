@@ -657,6 +657,13 @@ func (q *Query) Close() error {
 	// Stand down the run-end ceiling (Python's close cancels the child task
 	// that sleeps on it) so no timer outlives the query.
 	q.clearRunEndCeiling()
+	// Ending the run also wakes any WaitForResultAndEndInput / StreamInput
+	// waiter (Python's close cancels its child tasks): without this, an
+	// abandoned query whose reader is stuck mid-forward would leave the
+	// waiter parked on runEndedCh forever. EndInput on a closed transport
+	// is a harmless no-op.
+	q.runFinal = true
+	q.endRun()
 	q.mu.Unlock()
 
 	// Close (and flush) mirror batcher before closing the transport.
