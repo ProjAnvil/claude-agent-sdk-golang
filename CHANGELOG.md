@@ -5,6 +5,133 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.165] - 2026-10-13
+
+Port of Python SDK v0.2.143..v0.2.165 changes. Of the 22 tagged releases in
+this range, four non-bump commits were reviewed: three required a Go port and
+one was analyzed and explicitly ruled out (docstring-only). Bundled CLI version
+bumps (2.1.238 → 2.1.294), packaging/CI chores, and changelog/release
+housekeeping are not applicable — the Go SDK does not bundle a CLI.
+
+### Added
+
+- **System-prompt `snapshot` and `SystemPromptCustom` (#1268)**:
+  `SystemPromptPreset.Snapshot` (`*bool`, omitted when nil) controls whether
+  the session keeps the system prompt recorded on its first request (`true`,
+  the default) or rebuilds it on every request (`false`). Requires Claude Code
+  CLI 2.1.257+; before 2.1.265 a session with an `Append` or custom prompt
+  recorded it only when `Snapshot` was true. The new `SystemPromptCustom` type
+  and `ClaudeAgentOptions.SystemPromptCustom` carry the same wire meaning as a
+  plain custom prompt string, but this form can also set `Snapshot`; the
+  subprocess sends `--system-prompt <prompt>` for it. When several system
+  prompt fields are set, precedence is file > custom > plain string > preset
+  append. The initialize request now carries `systemPromptSnapshot`, extracted
+  only from the preset and custom forms with an explicit bool (older CLIs
+  ignore unknown initialize fields, so the other forms omit it entirely).
+  Ported from Python SDK #1268 (v0.2.153, commit `e773e44`).
+- **`VerbatimPrompts` option (#1269)**: new `ClaudeAgentOptions.VerbatimPrompts`
+  / `TransportOptions.VerbatimPrompts`. When on, every user frame the SDK
+  writes — `Query()` string and channel prompts, client `Connect`/`Send`/
+  `Query` — is stamped `client_composed: true`, so Claude Code 2.1.248+
+  delivers prompts exactly as written instead of expanding them. There is no
+  per-message opt-out (a caller-set `client_composed` value is overwritten),
+  and caller maps are never mutated (`transport.StampUserMessage`
+  shallow-copies). `ClaudeSDKClient` captures the option at `Connect` so a
+  later-mutated options field cannot split a session's prompts. Ported from
+  Python SDK #1269 (v0.2.158, commit `f7547d7`).
+- **Best-effort CLI version probe**: `SubprocessTransport.Connect` now runs
+  `<cli> -v` (bounded to 2s) and emits `slog.Warn` diagnostics when the
+  resolved CLI predates `2.0.0` (unsupported) or — with `VerbatimPrompts` on —
+  predates `2.1.248` (prompts are still expanded). All probe failures are
+  swallowed; connect never fails because of the probe. The unsupported-version
+  warning is pre-existing in the Python SDK; the probe itself is new plumbing
+  for Go.
+- **Run-end API on `internal.Query` (#1190)**: `RunEnded()` returns a channel
+  closed when the run ends; `WaitForResultAndEndInput()` parks until the
+  result has arrived and the session is idle (or the ceiling fires);
+  `StreamInput(ch)` streams channel prompts through the query layer, stamping
+  each via `StampUserMessage` (each prompt owes a run of its own; an empty or
+  closed stream closes stdin immediately). `RunEndCeilingMS` parses
+  `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` with the CLI's 10-minute default,
+  `0` = no limit, and a `2^31-1` ms cap. Ported from Python SDK #1190
+  (v0.2.160, commit `dbc975e`).
+- **`CLAUDE_CODE_SDK_READS_SESSION_STATE` injection (#1279)**: the transport
+  sets `CLAUDE_CODE_SDK_READS_SESSION_STATE=1` in the child env unless the
+  caller named that variable (any letter case) in `Options.Env` or the
+  inherited process env, so an explicit `"0"` opt-out is never clobbered; the
+  SDK never sets `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`. In exchange, the CLI
+  emits `session_state_changed` frames marked `sdk_host_only`, which the SDK
+  now hides from the message stream — a caller opting into the emit variable
+  via `Env` still sees the unmarked frames.
+
+### Changed
+
+- **stdin stays open until the session reports `idle` (#1190)**: the public
+  `Query()` and `ClaudeSDKClient` paths are rewired onto `internal.Query`'s
+  run-end state machine — one place that sees every frame. For string
+  prompts, `Query()` now spawns `WaitForResultAndEndInput`: stdin closes once
+  the result has arrived and the session gone idle when the session has
+  bidirectional needs (hooks, `CanUseTool`, SDK MCP servers — the cases where
+  the CLI sends follow-up control requests after a result), and right after
+  the prompt write otherwise; previously stdin closed on the first result
+  with no in-flight tasks, which cut off mid-turn follow-ups. Channel prompts
+  are rerouted through `Query.StreamInput` (the transport receives a
+  pre-closed placeholder channel so its own drain is a no-op).
+  `ClaudeSDKClient.Connect` reroutes channel prompts the same way; its string
+  prompts still do not spawn the waiter, since the public client closes stdin
+  on `Close()`. A main-thread assistant/stream_event frame reopens the run and
+  stops the ceiling timer, and a reader exit marks the run final so waiters
+  never stall. The public-package task lifecycle tracker is deleted in favor
+  of the internal ledger. Ported from Python SDK #1190 (v0.2.160, commit
+  `dbc975e`).
+
+### Fixed
+
+- **Streaming client never sent `ExcludeDynamicSections`/`Skills`**: the
+  client's inline internal query config omitted both fields (the Python client
+  always sends them), so `Options.ExcludeDynamicSections` and `Options.Skills`
+  silently did nothing for `ClaudeSDKClient` sessions. Both are now wired
+  alongside the new `systemPromptSnapshot` field and captured once at connect
+  time. (Pre-existing Go gap found while porting #1268.)
+- **`Query.Close` now wakes parked run-end waiters**: closing marks the run
+  final and ends it (under the query mutex, after the ceiling timer is stood
+  down), so a waiter parked in `WaitForResultAndEndInput`/`StreamInput` wakes
+  even when the read loop is stuck mid-forward — mirroring Python's close
+  cancelling its child tasks. The trailing `EndInput` on a closed transport is
+  a harmless no-op.
+
+### Not Ported (analyzed, ruled out)
+
+- **#1293 docstring-only alignment (commit `5889056`)**: Python documentation
+  updates (permission_mode `auto`, `RateLimitInfo.allowed`, env/settings/
+  `mcp_servers` merge notes); the Go SDK already has the corrected facts
+  (`PermissionModeAuto`, `RateLimitStatusAllowed` exist).
+- e2e test fixes (thinking deltas, model pinning, haiku alias) and
+  CI/packaging work: Python infrastructure only.
+
+### Test Coverage
+
+Statement coverage remains **≥95% in every library package** (root 97.2%,
+`internal` 96.9%, `internal/transport` 98.7%):
+
+- Port tests mirroring the new Python tests: snapshot flag JSON emission and
+  precedence (file > custom > string > preset append), `systemPromptSnapshot`
+  extraction, verbatim stamping at every write site (string, channel, client
+  Connect/Send/Query) with caller-map non-mutation, the CLI version probe
+  (unsupported / verbatim-too-old / unparseable-output / probe-error
+  swallow), `CLAUDE_CODE_SDK_READS_SESSION_STATE` injection with the
+  case-insensitive opt-out, `sdk_host_only` frame hiding, the run-end state
+  machine (idle-after-result, per-prompt reopen, ceiling default/0/cap and
+  the env override, close waking waiters), and a stand-in-CLI subprocess
+  suite (`run_end_subprocess` port) driving `Query()` end-to-end over a POSIX
+  `sh` fake CLI: follow-up hook answered on stdin after the result, marked
+  state frames hidden, caller opt-in seeing unmarked frames, and the ceiling
+  closing stdin when idle never comes.
+
+- `version.go` / `internal/transport/version.go`: bumped to `0.2.165`.
+- Full suite: `go build ./...`, `go vet ./...`, `go test ./... -race -count=1`
+  all clean.
+
 ## [0.2.143] - 2026-08-24
 
 This release ships two bodies of work: **(A)** the port of Python SDK
