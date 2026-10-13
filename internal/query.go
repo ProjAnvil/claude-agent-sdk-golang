@@ -6,6 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +42,77 @@ func (e *ResultError) Error() string {
 
 // Unwrap returns the original transport error this one replaced.
 func (e *ResultError) Unwrap() error { return e.Cause }
+
+// deferringTaskTypes holds the task types whose completion runs a follow-up
+// turn, and which therefore may still need the control channel after the
+// turn's result frame.
+//
+// This mirrors the set the CLI itself holds a result back for, which is
+// narrower than its notion of "delegated agent work". The types left out are
+// left out on purpose, and none of them is merely an oversight:
+//   - background shells and monitors run indefinitely by design, so deferring
+//     the close on one withholds it forever rather than briefly;
+//   - teammates are long-lived too — their status stays running for their whole
+//     lifetime, so they never settle the ledger;
+//   - remote agents can be long-running monitors the CLI likewise refuses to
+//     wait on.
+//
+// Anything added here must be a type that reliably reaches a terminal status,
+// or it will hang the query (see Query.trackSystemFrame).
+var deferringTaskTypes = map[string]bool{
+	"local_agent":    true,
+	"local_workflow": true,
+}
+
+// terminalTaskStatuses is the set of task statuses that mean the task has
+// finished and should be cleared from the in-flight task ledger. Duplicated
+// from the public TerminalTaskStatuses (types.go) because the internal
+// package cannot import the public one (same pattern as normalizeResultErrors).
+var terminalTaskStatuses = map[string]bool{
+	"completed": true,
+	"failed":    true,
+	"stopped":   true,
+	"killed":    true,
+}
+
+const (
+	// runEndCeilingEnv is the CLI's own background-wait ceiling once stdin is
+	// closed; the SDK bounds its wait for the CLI's "idle" by the same value
+	// (Query.armRunEndCeiling).
+	runEndCeilingEnv = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"
+	// DefaultRunEndCeilingMS is the CLI's default background-wait ceiling
+	// (10 minutes).
+	DefaultRunEndCeilingMS = 600_000
+	// maxRunEndCeilingMS is the longest ceiling honored (~24.8 days), as in
+	// the TypeScript SDK, whose timers cannot run longer; it also keeps a
+	// huge value safe to convert to a duration.
+	maxRunEndCeilingMS = 1<<31 - 1
+)
+
+// RunEndCeilingMS reads CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS as the CLI will
+// see it. optionsEnv (ClaudeAgentOptions.Env) overrides the inherited
+// environment, as it does for the CLI subprocess. 0 means no limit; anything
+// that is not a plain non-negative integer falls back to the CLI's default of
+// 10 minutes (the CLI itself also reads spellings such as 1e6). Mirrors
+// Python's run_end_ceiling_ms (_internal/query.py).
+func RunEndCeilingMS(optionsEnv map[string]string) int {
+	raw, ok := optionsEnv[runEndCeilingEnv]
+	if !ok {
+		raw = os.Getenv(runEndCeilingEnv)
+	}
+	if raw == "" {
+		return DefaultRunEndCeilingMS
+	}
+	// Python's int() tolerates surrounding whitespace; strconv does not.
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return DefaultRunEndCeilingMS
+	}
+	if value < 0 {
+		return DefaultRunEndCeilingMS
+	}
+	return value
+}
 
 // normalizeResultErrors normalizes the "errors" field of a "result" frame to
 // clean strings.
@@ -123,6 +197,12 @@ type Query struct {
 	// forwardSubagentText asks the CLI (via initialize) to forward subagent
 	// text/thinking blocks, not just tool_use/tool_result.
 	forwardSubagentText bool
+	// verbatimPrompts marks every outgoing user message client_composed so
+	// the CLI delivers it as written (see transport.StampUserMessage).
+	verbatimPrompts bool
+	// runEndCeilingMS bounds the wait for the CLI's "idle" past a result
+	// with no new turn; <= 0 means no ceiling (see RunEndCeilingMS).
+	runEndCeilingMS int
 	// mirrorBatcher handles transcript_mirror frames from the CLI.
 	mirrorBatcher TranscriptMirrorBatcher
 
@@ -156,6 +236,43 @@ type Query struct {
 	// already reported. Mirrors the TypeScript SDK's lastErrorResultText
 	// (Query.ts), but keeps the whole payload rather than just the text.
 	lastErrorResult map[string]interface{}
+
+	// Run-end state machine (#1190). All fields below are guarded by mu.
+	//
+	// resultReceived is set by the first result frame of the current run;
+	// StreamInput clears it per prompt (each prompt owes a run of its own).
+	resultReceived bool
+	// sessionState is the CLI's latest session_state_changed state, or nil
+	// while it sends none (a CLI too old to honor
+	// CLAUDE_CODE_SDK_READS_SESSION_STATE). A CLI that reports state stays
+	// "running" while a background agent is live or its completion is still
+	// to be handled, and reports "idle" once no further turn is owed.
+	sessionState *string
+	// turnInProgress tracks whether a main-thread turn is under way (its
+	// assistant/stream_event frames have started and its result has not
+	// arrived): the ceiling counts only the wait between turns, so it is not
+	// armed meanwhile.
+	turnInProgress bool
+	// runFinal is set once stdin is closed or the reader is gone: the run
+	// then stays ended, since nothing can wait on a reopened one.
+	runFinal bool
+	// runEndedCh is closed when the run is over, so the stdin-closing
+	// waiter can wake; runEnded mirrors the channel's closed state under mu.
+	// Work the CLI takes up after the run ended swaps in a fresh channel
+	// (reopenRun) — Go's replacement for anyio's resettable Event.
+	runEndedCh chan struct{}
+	runEnded   bool
+	// ceilingTimer ends the run if no new turn starts within the ceiling
+	// after a result; ceilingGeneration tells a timer that fired after it
+	// was cleared or re-armed to stand down.
+	ceilingTimer      *time.Timer
+	ceilingGeneration int
+	// inflightTasks holds task IDs of started-but-not-finished tasks. A
+	// result frame only ends one turn, not the run: background tasks keep
+	// running past it and still need stdin for hook/SDK-MCP control
+	// responses (see #1088), so a result that arrives while this set is
+	// non-empty must not close stdin.
+	inflightTasks map[string]bool
 }
 
 // CanUseToolFunc is the callback type for tool permission requests.
@@ -298,6 +415,14 @@ type QueryConfig struct {
 	// ForwardSubagentText asks the CLI (via initialize) to forward subagent
 	// text/thinking blocks, not just tool_use/tool_result.
 	ForwardSubagentText bool
+	// VerbatimPrompts marks every outgoing user message client_composed so
+	// the CLI delivers it as written (see transport.StampUserMessage).
+	VerbatimPrompts bool
+	// RunEndCeilingMS bounds the wait for the CLI's "idle" past a result
+	// with no new turn (0 here means "unset" and becomes
+	// DefaultRunEndCeilingMS in NewQuery; a negative value disables the
+	// ceiling entirely, mirroring Python's explicit run_end_ceiling_ms=0).
+	RunEndCeilingMS int
 	// MirrorBatcher handles transcript_mirror frames from the CLI.
 	// When non-nil, transcript_mirror messages are peeled off the stream and
 	// forwarded to the batcher rather than being yielded to callers.
@@ -308,6 +433,13 @@ type QueryConfig struct {
 func NewQuery(cfg QueryConfig) *Query {
 	if cfg.InitializeTimeout == 0 {
 		cfg.InitializeTimeout = 60 * time.Second
+	}
+	// 0 means "not configured" (the zero value of QueryConfig); the public
+	// wiring computes the real value via RunEndCeilingMS and translates the
+	// env's "0 = no ceiling" to a negative so it survives this default.
+	// Any value <= 0 disables the ceiling in armRunEndCeiling, as in Python.
+	if cfg.RunEndCeilingMS == 0 {
+		cfg.RunEndCeilingMS = DefaultRunEndCeilingMS
 	}
 
 	return &Query{
@@ -322,6 +454,8 @@ func NewQuery(cfg QueryConfig) *Query {
 		initializeTimeout:      cfg.InitializeTimeout,
 		skills:                 cfg.Skills,
 		forwardSubagentText:    cfg.ForwardSubagentText,
+		verbatimPrompts:        cfg.VerbatimPrompts,
+		runEndCeilingMS:        cfg.RunEndCeilingMS,
 		mirrorBatcher:          cfg.MirrorBatcher,
 		pendingResponses:       make(map[string]chan controlResult),
 		hookCallbacks:          make(map[string]HookCallback),
@@ -329,6 +463,8 @@ func NewQuery(cfg QueryConfig) *Query {
 		rawMessages:            make(chan map[string]interface{}, 100),
 		errors:                 make(chan error, 10),
 		firstResultCh:          make(chan struct{}),
+		inflightTasks:          make(map[string]bool),
+		runEndedCh:             make(chan struct{}),
 	}
 }
 
@@ -518,6 +654,9 @@ func (q *Query) EndInput() error {
 func (q *Query) Close() error {
 	q.mu.Lock()
 	q.closed = true
+	// Stand down the run-end ceiling (Python's close cancels the child task
+	// that sleeps on it) so no timer outlives the query.
+	q.clearRunEndCeiling()
 	q.mu.Unlock()
 
 	// Close (and flush) mirror batcher before closing the transport.
@@ -558,6 +697,322 @@ func (q *Query) closeMCPBridges() {
 	for _, bridge := range bridges {
 		bridge.Close()
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Run-end state machine (#1190)
+//
+// With hooks, SDK MCP servers or a can_use_tool callback configured, stdin
+// must outlive a result frame: follow-up turns (a finished background task
+// waking the session, an answered permission request) still need it for their
+// control responses. The run ends at the CLI's "idle" session state after a
+// result (or the first result from a CLI that reports no state), bounded
+// between turns by the run-end ceiling. Every method below requires q.mu to
+// be held, except the exported entry points that acquire it themselves.
+// ---------------------------------------------------------------------------
+
+// trackSystemFrame consumes one raw "system" frame, updating the in-flight
+// task set so result frames can tell "one turn ended" apart from "the run is
+// done" (see #1088).
+//
+// task_started marks a task in flight; task_notification or a task_updated
+// patch with a terminal status clears it. Terminal completion can arrive as
+// either frame (not every terminal task emits a notification), so both are
+// handled; deleting from a map keeps the pair idempotent.
+//
+// This is a mitigation, not a complete answer to #1088: a task that settles
+// *before* the turn's result frame leaves the set empty at that result, so
+// the ledger alone would close stdin even though the completion may still
+// wake the parent for a continuation turn — that gap is what the
+// session-state run boundary closes.
+//
+// Only delegated agent work is tracked (deferringTaskTypes). A background
+// *shell* — Bash(run_in_background=true) on a dev server or tail -f — is also
+// reported through these frames, but it may never reach a terminal status,
+// and the CLI in stream-json mode only exits on stdin EOF, so tracking one
+// would withhold the close forever rather than briefly.
+//
+// background_tasks_changed is deliberately *not* consumed, in either
+// direction: its payload is the live *background* set, while a subagent is
+// registered in the foreground and only flips to backgrounded later, without
+// a second task_started. The lifecycle frames are the only self-consistent
+// source here (see #1088).
+//
+// Caller must hold q.mu.
+func (q *Query) trackSystemFrame(message map[string]interface{}) {
+	subtype, _ := message["subtype"].(string)
+	taskID, _ := message["task_id"].(string)
+	if taskID == "" {
+		return
+	}
+	switch subtype {
+	case "task_started":
+		if taskType, _ := message["task_type"].(string); deferringTaskTypes[taskType] {
+			q.inflightTasks[taskID] = true
+		}
+	case "task_notification":
+		delete(q.inflightTasks, taskID)
+	case "task_updated":
+		var status string
+		if patch, ok := message["patch"].(map[string]interface{}); ok {
+			status, _ = patch["status"].(string)
+		}
+		if terminalTaskStatuses[status] {
+			delete(q.inflightTasks, taskID)
+		}
+	}
+}
+
+// onSessionState tracks the CLI's session_state_changed state (#1190).
+// Caller must hold q.mu.
+func (q *Query) onSessionState(state interface{}) {
+	if s, ok := state.(string); ok {
+		q.sessionState = &s
+	} else {
+		// A frame with no (usable) state: back to "the CLI sent none".
+		q.sessionState = nil
+	}
+	if q.sessionState != nil && *q.sessionState == "idle" {
+		if q.resultReceived {
+			q.maybeEndRun()
+		}
+		// "idle" before any result never ends the run.
+		return
+	}
+	// Work the CLI took up after the run ended (a finished background task
+	// woke it) reopens the run until the next "idle".
+	q.reopenRun()
+	if q.sessionState != nil && *q.sessionState == "requires_action" {
+		// The host is answering a request; stdin must outlast it.
+		q.clearRunEndCeiling()
+	} else {
+		q.rearmRunEndCeilingBetweenTurns()
+	}
+}
+
+// maybeEndRun ends the run unless a tracked background task is still in
+// flight. One turn ended, but background tasks that are still running may
+// need hook/SDK-MCP control responses over stdin; closing it now silently
+// disables hooks and fails SDK-MCP calls with "Stream closed" (#1088). Each
+// task completion wakes the parent for a follow-up turn, so a later result
+// (or "idle") ends the run then. A CLI that reports session state never
+// reports "idle" with an agent still live, so this matters for CLIs that
+// report "idle" at every turn end or not at all.
+//
+// Caller must hold q.mu.
+func (q *Query) maybeEndRun() {
+	if len(q.inflightTasks) > 0 {
+		slog.Debug("Turn ended with tracked task(s) still in flight; keeping stdin open",
+			"count", len(q.inflightTasks))
+		return
+	}
+	q.endRun()
+}
+
+// endRun marks the run over, waking the stdin-closing waiter. Idempotent.
+// Caller must hold q.mu.
+func (q *Query) endRun() {
+	q.clearRunEndCeiling()
+	if !q.runEnded {
+		q.runEnded = true
+		close(q.runEndedCh)
+	}
+}
+
+// reopenRun reopens an ended run for work that started after it ended. A
+// waiter the ended run already woke still closes stdin; this makes a later
+// wait (StreamInput's, once its prompts are all written) wait for the new
+// work too. Once stdin is closed, or the reader is gone, the run stays ended.
+//
+// Caller must hold q.mu.
+func (q *Query) reopenRun() {
+	if q.runEnded && !q.runFinal {
+		q.runEnded = false
+		q.runEndedCh = make(chan struct{})
+	}
+}
+
+// armRunEndCeiling ends the run anyway once the ceiling passes with no new
+// turn. The CLI's own background-wait ceiling only counts once stdin is
+// closed, so without this work that never finishes would hold "running", and
+// stdin, open forever. It counts only the wait between turns: restarted at
+// each result and whenever the CLI reports "running" again, cleared by
+// main-thread turn activity and by "requires_action", and never armed while a
+// turn is under way.
+//
+// Caller must hold q.mu.
+func (q *Query) armRunEndCeiling() {
+	q.clearRunEndCeiling()
+	if q.runEndCeilingMS <= 0 ||
+		q.runEnded ||
+		q.runFinal ||
+		// A frame read while close() is under way (the result branch awaits
+		// a mirror flush) must not leave a sleeper behind.
+		q.closed ||
+		q.turnInProgress ||
+		!q.hasBidirectionalNeeds() {
+		return
+	}
+	generation := q.ceilingGeneration
+	q.ceilingTimer = time.AfterFunc(
+		time.Duration(min(q.runEndCeilingMS, maxRunEndCeilingMS))*time.Millisecond,
+		func() { q.endRunAtCeiling(generation) },
+	)
+}
+
+// rearmRunEndCeilingBetweenTurns restarts the ceiling if the run is between
+// turns, past a result, with the CLI still reporting work ("running").
+// Caller must hold q.mu.
+func (q *Query) rearmRunEndCeilingBetweenTurns() {
+	if q.resultReceived &&
+		!(q.sessionState == nil || *q.sessionState == "idle" || *q.sessionState == "requires_action") {
+		q.armRunEndCeiling()
+	}
+}
+
+// endRunAtCeiling is the ceiling timer body. It stands down when the ceiling
+// was cleared or re-armed while this timer was already firing (generation
+// mismatch), and never cuts off a tracked background agent that may still
+// need stdin (#1088) — the ceiling restarts once it settles, from the read
+// loop's rearm when the ledger drains.
+func (q *Query) endRunAtCeiling(generation int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if generation != q.ceilingGeneration {
+		// Cleared or re-armed while this timer was already firing.
+		return
+	}
+	q.ceilingTimer = nil
+	if len(q.inflightTasks) > 0 {
+		slog.Debug("No 'idle' within the run-end ceiling, but tracked task(s) still in flight; keeping stdin open",
+			"ceiling_ms", q.runEndCeilingMS, "count", len(q.inflightTasks))
+		return
+	}
+	slog.Debug("No 'idle' within the run-end ceiling after the last result; ending the run",
+		"ceiling_ms", q.runEndCeilingMS)
+	q.endRun()
+}
+
+// clearRunEndCeiling cancels any armed ceiling and invalidates timers from
+// earlier generations. Caller must hold q.mu.
+func (q *Query) clearRunEndCeiling() {
+	q.ceilingGeneration++
+	if q.ceilingTimer != nil {
+		q.ceilingTimer.Stop()
+		q.ceilingTimer = nil
+	}
+}
+
+// hasBidirectionalNeeds reports whether the CLI may still send control
+// requests that need a reply. SDK MCP servers, hooks, and the can_use_tool
+// permission callback are all served over the control protocol: the CLI
+// writes a control_request to stdout and blocks until the SDK writes the
+// matching control_response to stdin. Closing stdin while any of these are
+// configured makes every later request fail CLI-side with "Stream closed".
+// Mirrors the TypeScript SDK's hasBidirectionalNeeds.
+func (q *Query) hasBidirectionalNeeds() bool {
+	return len(q.sdkMCPServers) > 0 || len(q.hooks) > 0 || q.canUseTool != nil
+}
+
+// RunEnded returns a snapshot of the current run-ended channel; it is closed
+// when the current run ends (a fresh channel replaces it if the run reopens).
+func (q *Query) RunEnded() <-chan struct{} {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.runEndedCh
+}
+
+// WaitForResultAndEndInput waits for the end of the run (if needed) then
+// closes stdin.
+//
+// If SDK MCP servers, hooks, or a can_use_tool callback require
+// bidirectional communication, keeps stdin open until the run ends: the
+// CLI's "idle" session state after a result, or, from a CLI that reports no
+// session state, the first result with no tracked tasks in flight. A result
+// frame ends one turn, not necessarily the run: background tasks keep running
+// past it, or have just finished and still wake the parent for a follow-up
+// turn, and those turns need stdin for control responses (#1088, #1190).
+//
+// The wait is bounded between turns: if the CLI still reports "running"
+// CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS (10 minutes by default, 0 for no
+// limit) after a result with no new turn, the run ends anyway
+// (armRunEndCeiling). A turn under way, a request the SDK is still answering
+// and a tracked background agent still in flight (#1088) stop that clock.
+// The wait is guaranteed to end: when the run ends as above, or when the
+// reader exits (readMessages marks the run final).
+//
+// Known limitation: from a CLI that reports no session state, a result for an
+// earlier prompt of a channel prompt stream still ends the run even when a
+// later prompt is already queued CLI-side, so control requests from that
+// later turn can find stdin closed. Single-message and string prompts, the
+// common one-shot shapes, are fully covered.
+func (q *Query) WaitForResultAndEndInput() {
+	if q.hasBidirectionalNeeds() {
+		slog.Debug("Waiting for the run to end before closing stdin",
+			"sdk_mcp_servers", len(q.sdkMCPServers),
+			"has_hooks", len(q.hooks) > 0,
+			"has_can_use_tool", q.canUseTool != nil)
+		q.mu.Lock()
+		ch := q.runEndedCh
+		q.mu.Unlock()
+		<-ch
+	}
+	q.mu.Lock()
+	q.runFinal = true
+	q.clearRunEndCeiling()
+	q.mu.Unlock()
+	_ = q.transport.EndInput()
+}
+
+// StreamInput streams prompt messages from ch to the transport, stamping each
+// one for verbatim_prompts, and waits for the end of the run before closing
+// stdin when bidirectional needs exist (see WaitForResultAndEndInput). Each
+// prompt written owes a run of its own, so the wait is for the last prompt's
+// run, not an earlier one's. Once the stream ends, stdin stays closed.
+//
+// It replaces the transport's own channel drain for prompts routed through
+// the SDK (Query and ClaudeSDKClient hand the transport a pre-closed
+// placeholder channel instead), so the verbatim stamping and the run-end
+// aware stdin close compose in one place.
+func (q *Query) StreamInput(ch chan map[string]interface{}) {
+	written := 0
+	for msg := range ch {
+		q.mu.Lock()
+		if q.closed {
+			q.mu.Unlock()
+			break
+		}
+		// This prompt owes a run of its own, result included: an earlier one
+		// having ended does not end it.
+		q.reopenRun()
+		q.resultReceived = false
+		q.clearRunEndCeiling()
+		q.mu.Unlock()
+
+		data, err := json.Marshal(transport.StampUserMessage(msg, q.verbatimPrompts))
+		if err != nil {
+			// Skip invalid messages, like the transport's own streamInput.
+			continue
+		}
+		if err := q.transport.Write(string(data) + "\n"); err != nil {
+			// Stop if writing fails; fall through and close stdin like a
+			// normal end of input — the CLI would otherwise wait forever.
+			break
+		}
+		written++
+	}
+
+	if written == 0 {
+		// Nothing was sent, so no result will arrive to release the hold;
+		// close immediately (mirrors the TypeScript SDK's messageCount
+		// guard).
+		q.mu.Lock()
+		q.runFinal = true
+		q.mu.Unlock()
+		_ = q.transport.EndInput()
+		return
+	}
+	q.WaitForResultAndEndInput()
 }
 
 // readMessages reads from transport and routes messages.
@@ -615,6 +1070,34 @@ func (q *Query) readMessages() {
 			continue
 		}
 
+		// Track task lifecycle frames so results can tell "one turn ended"
+		// apart from "the run is done" (see #1088), and drive the run-end
+		// state machine (see #1190).
+		dropFrame := false
+		if msgType == "system" {
+			q.mu.Lock()
+			subtype, _ := data["subtype"].(string)
+			hadInflight := len(q.inflightTasks) > 0
+			q.trackSystemFrame(data)
+			if hadInflight && len(q.inflightTasks) == 0 {
+				// The ceiling left the last tracked agent alone; the wait
+				// between turns starts over now that it settled.
+				q.rearmRunEndCeilingBetweenTurns()
+			}
+			if subtype == "session_state_changed" {
+				q.onSessionState(data["state"])
+				// Frames the CLI sent only because the transport asked for
+				// them (CLAUDE_CODE_SDK_READS_SESSION_STATE); the caller did
+				// not opt in. Unmarked frames — the caller opted in via
+				// CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS — still flow to
+				// callers; both kinds drive the run end.
+				if hostOnly, _ := data["sdk_host_only"].(bool); hostOnly {
+					dropFrame = true
+				}
+			}
+			q.mu.Unlock()
+		}
+
 		// Track results for proper stream closure
 		if msgType == "result" {
 			q.mu.Lock()
@@ -628,6 +1111,7 @@ func (q *Query) readMessages() {
 			if q.mirrorBatcher != nil {
 				_ = q.mirrorBatcher.Flush(context.Background())
 			}
+			q.mu.Lock()
 			// Track error result payloads for actionable ProcessError
 			// replacement.
 			if isError, _ := data["is_error"].(bool); isError {
@@ -635,12 +1119,44 @@ func (q *Query) readMessages() {
 			} else {
 				q.lastErrorResult = nil
 			}
+			q.resultReceived = true
+			q.turnInProgress = false
+			// A result ends a turn, not necessarily the run: a background
+			// agent that finished just before it still wakes the session for
+			// another turn, whose hook, permission and SDK MCP requests need
+			// stdin. A CLI that reports session state stays "running" while
+			// such a turn is owed, so wait for "idle" (some hosts send it
+			// just before the result). Without state events the result is
+			// all there is to go on.
+			if q.sessionState == nil || *q.sessionState == "idle" || !q.hasBidirectionalNeeds() {
+				q.maybeEndRun()
+			} else if *q.sessionState != "requires_action" {
+				// While the SDK is still answering a request the ceiling
+				// waits for the "running" that follows.
+				q.armRunEndCeiling()
+			}
+			q.mu.Unlock()
 		} else if !(msgType == "system" && data["subtype"] == "session_state_changed") {
 			// Anything other than the post-turn session_state_changed
 			// marker means the conversation moved on; a ProcessError
 			// now is a fresh crash, not the expected exit from a prior
 			// error result. Mirrors the TypeScript SDK's reset logic.
+			q.mu.Lock()
 			q.lastErrorResult = nil
+			// A main-thread turn is under way, so the ceiling stops (it
+			// counts only the wait between turns, as the CLI's does) and
+			// the run reopens even if the ceiling ended it while no state
+			// changed.
+			if (msgType == "assistant" || msgType == "stream_event") && data["parent_tool_use_id"] == nil {
+				q.turnInProgress = true
+				q.reopenRun()
+				q.clearRunEndCeiling()
+			}
+			q.mu.Unlock()
+		}
+
+		if dropFrame {
+			continue
 		}
 
 		// Send raw data to be parsed by caller
@@ -651,6 +1167,14 @@ func (q *Query) readMessages() {
 			q.rawMessages <- data
 		}
 	}
+
+	// The reader is gone: no future frame can end the run, and nothing can
+	// wait on a reopened one — mark the run final and wake any waiter so it
+	// never stalls on early exit (Python _read_messages' finally block).
+	q.mu.Lock()
+	q.runFinal = true
+	q.endRun()
+	q.mu.Unlock()
 
 	// Forward transport errors (non-blocking to prevent deadlock
 	// when the consumer goroutine has stopped reading).
@@ -663,12 +1187,15 @@ func (q *Query) readMessages() {
 		// reported so the exception is actionable and typed. Mirrors the
 		// TypeScript SDK (Query.ts readMessages).
 		pendingErr := err
-		if q.lastErrorResult != nil {
+		q.mu.Lock()
+		lastErrorResult := q.lastErrorResult
+		q.mu.Unlock()
+		if lastErrorResult != nil {
 			if pe, ok := err.(*transport.ProcessError); ok {
 				pendingErr = &ResultError{
 					Message: fmt.Sprintf("Claude Code returned an error result: %s",
-						errorResultText(q.lastErrorResult)),
-					Data:     q.lastErrorResult,
+						errorResultText(lastErrorResult)),
+					Data:     lastErrorResult,
 					ExitCode: pe.ExitCode,
 					Cause:    err,
 				}

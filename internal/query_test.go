@@ -20,6 +20,7 @@ type mockTransport struct {
 	ready     bool
 	mu        sync.Mutex
 	closeOnce sync.Once
+	endInputs int
 }
 
 func newMockTransport() *mockTransport {
@@ -54,7 +55,17 @@ func (m *mockTransport) Errors() <-chan error {
 }
 
 func (m *mockTransport) EndInput() error {
+	m.mu.Lock()
+	m.endInputs++
+	m.mu.Unlock()
 	return nil
+}
+
+// endInputCalls reports how many times EndInput (stdin close) was invoked.
+func (m *mockTransport) endInputCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.endInputs
 }
 
 // Close shuts the mock down. Idempotent, like the real transports: Query.Close

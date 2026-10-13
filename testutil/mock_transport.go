@@ -13,10 +13,15 @@ type MockTransport struct {
 	Connected    bool
 	Ready        bool
 
+	// EndInputFunc, when set, is invoked by EndInput after the close is
+	// recorded; tests can trigger shutdown side effects from it.
+	EndInputFunc func() error
+
 	messagesCh chan map[string]interface{}
 	errorsCh   chan error
 	mu         sync.Mutex
 	msgIndex   int
+	endInputs  int
 }
 
 // NewMockTransport creates a new MockTransport with predefined messages.
@@ -68,9 +73,23 @@ func (m *MockTransport) Errors() <-chan error {
 	return m.errorsCh
 }
 
-// EndInput simulates closing stdin.
+// EndInput simulates closing stdin, recording the close event so tests can
+// assert when stdin closed (see internal.Query's run-end state machine).
 func (m *MockTransport) EndInput() error {
+	m.mu.Lock()
+	m.endInputs++
+	m.mu.Unlock()
+	if m.EndInputFunc != nil {
+		return m.EndInputFunc()
+	}
 	return nil
+}
+
+// EndInputCalls returns the number of recorded EndInput (stdin close) events.
+func (m *MockTransport) EndInputCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.endInputs
 }
 
 // Close simulates closing the transport.
