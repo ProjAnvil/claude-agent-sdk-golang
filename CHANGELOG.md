@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.166] - 2026-10-14
 
-Port of Python SDK v0.2.166. Of the nine commits since v0.2.165, three
+Port of Python SDK v0.2.166. Of the eight commits since v0.2.165, three
 carried SDK changes — the two hook/types feature commits and the sandbox
 `ignoreViolations` type fix — and the rest were bundled-CLI version bumps
 and release housekeeping (not applicable: the Go SDK does not bundle a CLI).
