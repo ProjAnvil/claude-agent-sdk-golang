@@ -311,15 +311,34 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 					internalCallbacks[j] = func(input internal.HookInput, toolUseID string, ctx internal.HookContext) (internal.HookOutput, error) {
 						// Convert internal types to public types
 						publicInput := HookInput{
-							HookEventName:  input.HookEventName,
-							SessionID:      input.SessionID,
-							TranscriptPath: input.TranscriptPath,
-							CWD:            input.CWD,
-							PermissionMode: input.PermissionMode,
-							ToolName:       input.ToolName,
-							ToolInput:      input.ToolInput,
-							ToolResponse:   input.ToolResponse,
-							Prompt:         input.Prompt,
+							HookEventName:         input.HookEventName,
+							SessionID:             input.SessionID,
+							TranscriptPath:        input.TranscriptPath,
+							CWD:                   input.CWD,
+							PermissionMode:        input.PermissionMode,
+							PromptID:              input.PromptID,
+							Effort:                effortFromInternal(input.Effort),
+							ToolName:              input.ToolName,
+							ToolInput:             input.ToolInput,
+							ToolResponse:          input.ToolResponse,
+							ToolUseID:             input.ToolUseID,
+							Error:                 input.Error,
+							IsInterrupt:           input.IsInterrupt,
+							DurationMS:            input.DurationMS,
+							Prompt:                input.Prompt,
+							StopHookActive:        input.StopHookActive,
+							AgentID:               input.AgentID,
+							AgentTranscriptPath:   input.AgentTranscriptPath,
+							AgentType:             input.AgentType,
+							Trigger:               input.Trigger,
+							CustomInstructions:    input.CustomInstructions,
+							Message:               input.Message,
+							Title:                 input.Title,
+							NotificationType:      input.NotificationType,
+							PermissionSuggestions: input.PermissionSuggestions,
+							LastAssistantMessage:  input.LastAssistantMessage,
+							BackgroundTasks:       backgroundTasksFromInternal(input.BackgroundTasks),
+							SessionCrons:          sessionCronsFromInternal(input.SessionCrons),
 						}
 						publicCtx := HookContext{}
 
@@ -610,10 +629,7 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 			}
 		}
 		if opts.Sandbox.IgnoreViolations != nil {
-			transportOpts.Sandbox.IgnoreViolations = &transport.SandboxIgnoreViolations{
-				File:    opts.Sandbox.IgnoreViolations.File,
-				Network: opts.Sandbox.IgnoreViolations.Network,
-			}
+			transportOpts.Sandbox.IgnoreViolations = transport.SandboxIgnoreViolations(opts.Sandbox.IgnoreViolations)
 		}
 	}
 
@@ -627,6 +643,59 @@ func excludeDynamicSectionsFromOpts(opts *ClaudeAgentOptions) *bool {
 		return opts.SystemPromptPreset.ExcludeDynamicSections
 	}
 	return nil
+}
+
+// effortFromInternal converts an internal hook effort into the public
+// HookEffort, allocating only when the internal value is set. Shared by the
+// Query and Client hook-input conversions.
+func effortFromInternal(effort *internal.HookEffort) *HookEffort {
+	if effort == nil {
+		return nil
+	}
+	return &HookEffort{Level: effort.Level}
+}
+
+// backgroundTasksFromInternal converts internal background-task summaries
+// into the public BackgroundTaskSummary values. Shared by the Query and
+// Client hook-input conversions.
+func backgroundTasksFromInternal(tasks []internal.BackgroundTaskSummary) []BackgroundTaskSummary {
+	if tasks == nil {
+		return nil
+	}
+	out := make([]BackgroundTaskSummary, len(tasks))
+	for i, t := range tasks {
+		out[i] = BackgroundTaskSummary{
+			ID:          t.ID,
+			Type:        t.Type,
+			Status:      t.Status,
+			Description: t.Description,
+			Command:     t.Command,
+			AgentType:   t.AgentType,
+			Server:      t.Server,
+			Tool:        t.Tool,
+			Name:        t.Name,
+		}
+	}
+	return out
+}
+
+// sessionCronsFromInternal converts internal session-cron summaries into the
+// public SessionCronSummary values. Shared by the Query and Client
+// hook-input conversions.
+func sessionCronsFromInternal(crons []internal.SessionCronSummary) []SessionCronSummary {
+	if crons == nil {
+		return nil
+	}
+	out := make([]SessionCronSummary, len(crons))
+	for i, c := range crons {
+		out[i] = SessionCronSummary{
+			ID:        c.ID,
+			Schedule:  c.Schedule,
+			Recurring: c.Recurring,
+			Prompt:    c.Prompt,
+		}
+	}
+	return out
 }
 
 // systemPromptSnapshotFromOpts extracts Snapshot from the preset or custom

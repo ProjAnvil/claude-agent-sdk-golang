@@ -820,6 +820,103 @@ func TestHandleHookCallbackFields(t *testing.T) {
 	}
 }
 
+// TestHandleHookCallbackNewInputFields pins the wire parsing of the hook
+// input fields added with Python SDK #1331 (v0.2.166): prompt_id, effort,
+// duration_ms, last_assistant_message, background_tasks, and session_crons
+// must reach the internal HookInput, since Python passes the raw input dict
+// through verbatim and Go whitelists fields.
+func TestHandleHookCallbackNewInputFields(t *testing.T) {
+	mockTrans := newMockTransport()
+
+	var captured *HookInput
+	hookCallback := func(input HookInput, toolUseID string, ctx HookContext) (HookOutput, error) {
+		captured = &input
+		return HookOutput{}, nil
+	}
+
+	query := NewQuery(QueryConfig{
+		Transport:       mockTrans,
+		IsStreamingMode: true,
+	})
+	query.hookCallbacks["hook_new_fields"] = hookCallback
+
+	request := map[string]interface{}{
+		"callback_id": "hook_new_fields",
+		"tool_use_id": "toolu_1",
+		"input": map[string]interface{}{
+			"hook_event_name":        "Stop",
+			"session_id":             "sess-1",
+			"prompt_id":              "550e8400-e29b-41d4-a716-446655440000",
+			"effort":                 map[string]interface{}{"level": "high"},
+			"duration_ms":            float64(12),
+			"last_assistant_message": "Done.",
+			"background_tasks": []interface{}{
+				map[string]interface{}{
+					"id":          "task-1",
+					"type":        "shell",
+					"status":      "running",
+					"description": "npm test",
+					"command":     "npm test",
+				},
+				map[string]interface{}{
+					"id":          "task-2",
+					"type":        "monitor",
+					"status":      "pending",
+					"description": "watch docs",
+					"server":      "docs",
+					"tool":        "search",
+				},
+			},
+			"session_crons": []interface{}{
+				map[string]interface{}{
+					"id":        "cron-1",
+					"schedule":  "0 9 * * 1-5",
+					"recurring": true,
+					"prompt":    "check CI",
+				},
+			},
+		},
+	}
+
+	if _, err := query.handleHookCallback(context.Background(), request); err != nil {
+		t.Fatalf("handleHookCallback failed: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("hook callback was not invoked")
+	}
+	if captured.PromptID != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("PromptID: got %q", captured.PromptID)
+	}
+	if captured.Effort == nil || captured.Effort.Level != "high" {
+		t.Errorf("Effort: got %+v", captured.Effort)
+	}
+	if captured.DurationMS != 12 {
+		t.Errorf("DurationMS: got %d", captured.DurationMS)
+	}
+	if captured.LastAssistantMessage != "Done." {
+		t.Errorf("LastAssistantMessage: got %q", captured.LastAssistantMessage)
+	}
+	if len(captured.BackgroundTasks) != 2 {
+		t.Fatalf("BackgroundTasks: got %+v", captured.BackgroundTasks)
+	}
+	shell := captured.BackgroundTasks[0]
+	if shell.ID != "task-1" || shell.Type != "shell" || shell.Status != "running" ||
+		shell.Description != "npm test" || shell.Command != "npm test" || shell.AgentType != "" {
+		t.Errorf("BackgroundTasks[0]: got %+v", shell)
+	}
+	monitor := captured.BackgroundTasks[1]
+	if monitor.ID != "task-2" || monitor.Type != "monitor" || monitor.Server != "docs" || monitor.Tool != "search" {
+		t.Errorf("BackgroundTasks[1]: got %+v", monitor)
+	}
+	if len(captured.SessionCrons) != 1 {
+		t.Fatalf("SessionCrons: got %+v", captured.SessionCrons)
+	}
+	cron := captured.SessionCrons[0]
+	if cron.ID != "cron-1" || cron.Schedule != "0 9 * * 1-5" || !cron.Recurring || cron.Prompt != "check CI" {
+		t.Errorf("SessionCrons[0]: got %+v", cron)
+	}
+}
+
 // TestHandleCanUseToolUpdatedInput tests UpdatedInput in permission results.
 func TestHandleCanUseToolUpdatedInput(t *testing.T) {
 	mockTrans := newMockTransport()

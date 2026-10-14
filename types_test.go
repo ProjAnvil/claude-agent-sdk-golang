@@ -1833,3 +1833,789 @@ func TestSessionMessageParentAgentID(t *testing.T) {
 		t.Errorf("Expected nil ParentAgentID, got %v", *roundTripNil.ParentAgentID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// v0.2.166 types ports (Python SDK #1331, #1332, #1380)
+// ---------------------------------------------------------------------------
+
+// jsonKeys marshals v and returns the set of object keys it produced.
+func jsonKeys(t *testing.T, v interface{}) map[string]bool {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal to map failed: %v", err)
+	}
+	keys := make(map[string]bool, len(raw))
+	for k := range raw {
+		keys[k] = true
+	}
+	return keys
+}
+
+// keySet builds a set from a slice of keys, for comparisons against jsonKeys.
+func keySet(keys ...string) map[string]bool {
+	set := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		set[k] = true
+	}
+	return set
+}
+
+// assertKeysEqual fails unless got equals want, naming every difference.
+func assertKeysEqual(t *testing.T, context string, got, want map[string]bool) {
+	t.Helper()
+	for k := range want {
+		if !got[k] {
+			t.Errorf("%s: missing key %q (got %v)", context, k, got)
+		}
+	}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("%s: unexpected key %q (want %v)", context, k, want)
+		}
+	}
+}
+
+// TestSystemInitDataKeySets pins the required/optional key sets of
+// SystemInitData, mirroring python test_key_sets_match_typescript
+// (Python SDK #1332): the keys must match the TypeScript SDK's
+// SDKSystemMessage fields.
+func TestSystemInitDataKeySets(t *testing.T) {
+	full := SystemInitData{
+		Type:                   "system",
+		Subtype:                "init",
+		UUID:                   "u1",
+		SessionID:              "s1",
+		Agents:                 []string{"reviewer"},
+		APIKeySource:           "none",
+		Betas:                  []string{"context-1m-2025-08-07"},
+		ClaudeCodeVersion:      "2.1.284",
+		CWD:                    "/repo",
+		Tools:                  []string{"Bash"},
+		MCPServers:             []SystemInitMcpServer{{Name: "docs", Status: "connected"}},
+		Model:                  "claude-sonnet-5",
+		PermissionMode:         PermissionModeDefault,
+		SlashCommands:          []string{"compact"},
+		TerminalSlashCommands:  []string{"exit"},
+		OutputStyle:            "default",
+		Skills:                 []string{},
+		Plugins:                []SystemInitPlugin{{Name: "p", Path: "/p"}},
+		PluginErrors:           []SystemInitPluginError{{Plugin: "p", Type: "path-not-found", Message: "gone"}},
+		FastModeState:          FastModeStateOn,
+		FastModeDisabledReason: FastModeDisabledReasonSdkOptInRequired,
+		Capabilities:           []string{"interrupt_receipt_v1"},
+	}
+	assertKeysEqual(t, "SystemInitData full", jsonKeys(t, full), keySet(
+		"type", "subtype", "uuid", "session_id", "agents", "apiKeySource",
+		"betas", "claude_code_version", "cwd", "tools", "mcp_servers",
+		"model", "permissionMode", "slash_commands",
+		"terminal_slash_commands", "output_style", "skills", "plugins",
+		"plugin_errors", "fast_mode_state", "fast_mode_disabled_reason",
+		"capabilities",
+	))
+
+	minimal := SystemInitData{
+		Type:              "system",
+		Subtype:           "init",
+		UUID:              "u1",
+		SessionID:         "s1",
+		APIKeySource:      "none",
+		ClaudeCodeVersion: "2.1.284",
+		CWD:               "/repo",
+		Tools:             []string{"Bash"},
+		MCPServers:        []SystemInitMcpServer{},
+		Model:             "claude-sonnet-5",
+		PermissionMode:    PermissionModeDefault,
+		SlashCommands:     []string{},
+		OutputStyle:       "default",
+		Skills:            []string{},
+		Plugins:           []SystemInitPlugin{},
+	}
+	assertKeysEqual(t, "SystemInitData minimal", jsonKeys(t, minimal), keySet(
+		"type", "subtype", "uuid", "session_id", "apiKeySource",
+		"claude_code_version", "cwd", "tools", "mcp_servers", "model",
+		"permissionMode", "slash_commands", "output_style", "skills",
+		"plugins",
+	))
+}
+
+// TestSystemInitDataNestedKeySets pins the nested SystemInit* key sets,
+// mirroring python test_nested_key_sets (Python SDK #1332).
+func TestSystemInitDataNestedKeySets(t *testing.T) {
+	assertKeysEqual(t, "SystemInitMcpServer full", jsonKeys(t, SystemInitMcpServer{
+		Name: "docs", Status: "connected", Source: "sdk",
+	}), keySet("name", "status", "source"))
+	assertKeysEqual(t, "SystemInitMcpServer minimal", jsonKeys(t, SystemInitMcpServer{
+		Name: "docs", Status: "connected",
+	}), keySet("name", "status"))
+
+	assertKeysEqual(t, "SystemInitPlugin full", jsonKeys(t, SystemInitPlugin{
+		Name: "p", Path: "/p", Version: "1.2.3",
+	}), keySet("name", "path", "version"))
+	assertKeysEqual(t, "SystemInitPlugin minimal", jsonKeys(t, SystemInitPlugin{
+		Name: "p", Path: "/p",
+	}), keySet("name", "path"))
+
+	assertKeysEqual(t, "SystemInitPluginError full", jsonKeys(t, SystemInitPluginError{
+		Plugin: "inline[0]", Type: "path-not-found", Message: "gone", Path: "/p",
+	}), keySet("plugin", "type", "message", "path"))
+	assertKeysEqual(t, "SystemInitPluginError minimal", jsonKeys(t, SystemInitPluginError{
+		Plugin: "inline[0]", Type: "path-not-found", Message: "gone",
+	}), keySet("plugin", "type", "message"))
+}
+
+// TestFastModeLiterals pins the FastModeState and FastModeDisabledReason
+// values, mirroring python test_fast_mode_literals (Python SDK #1332). The
+// disabled-reason set is open: the CLI may send values not listed here, so
+// unknown values must stay representable.
+func TestFastModeLiterals(t *testing.T) {
+	states := map[FastModeState]bool{
+		FastModeStateOff:      true,
+		FastModeStateCooldown: true,
+		FastModeStateOn:       true,
+	}
+	if len(states) != 3 {
+		t.Errorf("FastModeState constants: got %v", states)
+	}
+	reasons := map[FastModeDisabledReason]bool{
+		FastModeDisabledReasonFree:               true,
+		FastModeDisabledReasonPreference:         true,
+		FastModeDisabledReasonExtraUsageDisabled: true,
+		FastModeDisabledReasonNetworkError:       true,
+		FastModeDisabledReasonUnknown:            true,
+		FastModeDisabledReasonNotFirstParty:      true,
+		FastModeDisabledReasonDisabledByEnv:      true,
+		FastModeDisabledReasonModelNotAllowed:    true,
+		FastModeDisabledReasonSdkOptInRequired:   true,
+		FastModeDisabledReasonPending:            true,
+	}
+	if len(reasons) != 10 {
+		t.Errorf("FastModeDisabledReason constants: got %v", reasons)
+	}
+	// Open set: an unknown CLI value round-trips.
+	var unknown FastModeDisabledReason = "brand_new_check"
+	data, err := json.Marshal(SystemInitData{FastModeDisabledReason: unknown, MCPServers: []SystemInitMcpServer{}, Tools: []string{}, SlashCommands: []string{}, Skills: []string{}, Plugins: []SystemInitPlugin{}})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(data), `"brand_new_check"`) {
+		t.Errorf("unknown FastModeDisabledReason not on the wire: %s", data)
+	}
+}
+
+// TestSystemInitDataFromInitFrame pins that typing the payload does not
+// change what the parser returns, mirroring python
+// test_init_frame_still_parses_to_plain_system_message (Python SDK #1332):
+// ParseMessage still yields a plain *SystemMessage whose Data is the frame
+// verbatim, and ParseSystemInitData narrows it.
+func TestSystemInitDataFromInitFrame(t *testing.T) {
+	data := map[string]interface{}{
+		"type":                "system",
+		"subtype":             "init",
+		"uuid":                "u1",
+		"session_id":          "s1",
+		"apiKeySource":        "none",
+		"claude_code_version": "2.1.284",
+		"cwd":                 "/repo",
+		"tools":               []interface{}{"Bash"},
+		"mcp_servers":         []interface{}{map[string]interface{}{"name": "docs", "status": "connected"}},
+		"model":               "claude-sonnet-5",
+		"permissionMode":      "default",
+		"slash_commands":      []interface{}{"compact"},
+		"output_style":        "default",
+		"skills":              []interface{}{},
+		"plugins":             []interface{}{},
+	}
+	message, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage failed: %v", err)
+	}
+	sys, ok := message.(*SystemMessage)
+	if !ok {
+		t.Fatalf("expected *SystemMessage, got %T", message)
+	}
+	if sys.Subtype != "init" {
+		t.Errorf("subtype: got %q", sys.Subtype)
+	}
+	if len(sys.Data) != len(data) {
+		t.Errorf("Data not verbatim: got %v", sys.Data)
+	}
+
+	init, err := ParseSystemInitData(sys.Data)
+	if err != nil {
+		t.Fatalf("ParseSystemInitData failed: %v", err)
+	}
+	if len(init.MCPServers) != 1 || init.MCPServers[0].Status != "connected" {
+		t.Errorf("mcp_servers: got %+v", init.MCPServers)
+	}
+	if init.Capabilities != nil {
+		t.Errorf("capabilities: got %v, want nil", init.Capabilities)
+	}
+	if init.ClaudeCodeVersion != "2.1.284" || init.APIKeySource != "none" {
+		t.Errorf("scalar fields: got %+v", init)
+	}
+}
+
+// TestParseSystemInitDataErrors covers the marshal/unmarshal error paths.
+func TestParseSystemInitDataErrors(t *testing.T) {
+	if _, err := ParseSystemInitData(map[string]interface{}{"bad": make(chan int)}); err == nil {
+		t.Error("expected marshal error for unmarshalable value")
+	}
+	if _, err := ParseSystemInitData(map[string]interface{}{"tools": "not-an-array"}); err == nil {
+		t.Error("expected unmarshal error for type mismatch")
+	}
+}
+
+// hookOutputShape describes one hook-specific output type for the key-set
+// test below: the zero-value keys (required) and the keys present when every
+// field is set (required + optional). Mirrors python _OUTPUT_KEYS /
+// test_output_key_sets_match_typescript (Python SDK #1331), checked against
+// the TypeScript SDK's *HookSpecificOutput types.
+type hookOutputShape struct {
+	name      string
+	eventName string
+	zero      interface{}
+	full      interface{}
+	required  []string
+	optional  []string
+}
+
+// hookSpecificOutputShapes lists every member of the Python SDK's
+// HookSpecificOutput union at v0.2.166. The table doubles as the
+// distinct-event-name check of python
+// test_hook_specific_output_members_have_distinct_event_names.
+func hookSpecificOutputShapes() []hookOutputShape {
+	suppress := true
+	retry := true
+	reload := true
+	return []hookOutputShape{
+		{
+			name:      "PreToolUseHookSpecificOutput",
+			eventName: "PreToolUse",
+			zero:      PreToolUseHookSpecificOutput{},
+			full: PreToolUseHookSpecificOutput{
+				PermissionDecision:       HookPermissionDecisionDeny,
+				PermissionDecisionReason: "dangerous",
+				UpdatedInput:             map[string]interface{}{"command": "ls"},
+				AdditionalContext:        "ctx",
+			},
+			required: []string{"hookEventName"},
+			optional: []string{"permissionDecision", "permissionDecisionReason", "updatedInput", "additionalContext"},
+		},
+		{
+			name:      "PostToolUseHookSpecificOutput",
+			eventName: "PostToolUse",
+			zero:      PostToolUseHookSpecificOutput{},
+			full: PostToolUseHookSpecificOutput{
+				AdditionalContext:    "ctx",
+				UpdatedToolOutput:    map[string]interface{}{"stdout": ""},
+				UpdatedMCPToolOutput: map[string]interface{}{"result": 1},
+			},
+			required: []string{"hookEventName"},
+			optional: []string{"additionalContext", "updatedToolOutput", "updatedMCPToolOutput"},
+		},
+		{
+			name:      "PostToolUseFailureHookSpecificOutput",
+			eventName: "PostToolUseFailure",
+			zero:      PostToolUseFailureHookSpecificOutput{},
+			full:      PostToolUseFailureHookSpecificOutput{AdditionalContext: "ctx"},
+			required:  []string{"hookEventName"},
+			optional:  []string{"additionalContext"},
+		},
+		{
+			name:      "UserPromptSubmitHookSpecificOutput",
+			eventName: "UserPromptSubmit",
+			zero:      UserPromptSubmitHookSpecificOutput{},
+			full: UserPromptSubmitHookSpecificOutput{
+				AdditionalContext:      "ctx",
+				SessionTitle:           "Refactor auth",
+				SuppressOriginalPrompt: &suppress,
+			},
+			required: []string{"hookEventName"},
+			optional: []string{"additionalContext", "sessionTitle", "suppressOriginalPrompt"},
+		},
+		{
+			name:      "UserPromptExpansionHookSpecificOutput",
+			eventName: "UserPromptExpansion",
+			zero:      UserPromptExpansionHookSpecificOutput{},
+			full: UserPromptExpansionHookSpecificOutput{
+				AdditionalContext:      "ctx",
+				SuppressOriginalPrompt: &suppress,
+			},
+			required: []string{"hookEventName"},
+			optional: []string{"additionalContext", "suppressOriginalPrompt"},
+		},
+		{
+			name:      "SessionStartHookSpecificOutput",
+			eventName: "SessionStart",
+			zero:      SessionStartHookSpecificOutput{},
+			full: SessionStartHookSpecificOutput{
+				AdditionalContext:  "ctx",
+				InitialUserMessage: "Run the test suite",
+				SessionTitle:       "auth-refactor",
+				WatchPaths:         []string{"/repo/.envrc"},
+				ReloadSkills:       &reload,
+			},
+			required: []string{"hookEventName"},
+			optional: []string{"additionalContext", "initialUserMessage", "sessionTitle", "watchPaths", "reloadSkills"},
+		},
+		{
+			name:      "NotificationHookSpecificOutput",
+			eventName: "Notification",
+			zero:      NotificationHookSpecificOutput{},
+			full:      NotificationHookSpecificOutput{AdditionalContext: "ctx"},
+			required:  []string{"hookEventName"},
+			optional:  []string{"additionalContext"},
+		},
+		{
+			name:      "SubagentStartHookSpecificOutput",
+			eventName: "SubagentStart",
+			zero:      SubagentStartHookSpecificOutput{},
+			full:      SubagentStartHookSpecificOutput{AdditionalContext: "ctx"},
+			required:  []string{"hookEventName"},
+			optional:  []string{"additionalContext"},
+		},
+		{
+			name:      "PermissionRequestHookSpecificOutput",
+			eventName: "PermissionRequest",
+			zero:      PermissionRequestHookSpecificOutput{},
+			full:      PermissionRequestHookSpecificOutput{Decision: map[string]interface{}{"type": "allow"}},
+			required:  []string{"hookEventName", "decision"},
+			optional:  []string{},
+		},
+		{
+			name:      "PostToolBatchHookSpecificOutput",
+			eventName: "PostToolBatch",
+			zero:      PostToolBatchHookSpecificOutput{},
+			full:      PostToolBatchHookSpecificOutput{AdditionalContext: "ctx"},
+			required:  []string{"hookEventName"},
+			optional:  []string{"additionalContext"},
+		},
+		{
+			name:      "StopHookSpecificOutput",
+			eventName: "Stop",
+			zero:      StopHookSpecificOutput{},
+			full:      StopHookSpecificOutput{AdditionalContext: "ctx"},
+			required:  []string{"hookEventName"},
+			optional:  []string{"additionalContext"},
+		},
+		{
+			name:      "SubagentStopHookSpecificOutput",
+			eventName: "SubagentStop",
+			zero:      SubagentStopHookSpecificOutput{},
+			full:      SubagentStopHookSpecificOutput{AdditionalContext: "ctx"},
+			required:  []string{"hookEventName"},
+			optional:  []string{"additionalContext"},
+		},
+		{
+			name:      "PermissionDeniedHookSpecificOutput",
+			eventName: "PermissionDenied",
+			zero:      PermissionDeniedHookSpecificOutput{},
+			full:      PermissionDeniedHookSpecificOutput{Retry: &retry},
+			required:  []string{"hookEventName"},
+			optional:  []string{"retry"},
+		},
+		{
+			name:      "PreModelSwitchHookSpecificOutput",
+			eventName: "PreModelSwitch",
+			zero:      PreModelSwitchHookSpecificOutput{},
+			full: PreModelSwitchHookSpecificOutput{
+				PermissionDecision:       ModelSwitchPermissionDecisionAllow,
+				PermissionDecisionReason: "opus is fine",
+			},
+			required: []string{"hookEventName"},
+			optional: []string{"permissionDecision", "permissionDecisionReason"},
+		},
+		{
+			name:      "PostModelSwitchHookSpecificOutput",
+			eventName: "PostModelSwitch",
+			zero:      PostModelSwitchHookSpecificOutput{},
+			full:      PostModelSwitchHookSpecificOutput{AdditionalContext: "ctx"},
+			required:  []string{"hookEventName"},
+			optional:  []string{"additionalContext"},
+		},
+		{
+			name:      "ElicitationHookSpecificOutput",
+			eventName: "Elicitation",
+			zero:      ElicitationHookSpecificOutput{},
+			full: ElicitationHookSpecificOutput{
+				Action:  ElicitationActionAccept,
+				Content: map[string]interface{}{"field": "value"},
+			},
+			required: []string{"hookEventName"},
+			optional: []string{"action", "content"},
+		},
+		{
+			name:      "ElicitationResultHookSpecificOutput",
+			eventName: "ElicitationResult",
+			zero:      ElicitationResultHookSpecificOutput{},
+			full: ElicitationResultHookSpecificOutput{
+				Action:  ElicitationActionDecline,
+				Content: map[string]interface{}{"field": "value"},
+			},
+			required: []string{"hookEventName"},
+			optional: []string{"action", "content"},
+		},
+		{
+			name:      "CwdChangedHookSpecificOutput",
+			eventName: "CwdChanged",
+			zero:      CwdChangedHookSpecificOutput{},
+			full:      CwdChangedHookSpecificOutput{WatchPaths: []string{"/repo"}},
+			required:  []string{"hookEventName"},
+			optional:  []string{"watchPaths"},
+		},
+		{
+			name:      "FileChangedHookSpecificOutput",
+			eventName: "FileChanged",
+			zero:      FileChangedHookSpecificOutput{},
+			full:      FileChangedHookSpecificOutput{WatchPaths: []string{"/repo"}},
+			required:  []string{"hookEventName"},
+			optional:  []string{"watchPaths"},
+		},
+		{
+			name:      "WorktreeCreateHookSpecificOutput",
+			eventName: "WorktreeCreate",
+			zero:      WorktreeCreateHookSpecificOutput{},
+			full:      WorktreeCreateHookSpecificOutput{WorktreePath: "/repo/.worktrees/abc"},
+			required:  []string{"hookEventName", "worktreePath"},
+			optional:  []string{},
+		},
+		{
+			name:      "MessageDisplayHookSpecificOutput",
+			eventName: "MessageDisplay",
+			zero:      MessageDisplayHookSpecificOutput{},
+			full:      MessageDisplayHookSpecificOutput{DisplayContent: "(hidden)"},
+			required:  []string{"hookEventName"},
+			optional:  []string{"displayContent"},
+		},
+	}
+}
+
+// TestHookSpecificOutputKeySets pins the key set of every hook-specific
+// output type, mirroring python test_output_key_sets_match_typescript and
+// test_hook_specific_output_members_have_distinct_event_names (Python SDK
+// #1331): required keys are present on the zero value, optional keys only
+// when set, and each member is discriminated by its own event name.
+func TestHookSpecificOutputKeySets(t *testing.T) {
+	eventNames := map[string]bool{}
+	for _, shape := range hookSpecificOutputShapes() {
+		fullKeys := append(append([]string{}, shape.required...), shape.optional...)
+		assertKeysEqual(t, shape.name+" full", jsonKeys(t, shape.full), keySet(fullKeys...))
+		assertKeysEqual(t, shape.name+" zero", jsonKeys(t, shape.zero), keySet(shape.required...))
+
+		// The hookEventName discriminator has the member's own event value
+		// and is distinct across the union.
+		raw := HookSpecificOutputMap(shape.full)
+		if raw["hookEventName"] != shape.eventName {
+			t.Errorf("%s: hookEventName: got %v, want %q", shape.name, raw["hookEventName"], shape.eventName)
+		}
+		if eventNames[shape.eventName] {
+			t.Errorf("duplicate event name %q across hook-specific outputs", shape.eventName)
+		}
+		eventNames[shape.eventName] = true
+	}
+	if len(eventNames) != len(hookSpecificOutputShapes()) {
+		t.Errorf("expected %d distinct event names, got %d", len(hookSpecificOutputShapes()), len(eventNames))
+	}
+}
+
+// TestHookSpecificOutputLiterals pins the decision/action literal sets,
+// mirroring python test_output_literals (Python SDK #1331).
+func TestHookSpecificOutputLiterals(t *testing.T) {
+	preModelSwitchDecisions := map[ModelSwitchPermissionDecision]bool{
+		ModelSwitchPermissionDecisionAllow: true,
+		ModelSwitchPermissionDecisionDeny:  true,
+		ModelSwitchPermissionDecisionAsk:   true,
+	}
+	if len(preModelSwitchDecisions) != 3 {
+		t.Errorf("ModelSwitchPermissionDecision: got %v", preModelSwitchDecisions)
+	}
+	preToolUseDecisions := map[HookPermissionDecision]bool{
+		HookPermissionDecisionAllow: true,
+		HookPermissionDecisionDeny:  true,
+		HookPermissionDecisionAsk:   true,
+		HookPermissionDecisionDefer: true,
+	}
+	if len(preToolUseDecisions) != 4 {
+		t.Errorf("HookPermissionDecision: got %v", preToolUseDecisions)
+	}
+	actions := map[ElicitationAction]bool{
+		ElicitationActionAccept:  true,
+		ElicitationActionDecline: true,
+		ElicitationActionCancel:  true,
+	}
+	if len(actions) != 3 {
+		t.Errorf("ElicitationAction: got %v", actions)
+	}
+}
+
+// TestUserPromptSubmitOutputSessionTitleAndSuppress mirrors the python test
+// of the same name (Python SDK #1331): sessionTitle and
+// suppressOriginalPrompt reach the wire.
+func TestUserPromptSubmitOutputSessionTitleAndSuppress(t *testing.T) {
+	suppress := true
+	output := UserPromptSubmitHookSpecificOutput{
+		SessionTitle:           "Refactor auth",
+		SuppressOriginalPrompt: &suppress,
+	}
+	m := HookSpecificOutputMap(output)
+	if m["sessionTitle"] != "Refactor auth" {
+		t.Errorf("sessionTitle: got %v", m["sessionTitle"])
+	}
+	if m["suppressOriginalPrompt"] != true {
+		t.Errorf("suppressOriginalPrompt: got %v", m["suppressOriginalPrompt"])
+	}
+	if m["hookEventName"] != "UserPromptSubmit" {
+		t.Errorf("hookEventName: got %v", m["hookEventName"])
+	}
+}
+
+// TestSessionStartOutputFields mirrors the python test of the same name
+// (Python SDK #1331).
+func TestSessionStartOutputFields(t *testing.T) {
+	reload := true
+	output := SessionStartHookSpecificOutput{
+		AdditionalContext:  "ctx",
+		InitialUserMessage: "Run the test suite",
+		SessionTitle:       "auth-refactor",
+		WatchPaths:         []string{"/repo/.envrc"},
+		ReloadSkills:       &reload,
+	}
+	m := HookSpecificOutputMap(output)
+	watch, ok := m["watchPaths"].([]interface{})
+	if !ok || len(watch) != 1 || watch[0] != "/repo/.envrc" {
+		t.Errorf("watchPaths: got %v", m["watchPaths"])
+	}
+	if m["reloadSkills"] != true {
+		t.Errorf("reloadSkills: got %v", m["reloadSkills"])
+	}
+	if m["initialUserMessage"] != "Run the test suite" {
+		t.Errorf("initialUserMessage: got %v", m["initialUserMessage"])
+	}
+	if m["sessionTitle"] != "auth-refactor" {
+		t.Errorf("sessionTitle: got %v", m["sessionTitle"])
+	}
+}
+
+// TestHookSpecificOutputMapInHookOutput drives a typed output through the
+// HookOutput bridge end-to-end: HookSpecificOutputMap is the Go adaptation
+// of Python putting its TypedDicts straight into HookJSONOutput.
+func TestHookSpecificOutputMapInHookOutput(t *testing.T) {
+	output := HookOutput{
+		Continue:           func() *bool { v := false; return &v }(),
+		HookSpecificOutput: HookSpecificOutputMap(StopHookSpecificOutput{AdditionalContext: "one more turn"}),
+	}
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	want := `{"continue":false,"hookSpecificOutput":{"additionalContext":"one more turn","hookEventName":"Stop"}}`
+	if string(data) != want {
+		t.Errorf("wire JSON: got %s, want %s", data, want)
+	}
+}
+
+// TestHookInputPromptIDAndEffort mirrors python
+// test_base_hook_input_prompt_id_and_effort (Python SDK #1331).
+func TestHookInputPromptIDAndEffort(t *testing.T) {
+	input := HookInput{
+		SessionID:      "sess-1",
+		TranscriptPath: "/tmp/transcript",
+		CWD:            "/home/user",
+		PromptID:       "550e8400-e29b-41d4-a716-446655440000",
+		Effort:         &HookEffort{Level: EffortLevelHigh},
+		HookEventName:  "PreToolUse",
+		ToolName:       "Bash",
+		ToolInput:      map[string]interface{}{"command": "ls"},
+		ToolUseID:      "toolu_1",
+	}
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if raw["prompt_id"] != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("prompt_id: got %v", raw["prompt_id"])
+	}
+	effort, ok := raw["effort"].(map[string]interface{})
+	if !ok || effort["level"] != "high" {
+		t.Errorf("effort: got %v", raw["effort"])
+	}
+
+	// The new fields are optional: a minimal input omits them.
+	minimal, err := json.Marshal(HookInput{HookEventName: "PreToolUse"})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	for _, key := range []string{"prompt_id", "effort", "duration_ms", "last_assistant_message", "background_tasks", "session_crons"} {
+		if strings.Contains(string(minimal), key) {
+			t.Errorf("minimal input should omit %s: %s", key, minimal)
+		}
+	}
+}
+
+// TestHookInputDurationMS mirrors python test_post_tool_use_duration_ms
+// (Python SDK #1331): duration_ms is an optional field of the tool-use
+// lifecycle inputs.
+func TestHookInputDurationMS(t *testing.T) {
+	input := HookInput{
+		SessionID:      "sess-1",
+		TranscriptPath: "/tmp/transcript",
+		CWD:            "/home/user",
+		HookEventName:  "PostToolUse",
+		ToolName:       "Bash",
+		ToolInput:      map[string]interface{}{"command": "ls"},
+		ToolResponse:   map[string]interface{}{"stdout": ""},
+		ToolUseID:      "toolu_1",
+		DurationMS:     12,
+	}
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if raw["duration_ms"] != float64(12) {
+		t.Errorf("duration_ms: got %v", raw["duration_ms"])
+	}
+}
+
+// TestHookInputBackgroundWork mirrors python
+// test_stop_hook_input_background_work (Python SDK #1331): Stop inputs carry
+// last_assistant_message, background_tasks, and session_crons.
+func TestHookInputBackgroundWork(t *testing.T) {
+	input := HookInput{
+		SessionID:            "sess-1",
+		TranscriptPath:       "/tmp/transcript",
+		CWD:                  "/home/user",
+		HookEventName:        "Stop",
+		StopHookActive:       false,
+		LastAssistantMessage: "Done.",
+		BackgroundTasks: []BackgroundTaskSummary{{
+			ID:          "task-1",
+			Type:        "shell",
+			Status:      "running",
+			Description: "npm test",
+			Command:     "npm test",
+		}},
+		SessionCrons: []SessionCronSummary{{
+			ID:        "cron-1",
+			Schedule:  "0 9 * * 1-5",
+			Recurring: true,
+			Prompt:    "check CI",
+		}},
+	}
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var roundTrip HookInput
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if roundTrip.LastAssistantMessage != "Done." {
+		t.Errorf("last_assistant_message: got %q", roundTrip.LastAssistantMessage)
+	}
+	if len(roundTrip.BackgroundTasks) != 1 || roundTrip.BackgroundTasks[0].Command != "npm test" {
+		t.Errorf("background_tasks: got %+v", roundTrip.BackgroundTasks)
+	}
+	if len(roundTrip.SessionCrons) != 1 || !roundTrip.SessionCrons[0].Recurring {
+		t.Errorf("session_crons: got %+v", roundTrip.SessionCrons)
+	}
+}
+
+// TestBackgroundWorkSummaryKeySets mirrors python
+// test_background_work_summary_key_sets (Python SDK #1331).
+func TestBackgroundWorkSummaryKeySets(t *testing.T) {
+	assertKeysEqual(t, "BackgroundTaskSummary full", jsonKeys(t, BackgroundTaskSummary{
+		ID:          "task-1",
+		Type:        "shell",
+		Status:      "running",
+		Description: "npm test",
+		Command:     "npm test",
+		AgentType:   "reviewer",
+		Server:      "docs",
+		Tool:        "search",
+		Name:        "audit",
+	}), keySet("id", "type", "status", "description", "command", "agent_type", "server", "tool", "name"))
+	assertKeysEqual(t, "BackgroundTaskSummary minimal", jsonKeys(t, BackgroundTaskSummary{
+		ID: "task-1", Type: "shell", Status: "running", Description: "npm test",
+	}), keySet("id", "type", "status", "description"))
+
+	assertKeysEqual(t, "SessionCronSummary", jsonKeys(t, SessionCronSummary{
+		ID: "cron-1", Schedule: "0 9 * * 1-5", Recurring: true, Prompt: "check CI",
+	}), keySet("id", "schedule", "recurring", "prompt"))
+
+	assertKeysEqual(t, "HookEffort", jsonKeys(t, HookEffort{Level: "high"}), keySet("level"))
+}
+
+// TestSandboxIgnoreViolationsIsCommandPatternMap mirrors python
+// test_sandbox_ignore_violations_is_command_pattern_map (Python SDK #1380):
+// ignoreViolations matches the CLI schema — command pattern -> substrings.
+func TestSandboxIgnoreViolationsIsCommandPatternMap(t *testing.T) {
+	settings := SandboxSettings{
+		Enabled:          true,
+		IgnoreViolations: SandboxIgnoreViolations{"*": []string{"/etc/hosts"}, "npm test": []string{"registry.npmjs.org"}},
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	ignore, ok := raw["ignoreViolations"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("ignoreViolations should be a map, got %T", raw["ignoreViolations"])
+	}
+	if _, ok := ignore["file"]; ok {
+		t.Errorf("legacy file key should not exist: %v", ignore)
+	}
+	if _, ok := ignore["network"]; ok {
+		t.Errorf("legacy network key should not exist: %v", ignore)
+	}
+	want := map[string][]string{
+		"*":        {"/etc/hosts"},
+		"npm test": {"registry.npmjs.org"},
+	}
+	for pattern, substrings := range want {
+		got, ok := ignore[pattern].([]interface{})
+		if !ok || len(got) != len(substrings) {
+			t.Errorf("pattern %q: got %v", pattern, ignore[pattern])
+			continue
+		}
+		for i, s := range substrings {
+			if got[i] != s {
+				t.Errorf("pattern %q[%d]: got %v, want %q", pattern, i, got[i], s)
+			}
+		}
+	}
+
+	// Round-trip preserves arbitrary command-pattern keys.
+	var roundTrip SandboxSettings
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if roundTrip.IgnoreViolations["npm test"][0] != "registry.npmjs.org" {
+		t.Errorf("round-trip: got %v", roundTrip.IgnoreViolations)
+	}
+
+	// The zero value omits ignoreViolations entirely.
+	empty, err := json.Marshal(SandboxSettings{Enabled: true})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if strings.Contains(string(empty), "ignoreViolations") {
+		t.Errorf("empty IgnoreViolations should be omitted: %s", empty)
+	}
+}

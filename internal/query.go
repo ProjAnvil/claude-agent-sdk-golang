@@ -377,6 +377,37 @@ type HookContext struct {
 	Signal interface{}
 }
 
+// HookEffort is the reasoning effort in effect when a hook fires (internal
+// mirror of the public claude.HookEffort).
+type HookEffort struct {
+	Level string
+}
+
+// BackgroundTaskSummary is an in-flight background task, as listed on Stop
+// and SubagentStop hook inputs (internal mirror of the public
+// claude.BackgroundTaskSummary).
+type BackgroundTaskSummary struct {
+	ID          string
+	Type        string
+	Status      string
+	Description string
+	Command     string
+	AgentType   string
+	Server      string
+	Tool        string
+	Name        string
+}
+
+// SessionCronSummary is a session-scoped scheduled wakeup, as listed on Stop
+// and SubagentStop hook inputs (internal mirror of the public
+// claude.SessionCronSummary).
+type SessionCronSummary struct {
+	ID        string
+	Schedule  string
+	Recurring bool
+	Prompt    string
+}
+
 // HookInput contains data passed to hook callbacks.
 type HookInput struct {
 	HookEventName         string
@@ -384,12 +415,15 @@ type HookInput struct {
 	TranscriptPath        string
 	CWD                   string
 	PermissionMode        string
+	PromptID              string
+	Effort                *HookEffort
 	ToolName              string
 	ToolInput             map[string]interface{}
 	ToolResponse          interface{}
 	ToolUseID             string
 	Error                 string
 	IsInterrupt           bool
+	DurationMS            int
 	Prompt                string
 	StopHookActive        bool
 	AgentID               string
@@ -401,6 +435,9 @@ type HookInput struct {
 	Title                 string
 	NotificationType      string
 	PermissionSuggestions []map[string]interface{}
+	LastAssistantMessage  string
+	BackgroundTasks       []BackgroundTaskSummary
+	SessionCrons          []SessionCronSummary
 }
 
 // HookOutput defines the response from a hook callback.
@@ -1603,6 +1640,13 @@ func (q *Query) handleHookCallback(ctx context.Context, request map[string]inter
 	if permissionMode, ok := inputData["permission_mode"].(string); ok {
 		hookInput.PermissionMode = permissionMode
 	}
+	if promptID, ok := inputData["prompt_id"].(string); ok {
+		hookInput.PromptID = promptID
+	}
+	if effort, ok := inputData["effort"].(map[string]interface{}); ok {
+		level, _ := effort["level"].(string)
+		hookInput.Effort = &HookEffort{Level: level}
+	}
 	if toolUseIDValue, ok := inputData["tool_use_id"].(string); ok {
 		hookInput.ToolUseID = toolUseIDValue
 	}
@@ -1611,6 +1655,9 @@ func (q *Query) handleHookCallback(ctx context.Context, request map[string]inter
 	}
 	if isInterrupt, ok := inputData["is_interrupt"].(bool); ok {
 		hookInput.IsInterrupt = isInterrupt
+	}
+	if durationMS, ok := inputData["duration_ms"].(float64); ok {
+		hookInput.DurationMS = int(durationMS)
 	}
 	if stopHookActive, ok := inputData["stop_hook_active"].(bool); ok {
 		hookInput.StopHookActive = stopHookActive
@@ -1643,6 +1690,38 @@ func (q *Query) handleHookCallback(ctx context.Context, request map[string]inter
 		for _, s := range permissionSuggestions {
 			if m, ok := s.(map[string]interface{}); ok {
 				hookInput.PermissionSuggestions = append(hookInput.PermissionSuggestions, m)
+			}
+		}
+	}
+	if lastAssistantMessage, ok := inputData["last_assistant_message"].(string); ok {
+		hookInput.LastAssistantMessage = lastAssistantMessage
+	}
+	if tasks, ok := inputData["background_tasks"].([]interface{}); ok {
+		for _, t := range tasks {
+			if m, ok := t.(map[string]interface{}); ok {
+				task := BackgroundTaskSummary{}
+				task.ID, _ = m["id"].(string)
+				task.Type, _ = m["type"].(string)
+				task.Status, _ = m["status"].(string)
+				task.Description, _ = m["description"].(string)
+				task.Command, _ = m["command"].(string)
+				task.AgentType, _ = m["agent_type"].(string)
+				task.Server, _ = m["server"].(string)
+				task.Tool, _ = m["tool"].(string)
+				task.Name, _ = m["name"].(string)
+				hookInput.BackgroundTasks = append(hookInput.BackgroundTasks, task)
+			}
+		}
+	}
+	if crons, ok := inputData["session_crons"].([]interface{}); ok {
+		for _, c := range crons {
+			if m, ok := c.(map[string]interface{}); ok {
+				cron := SessionCronSummary{}
+				cron.ID, _ = m["id"].(string)
+				cron.Schedule, _ = m["schedule"].(string)
+				cron.Recurring, _ = m["recurring"].(bool)
+				cron.Prompt, _ = m["prompt"].(string)
+				hookInput.SessionCrons = append(hookInput.SessionCrons, cron)
 			}
 		}
 	}

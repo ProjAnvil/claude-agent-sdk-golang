@@ -169,7 +169,7 @@ func TestConvertToTransportOptionsFull(t *testing.T) {
 				AllowedDomains: []string{"example.com"},
 				HTTPProxyPort:  8080,
 			},
-			IgnoreViolations: &SandboxIgnoreViolations{File: []string{"/tmp"}},
+			IgnoreViolations: SandboxIgnoreViolations{"*": []string{"/tmp"}},
 		},
 	}
 
@@ -239,7 +239,7 @@ func TestConvertToTransportOptionsFull(t *testing.T) {
 	if to.Sandbox.Network == nil || to.Sandbox.Network.HTTPProxyPort != 8080 {
 		t.Errorf("Sandbox.Network: got %+v", to.Sandbox.Network)
 	}
-	if to.Sandbox.IgnoreViolations == nil || len(to.Sandbox.IgnoreViolations.File) != 1 {
+	if to.Sandbox.IgnoreViolations == nil || len(to.Sandbox.IgnoreViolations["*"]) != 1 {
 		t.Errorf("Sandbox.IgnoreViolations: got %+v", to.Sandbox.IgnoreViolations)
 	}
 }
@@ -387,6 +387,46 @@ func TestCreateInternalQueryConfigConversions(t *testing.T) {
 	}
 	if hookErr == nil || hookErr.Error() != "hook exploded" {
 		t.Errorf("unexpected hook error: %v", hookErr)
+	}
+
+	{
+		// The v0.2.166 input fields (Python SDK #1331) survive the
+		// public-hook mapping, including the nested typed conversions.
+		var got HookInput
+		reportFields := func(input HookInput, toolUseID string, ctx HookContext) (HookOutput, error) {
+			got = input
+			return HookOutput{}, nil
+		}
+		reportOpts := &ClaudeAgentOptions{
+			Hooks: map[HookEvent][]HookMatcher{
+				HookEventStop: {{Matcher: "", Hooks: []HookCallback{reportFields}}},
+			},
+		}
+		reportCfg, err := createInternalQueryConfig(reportOpts, nil)
+		if err != nil {
+			t.Fatalf("createInternalQueryConfig failed: %v", err)
+		}
+		reportMatchers := reportCfg.Hooks[string(HookEventStop)]
+		if len(reportMatchers) != 1 || len(reportMatchers[0].Hooks) != 1 {
+			t.Fatalf("report hook not converted: %+v", reportCfg.Hooks)
+		}
+		if _, err := reportMatchers[0].Hooks[0](internal.HookInput{
+			HookEventName:        "Stop",
+			PromptID:             "p1",
+			Effort:               &internal.HookEffort{Level: "high"},
+			DurationMS:           12,
+			LastAssistantMessage: "Done.",
+			BackgroundTasks:      []internal.BackgroundTaskSummary{{ID: "task-1", Type: "shell", Status: "running", Description: "npm test", Command: "npm test"}},
+			SessionCrons:         []internal.SessionCronSummary{{ID: "cron-1", Schedule: "0 9 * * 1-5", Recurring: true, Prompt: "check CI"}},
+		}, "tu-3", internal.HookContext{}); err != nil {
+			t.Fatalf("report hook call failed: %v", err)
+		}
+		if got.PromptID != "p1" || got.Effort == nil || got.Effort.Level != "high" || got.DurationMS != 12 ||
+			got.LastAssistantMessage != "Done." ||
+			len(got.BackgroundTasks) != 1 || got.BackgroundTasks[0].Command != "npm test" ||
+			len(got.SessionCrons) != 1 || !got.SessionCrons[0].Recurring {
+			t.Errorf("hook input fields lost in conversion: %+v", got)
+		}
 	}
 
 	// SDK MCP server conversion.

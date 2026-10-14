@@ -124,13 +124,13 @@ type ThinkingConfig struct {
 
 // SandboxSettings configures bash command sandboxing.
 type SandboxSettings struct {
-	Enabled                   bool                     `json:"enabled,omitempty"`
-	AutoAllowBashIfSandboxed  bool                     `json:"autoAllowBashIfSandboxed,omitempty"`
-	ExcludedCommands          []string                 `json:"excludedCommands,omitempty"`
-	AllowUnsandboxedCommands  bool                     `json:"allowUnsandboxedCommands,omitempty"`
-	Network                   *SandboxNetworkConfig    `json:"network,omitempty"`
-	IgnoreViolations          *SandboxIgnoreViolations `json:"ignoreViolations,omitempty"`
-	EnableWeakerNestedSandbox bool                     `json:"enableWeakerNestedSandbox,omitempty"`
+	Enabled                   bool                    `json:"enabled,omitempty"`
+	AutoAllowBashIfSandboxed  bool                    `json:"autoAllowBashIfSandboxed,omitempty"`
+	ExcludedCommands          []string                `json:"excludedCommands,omitempty"`
+	AllowUnsandboxedCommands  bool                    `json:"allowUnsandboxedCommands,omitempty"`
+	Network                   *SandboxNetworkConfig   `json:"network,omitempty"`
+	IgnoreViolations          SandboxIgnoreViolations `json:"ignoreViolations,omitempty"`
+	EnableWeakerNestedSandbox bool                    `json:"enableWeakerNestedSandbox,omitempty"`
 }
 
 // SandboxNetworkConfig configures network settings for sandbox.
@@ -146,11 +146,11 @@ type SandboxNetworkConfig struct {
 	SOCKSProxyPort          int      `json:"socksProxyPort,omitempty"`
 }
 
-// SandboxIgnoreViolations specifies violations to ignore.
-type SandboxIgnoreViolations struct {
-	File    []string `json:"file,omitempty"`
-	Network []string `json:"network,omitempty"`
-}
+// SandboxIgnoreViolations maps a command pattern to the violation substrings
+// to leave unreported. The pattern "*" matches every command; both checks
+// are plain substring matches, not globs. This only affects which violations
+// are reported, not what the sandbox blocks.
+type SandboxIgnoreViolations map[string][]string
 
 // DefaultTransportOptions returns default options.
 func DefaultTransportOptions() *TransportOptions {

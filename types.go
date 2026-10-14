@@ -209,12 +209,167 @@ type AssistantMessage struct {
 func (m *AssistantMessage) messageMarker() {}
 
 // SystemMessage represents a system message with metadata.
+//
+// For Subtype "init", Data is the session metadata frame described by
+// SystemInitData — decode it with ParseSystemInitData.
 type SystemMessage struct {
 	Subtype string                 `json:"subtype"`
 	Data    map[string]interface{} `json:"data"`
 }
 
 func (m *SystemMessage) messageMarker() {}
+
+// SystemInitMcpServer is an MCP server listed in SystemInitData.
+type SystemInitMcpServer struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	// Source is where the server definition came from: "sdk", "plugin", or a
+	// config scope such as "user" or "project". Empty on CLIs that predate
+	// the field.
+	Source string `json:"source,omitempty"`
+}
+
+// SystemInitPlugin is a loaded plugin listed in SystemInitData.
+type SystemInitPlugin struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	// Version is the version declared in the plugin's manifest, verbatim.
+	// Empty when the manifest declares none.
+	Version string `json:"version,omitempty"`
+}
+
+// SystemInitPluginError is a plugin load failure listed in SystemInitData.
+type SystemInitPluginError struct {
+	// Plugin is "name@marketplace", or a positional tag such as "inline[0]"
+	// or "synced[0]" when a directory entry failed before it had a name.
+	Plugin string `json:"plugin"`
+	// Type is a failure category from an open set (e.g. "path-not-found",
+	// "manifest-validation-error"). Treat unknown values as a generic
+	// failure.
+	Type string `json:"type"`
+	// Message describes the failure.
+	Message string `json:"message"`
+	// Path is present only when a plugins, --plugin-dir or synced directory
+	// entry did not load at all: that entry's path, resolved against the
+	// cwd. Use it to match a positional Plugin tag to your entry.
+	Path string `json:"path,omitempty"`
+}
+
+// FastModeState is the fast mode state reported in SystemInitData.
+type FastModeState string
+
+const (
+	FastModeStateOff      FastModeState = "off"
+	FastModeStateCooldown FastModeState = "cooldown"
+	FastModeStateOn       FastModeState = "on"
+)
+
+// FastModeDisabledReason names why fast mode cannot serve right now, as
+// reported in SystemInitData. Newer CLIs may send values not listed here.
+type FastModeDisabledReason string
+
+const (
+	FastModeDisabledReasonFree               FastModeDisabledReason = "free"
+	FastModeDisabledReasonPreference         FastModeDisabledReason = "preference"
+	FastModeDisabledReasonExtraUsageDisabled FastModeDisabledReason = "extra_usage_disabled"
+	FastModeDisabledReasonNetworkError       FastModeDisabledReason = "network_error"
+	FastModeDisabledReasonUnknown            FastModeDisabledReason = "unknown"
+	FastModeDisabledReasonNotFirstParty      FastModeDisabledReason = "not_first_party"
+	FastModeDisabledReasonDisabledByEnv      FastModeDisabledReason = "disabled_by_env"
+	FastModeDisabledReasonModelNotAllowed    FastModeDisabledReason = "model_not_allowed"
+	FastModeDisabledReasonSdkOptInRequired   FastModeDisabledReason = "sdk_opt_in_required"
+	FastModeDisabledReasonPending            FastModeDisabledReason = "pending"
+)
+
+// SystemInitData is the shape of SystemMessage.Data for a system/init
+// message.
+//
+// The CLI emits this session metadata at the start of each turn: model,
+// working directory, tools, MCP servers, slash commands, permission mode,
+// and the capabilities list for feature detection. Mirrors the fields the
+// TypeScript SDK reference documents for SDKSystemMessage, with the same key
+// names as on the wire.
+//
+// The parser does not validate the payload, so this describes what the CLI
+// sends rather than a guarantee. Narrow Data once you have checked the
+// subtype:
+//
+//	if msg, ok := message.(*claude.SystemMessage); ok && msg.Subtype == "init" {
+//		init, err := claude.ParseSystemInitData(msg.Data)
+//		// init.Model, init.Capabilities, ...
+//	}
+type SystemInitData struct {
+	Type    string `json:"type"`    // always "system"
+	Subtype string `json:"subtype"` // always "init"
+	UUID    string `json:"uuid"`
+	// SessionID is the ID of the session this frame opened.
+	SessionID string `json:"session_id"`
+	// Agents lists the agent types available to the Agent tool.
+	Agents []string `json:"agents,omitempty"`
+	// APIKeySource is where the API credential came from:
+	// "ANTHROPIC_API_KEY", "apiKeyHelper", "/login managed key", or "none"
+	// (no API key in use, e.g. a claude.ai login or a third-party cloud
+	// provider).
+	APIKeySource string   `json:"apiKeySource"`
+	Betas        []string `json:"betas,omitempty"`
+	// ClaudeCodeVersion is the CLI version serving this session.
+	ClaudeCodeVersion string `json:"claude_code_version"`
+	// CWD is the CLI process's working directory.
+	CWD string `json:"cwd"`
+	// Tools lists the tool names enabled for this session.
+	Tools []string `json:"tools"`
+	// MCPServers lists the MCP servers configured for this session.
+	MCPServers []SystemInitMcpServer `json:"mcp_servers"`
+	// Model is the model id serving this session.
+	Model string `json:"model"`
+	// PermissionMode is the permission mode the session started in.
+	PermissionMode PermissionMode `json:"permissionMode"`
+	// SlashCommands lists the available slash commands.
+	SlashCommands []string `json:"slash_commands"`
+	// TerminalSlashCommands lists the entries of SlashCommands whose
+	// interface is bound to the local terminal (e.g. exit). Present only
+	// when non-empty.
+	TerminalSlashCommands []string `json:"terminal_slash_commands,omitempty"`
+	// OutputStyle is the active output style name.
+	OutputStyle string `json:"output_style"`
+	// Skills lists the skill names available to the session.
+	Skills []string `json:"skills"`
+	// Plugins lists the loaded plugins.
+	Plugins []SystemInitPlugin `json:"plugins"`
+	// PluginErrors lists plugin load failures. The CLI omits the key when
+	// nothing failed, but an empty list does not by itself assert a clean
+	// load (older CLIs and some hosted sessions never send it).
+	PluginErrors []SystemInitPluginError `json:"plugin_errors,omitempty"`
+	// FastModeState reports whether fast mode is serving this session.
+	FastModeState FastModeState `json:"fast_mode_state,omitempty"`
+	// FastModeDisabledReason names the check that blocks fast mode, when
+	// something does.
+	FastModeDisabledReason FastModeDisabledReason `json:"fast_mode_disabled_reason,omitempty"`
+	// Capabilities lists protocol capabilities this CLI supports (e.g.
+	// "interrupt_receipt_v1"), for feature detection instead of comparing
+	// ClaudeCodeVersion. Open set: ignore values you don't recognize.
+	// Absent on CLIs before 2.1.205.
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// ParseSystemInitData decodes the Data map of a SystemMessage with Subtype
+// "init" into the typed SystemInitData payload. It is the Go equivalent of
+// Python's cast to SystemInitData: the parser keeps returning a plain
+// SystemMessage for init frames, and this narrows the payload. The CLI's
+// payload is not validated, so unknown keys are ignored and absent optional
+// fields are left zero — callers that need the raw frame should read
+// SystemMessage.Data directly.
+func ParseSystemInitData(data map[string]interface{}) (*SystemInitData, error) {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	var init SystemInitData
+	if err := json.Unmarshal(raw, &init); err != nil {
+		return nil, err
+	}
+	return &init, nil
+}
 
 // DeferredToolUse represents a tool use that was deferred by a PreToolUse hook
 // returning decision "defer".
@@ -786,13 +941,15 @@ type AgentDefinition struct {
 
 // SandboxSettings configures bash command sandboxing.
 type SandboxSettings struct {
-	Enabled                   bool                     `json:"enabled,omitempty"`
-	AutoAllowBashIfSandboxed  bool                     `json:"autoAllowBashIfSandboxed,omitempty"`
-	ExcludedCommands          []string                 `json:"excludedCommands,omitempty"`
-	AllowUnsandboxedCommands  bool                     `json:"allowUnsandboxedCommands,omitempty"`
-	Network                   *SandboxNetworkConfig    `json:"network,omitempty"`
-	IgnoreViolations          *SandboxIgnoreViolations `json:"ignoreViolations,omitempty"`
-	EnableWeakerNestedSandbox bool                     `json:"enableWeakerNestedSandbox,omitempty"`
+	Enabled                  bool                  `json:"enabled,omitempty"`
+	AutoAllowBashIfSandboxed bool                  `json:"autoAllowBashIfSandboxed,omitempty"`
+	ExcludedCommands         []string              `json:"excludedCommands,omitempty"`
+	AllowUnsandboxedCommands bool                  `json:"allowUnsandboxedCommands,omitempty"`
+	Network                  *SandboxNetworkConfig `json:"network,omitempty"`
+	// IgnoreViolations maps a command pattern to the violation substrings
+	// to leave unreported — see SandboxIgnoreViolations.
+	IgnoreViolations          SandboxIgnoreViolations `json:"ignoreViolations,omitempty"`
+	EnableWeakerNestedSandbox bool                    `json:"enableWeakerNestedSandbox,omitempty"`
 }
 
 // SandboxNetworkConfig configures network settings for sandbox.
@@ -808,11 +965,21 @@ type SandboxNetworkConfig struct {
 	SOCKSProxyPort          int      `json:"socksProxyPort,omitempty"`
 }
 
-// SandboxIgnoreViolations specifies violations to ignore.
-type SandboxIgnoreViolations struct {
-	File    []string `json:"file,omitempty"`
-	Network []string `json:"network,omitempty"`
-}
+// SandboxIgnoreViolations specifies sandbox violations to leave unreported.
+//
+// It maps a command pattern to a list of strings. A violation is left
+// unreported when the command's text contains the pattern and the
+// violation's text contains one of the strings. The pattern "*" matches
+// every command. Both checks are plain substring matches, not globs.
+//
+// For example, SandboxIgnoreViolations{"*": {"/etc/hosts"}} leaves
+// violations that mention /etc/hosts unreported for every command.
+//
+// This only affects which violations are reported, not what the sandbox
+// blocks. (The CLI's settings schema is Record<string, string[]>: keys are
+// command patterns, so the earlier file/network struct shape was read by
+// the CLI as the command patterns "file" and "network".)
+type SandboxIgnoreViolations map[string][]string
 
 // PluginConfig configures a plugin.
 type PluginConfig struct {
@@ -899,19 +1066,75 @@ type HookContext struct {
 	Signal interface{} // Future: abort signal support
 }
 
+// HookEffort is the reasoning effort in effect when a hook fires.
+type HookEffort struct {
+	// Level is the effort level for the current turn (e.g. "low", "high",
+	// "max"), after any downgrade for the selected model.
+	Level EffortLevel `json:"level"`
+}
+
+// BackgroundTaskSummary is an in-flight background task, as listed on Stop
+// and SubagentStop hook inputs.
+//
+// Description and Command are capped at 1000 characters by the CLI; a
+// clipped value ends with an in-string "… [+N chars]" marker, so it is not
+// always the original text.
+type BackgroundTaskSummary struct {
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	Description string `json:"description"`
+	// Command is the shell command line. Only present for "shell" tasks.
+	Command string `json:"command,omitempty"`
+	// AgentType is the subagent type name. Only present for "subagent"
+	// tasks.
+	AgentType string `json:"agent_type,omitempty"`
+	// Server is the MCP server name. Only present for "monitor" / MCP tasks.
+	Server string `json:"server,omitempty"`
+	// Tool is the MCP tool name. Only present for "monitor" / MCP tasks.
+	Tool string `json:"tool,omitempty"`
+	// Name is the workflow name. Only present for "workflow" tasks.
+	Name string `json:"name,omitempty"`
+}
+
+// SessionCronSummary is a session-scoped scheduled wakeup, as listed on Stop
+// and SubagentStop hook inputs.
+type SessionCronSummary struct {
+	ID       string `json:"id"`
+	Schedule string `json:"schedule"`
+	// Recurring is false for one-shot wakeups and true for tasks that
+	// re-fire on every match.
+	Recurring bool `json:"recurring"`
+	// Prompt is the prompt submitted when the cron fires. Capped at 1000
+	// characters by the CLI; a clipped value ends with an in-string
+	// "… [+N chars]" marker.
+	Prompt string `json:"prompt"`
+}
+
 // HookInput contains data passed to hook callbacks.
 type HookInput struct {
-	HookEventName         string                   `json:"hook_event_name"`
-	SessionID             string                   `json:"session_id"`
-	TranscriptPath        string                   `json:"transcript_path"`
-	CWD                   string                   `json:"cwd"`
-	PermissionMode        string                   `json:"permission_mode,omitempty"`
-	ToolName              string                   `json:"tool_name,omitempty"`              // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest (includes agent_id/agent_type for subagents)
-	ToolInput             map[string]interface{}   `json:"tool_input,omitempty"`             // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
-	ToolResponse          interface{}              `json:"tool_response,omitempty"`          // PostToolUse
-	ToolUseID             string                   `json:"tool_use_id,omitempty"`            // PreToolUse, PostToolUse, PostToolUseFailure
-	Error                 string                   `json:"error,omitempty"`                  // PostToolUseFailure
-	IsInterrupt           bool                     `json:"is_interrupt,omitempty"`           // PostToolUseFailure
+	HookEventName  string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	CWD            string `json:"cwd"`
+	PermissionMode string `json:"permission_mode,omitempty"`
+	// PromptID is the UUID of the user prompt being processed. Matches the
+	// prompt.id attribute on OpenTelemetry events. Empty until the first
+	// user input.
+	PromptID string `json:"prompt_id,omitempty"`
+	// Effort is the effort in effect for the current turn. Present for hooks
+	// that fire within a tool-use context (PreToolUse, PostToolUse, Stop,
+	// SubagentStop, etc.) on models that support effort.
+	Effort       *HookEffort            `json:"effort,omitempty"`
+	ToolName     string                 `json:"tool_name,omitempty"`     // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest (includes agent_id/agent_type for subagents)
+	ToolInput    map[string]interface{} `json:"tool_input,omitempty"`    // PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
+	ToolResponse interface{}            `json:"tool_response,omitempty"` // PostToolUse
+	ToolUseID    string                 `json:"tool_use_id,omitempty"`   // PreToolUse, PostToolUse, PostToolUseFailure
+	Error        string                 `json:"error,omitempty"`         // PostToolUseFailure
+	IsInterrupt  bool                   `json:"is_interrupt,omitempty"`  // PostToolUseFailure
+	// DurationMS is the tool execution time in milliseconds. Excludes
+	// permission-prompt and hook time. PostToolUse, PostToolUseFailure.
+	DurationMS            int                      `json:"duration_ms,omitempty"`
 	Prompt                string                   `json:"prompt,omitempty"`                 // UserPromptSubmit
 	StopHookActive        bool                     `json:"stop_hook_active,omitempty"`       // Stop, SubagentStop
 	AgentID               string                   `json:"agent_id,omitempty"`               // SubagentStop, SubagentStart, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest
@@ -923,6 +1146,17 @@ type HookInput struct {
 	Title                 string                   `json:"title,omitempty"`                  // Notification
 	NotificationType      string                   `json:"notification_type,omitempty"`      // Notification
 	PermissionSuggestions []map[string]interface{} `json:"permission_suggestions,omitempty"` // PermissionRequest
+	// LastAssistantMessage is the text content of the (sub)agent's last
+	// assistant message before stopping. Stop, SubagentStop.
+	LastAssistantMessage string `json:"last_assistant_message,omitempty"`
+	// BackgroundTasks is the in-flight background work in this session
+	// (scoped to the parent session for SubagentStop). Empty when nothing is
+	// in flight. Stop, SubagentStop.
+	BackgroundTasks []BackgroundTaskSummary `json:"background_tasks,omitempty"`
+	// SessionCrons is the session-scoped scheduled wakeups that will resume
+	// this session later (scoped to the parent session for SubagentStop).
+	// Empty when none are scheduled. Stop, SubagentStop.
+	SessionCrons []SessionCronSummary `json:"session_crons,omitempty"`
 }
 
 // HookOutput defines the response from a hook callback.
@@ -936,6 +1170,433 @@ type HookOutput struct {
 	SystemMessage      string                 `json:"systemMessage,omitempty"`
 	Reason             string                 `json:"reason,omitempty"`
 	HookSpecificOutput map[string]interface{} `json:"hookSpecificOutput,omitempty"`
+}
+
+// HookPermissionDecision is a PreToolUse hook's permission decision.
+type HookPermissionDecision string
+
+const (
+	// HookPermissionDecisionAllow allows the tool call.
+	HookPermissionDecisionAllow HookPermissionDecision = "allow"
+	// HookPermissionDecisionDeny denies the tool call.
+	HookPermissionDecisionDeny HookPermissionDecision = "deny"
+	// HookPermissionDecisionAsk asks the user to decide.
+	HookPermissionDecisionAsk HookPermissionDecision = "ask"
+	// HookPermissionDecisionDefer defers the tool call (PreToolUse only).
+	HookPermissionDecisionDefer HookPermissionDecision = "defer"
+)
+
+// ModelSwitchPermissionDecision is a PreModelSwitch hook's decision on the
+// pending model switch.
+type ModelSwitchPermissionDecision string
+
+const (
+	// ModelSwitchPermissionDecisionAllow proceeds with the switch.
+	ModelSwitchPermissionDecisionAllow ModelSwitchPermissionDecision = "allow"
+	// ModelSwitchPermissionDecisionDeny cancels the switch.
+	ModelSwitchPermissionDecisionDeny ModelSwitchPermissionDecision = "deny"
+	// ModelSwitchPermissionDecisionAsk is treated as a refusal outside an
+	// interactive session.
+	ModelSwitchPermissionDecisionAsk ModelSwitchPermissionDecision = "ask"
+)
+
+// ElicitationAction answers an MCP elicitation request from a hook.
+type ElicitationAction string
+
+const (
+	// ElicitationActionAccept submits the form field values.
+	ElicitationActionAccept ElicitationAction = "accept"
+	// ElicitationActionDecline declines the elicitation request.
+	ElicitationActionDecline ElicitationAction = "decline"
+	// ElicitationActionCancel cancels the elicitation request.
+	ElicitationActionCancel ElicitationAction = "cancel"
+)
+
+// HookSpecificOutputMap converts a typed hook-specific output struct (any of
+// the *HookSpecificOutput types below) into the map form that
+// HookOutput.HookSpecificOutput expects, using the struct's JSON tags.
+// Python can put its hookSpecificOutput TypedDicts in HookJSONOutput
+// directly; Go's field is a map, so this is the bridge:
+//
+//	HookSpecificOutput: claude.HookSpecificOutputMap(
+//	    claude.StopHookSpecificOutput{AdditionalContext: "one more turn"},
+//	)
+//
+// It panics only if the value cannot be JSON-marshaled — hook-specific
+// outputs are plain data, so that is a programming error.
+func HookSpecificOutputMap[T any](output T) map[string]interface{} {
+	raw, err := json.Marshal(output)
+	if err != nil {
+		panic(fmt.Sprintf("claude: marshaling hook-specific output: %v", err))
+	}
+	m := make(map[string]interface{})
+	if err := json.Unmarshal(raw, &m); err != nil {
+		panic(fmt.Sprintf("claude: unmarshaling hook-specific output: %v", err))
+	}
+	return m
+}
+
+// marshalHookSpecificOutput marshals a hook-specific output struct (passed
+// as a method-less alias to avoid recursing through its MarshalJSON) and
+// stamps the hookEventName discriminator onto the object — the Go analogue
+// of the Python SDK's Literal-typed hookEventName keys, which cannot carry a
+// mismatched event name.
+func marshalHookSpecificOutput(eventName string, v any) ([]byte, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	m["hookEventName"] = eventName
+	return json.Marshal(m)
+}
+
+// Hook-specific output types. Each is the hookSpecificOutput payload for one
+// hook event, discriminated by its HookEventName field. The set mirrors the
+// Python SDK's HookSpecificOutput union at v0.2.166.
+
+// PreToolUseHookSpecificOutput is hook-specific output for PreToolUse events.
+type PreToolUseHookSpecificOutput struct {
+	HookEventName            string                 `json:"hookEventName"` // "PreToolUse"
+	PermissionDecision       HookPermissionDecision `json:"permissionDecision,omitempty"`
+	PermissionDecisionReason string                 `json:"permissionDecisionReason,omitempty"`
+	UpdatedInput             map[string]interface{} `json:"updatedInput,omitempty"`
+	AdditionalContext        string                 `json:"additionalContext,omitempty"`
+}
+
+// PostToolUseHookSpecificOutput is hook-specific output for PostToolUse events.
+type PostToolUseHookSpecificOutput struct {
+	HookEventName string `json:"hookEventName"` // "PostToolUse"
+	// AdditionalContext is extra context delivered to the model.
+	AdditionalContext string `json:"additionalContext,omitempty"`
+	// UpdatedToolOutput replaces the tool output before it is sent to the
+	// model. For built-in tools (Bash, Read, Edit, etc.) the value must
+	// match the tool's output schema (e.g. {"stdout": ..., "stderr": ...,
+	// "interrupted": ...} for Bash); a mismatched shape is rejected and the
+	// original output is kept.
+	UpdatedToolOutput interface{} `json:"updatedToolOutput,omitempty"`
+	// UpdatedMCPToolOutput replaces the output for MCP tools only. Prefer
+	// UpdatedToolOutput, which works for all tools.
+	UpdatedMCPToolOutput interface{} `json:"updatedMCPToolOutput,omitempty"`
+}
+
+// PostToolUseFailureHookSpecificOutput is hook-specific output for
+// PostToolUseFailure events.
+type PostToolUseFailureHookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"` // "PostToolUseFailure"
+	AdditionalContext string `json:"additionalContext,omitempty"`
+}
+
+// UserPromptSubmitHookSpecificOutput is hook-specific output for
+// UserPromptSubmit events.
+type UserPromptSubmitHookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"` // "UserPromptSubmit"
+	AdditionalContext string `json:"additionalContext,omitempty"`
+	// SessionTitle sets the session title.
+	SessionTitle string `json:"sessionTitle,omitempty"`
+	// SuppressOriginalPrompt omits the original prompt from the block
+	// message when Decision (on HookOutput) is "block".
+	SuppressOriginalPrompt *bool `json:"suppressOriginalPrompt,omitempty"`
+}
+
+// UserPromptExpansionHookSpecificOutput is hook-specific output for
+// UserPromptExpansion events.
+type UserPromptExpansionHookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"` // "UserPromptExpansion"
+	AdditionalContext string `json:"additionalContext,omitempty"`
+	// SuppressOriginalPrompt omits the original prompt from the block
+	// message when Decision (on HookOutput) is "block".
+	SuppressOriginalPrompt *bool `json:"suppressOriginalPrompt,omitempty"`
+}
+
+// SessionStartHookSpecificOutput is hook-specific output for SessionStart events.
+type SessionStartHookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"` // "SessionStart"
+	AdditionalContext string `json:"additionalContext,omitempty"`
+	// InitialUserMessage is used as the first user message of the session.
+	InitialUserMessage string `json:"initialUserMessage,omitempty"`
+	// SessionTitle sets the session title. Ignored when the session starts
+	// from clear or compact.
+	SessionTitle string `json:"sessionTitle,omitempty"`
+	// WatchPaths are absolute paths to watch for FileChanged events during
+	// this session.
+	WatchPaths []string `json:"watchPaths,omitempty"`
+	// ReloadSkills re-scans skill and command directories after
+	// SessionStart hooks complete, so skills the hook installed are
+	// available in the same session.
+	ReloadSkills *bool `json:"reloadSkills,omitempty"`
+}
+
+// NotificationHookSpecificOutput is hook-specific output for Notification events.
+type NotificationHookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"` // "Notification"
+	AdditionalContext string `json:"additionalContext,omitempty"`
+}
+
+// SubagentStartHookSpecificOutput is hook-specific output for SubagentStart
+// events.
+type SubagentStartHookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"` // "SubagentStart"
+	AdditionalContext string `json:"additionalContext,omitempty"`
+}
+
+// PermissionRequestHookSpecificOutput is hook-specific output for
+// PermissionRequest events.
+type PermissionRequestHookSpecificOutput struct {
+	HookEventName string `json:"hookEventName"` // "PermissionRequest"
+	// Decision is the programmatic permission decision. Its shape follows
+	// the CLI's classifier-verdict schema; required when this output is
+	// sent.
+	Decision map[string]interface{} `json:"decision"`
+}
+
+// PostToolBatchHookSpecificOutput is hook-specific output for PostToolBatch
+// events.
+type PostToolBatchHookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"` // "PostToolBatch"
+	AdditionalContext string `json:"additionalContext,omitempty"`
+}
+
+// StopHookSpecificOutput is hook-specific output for Stop events.
+//
+// AdditionalContext is non-error feedback delivered to the model; the
+// conversation continues so the model can act on it.
+type StopHookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"` // "Stop"
+	AdditionalContext string `json:"additionalContext,omitempty"`
+}
+
+// SubagentStopHookSpecificOutput is hook-specific output for SubagentStop
+// events.
+//
+// AdditionalContext is non-error feedback delivered to the subagent; the
+// subagent continues so it can act on it.
+type SubagentStopHookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"` // "SubagentStop"
+	AdditionalContext string `json:"additionalContext,omitempty"`
+}
+
+// PermissionDeniedHookSpecificOutput is hook-specific output for
+// PermissionDenied events.
+type PermissionDeniedHookSpecificOutput struct {
+	HookEventName string `json:"hookEventName"` // "PermissionDenied"
+	// Retry tells the model it may retry the denied tool call. Ignored for
+	// denials without a classifier verdict.
+	Retry *bool `json:"retry,omitempty"`
+}
+
+// PreModelSwitchHookSpecificOutput is hook-specific output for
+// PreModelSwitch events.
+type PreModelSwitchHookSpecificOutput struct {
+	HookEventName string `json:"hookEventName"` // "PreModelSwitch"`
+	// PermissionDecision: "allow" proceeds, "deny" cancels the switch; "ask"
+	// is treated as a refusal outside an interactive session.
+	PermissionDecision       ModelSwitchPermissionDecision `json:"permissionDecision,omitempty"`
+	PermissionDecisionReason string                        `json:"permissionDecisionReason,omitempty"`
+}
+
+// PostModelSwitchHookSpecificOutput is hook-specific output for
+// PostModelSwitch events.
+type PostModelSwitchHookSpecificOutput struct {
+	HookEventName string `json:"hookEventName"` // "PostModelSwitch"
+	// AdditionalContext reaches the model with the next request the new
+	// model serves.
+	AdditionalContext string `json:"additionalContext,omitempty"`
+}
+
+// ElicitationHookSpecificOutput is hook-specific output for Elicitation
+// events.
+//
+// Return this to accept or decline an MCP elicitation request
+// programmatically.
+type ElicitationHookSpecificOutput struct {
+	HookEventName string            `json:"hookEventName"` // "Elicitation"
+	Action        ElicitationAction `json:"action,omitempty"`
+	// Content holds the form field values to submit. Only used when Action
+	// is "accept".
+	Content map[string]interface{} `json:"content,omitempty"`
+}
+
+// ElicitationResultHookSpecificOutput is hook-specific output for
+// ElicitationResult events.
+//
+// Return this to override the action or content before the response is sent
+// to the MCP server.
+type ElicitationResultHookSpecificOutput struct {
+	HookEventName string                 `json:"hookEventName"` // "ElicitationResult"
+	Action        ElicitationAction      `json:"action,omitempty"`
+	Content       map[string]interface{} `json:"content,omitempty"`
+}
+
+// CwdChangedHookSpecificOutput is hook-specific output for CwdChanged events.
+type CwdChangedHookSpecificOutput struct {
+	HookEventName string `json:"hookEventName"` // "CwdChanged"
+	// WatchPaths are absolute paths to watch for FileChanged events.
+	// Replaces the current dynamic watch list.
+	WatchPaths []string `json:"watchPaths,omitempty"`
+}
+
+// FileChangedHookSpecificOutput is hook-specific output for FileChanged events.
+type FileChangedHookSpecificOutput struct {
+	HookEventName string `json:"hookEventName"` // "FileChanged"
+	// WatchPaths are absolute paths to watch for FileChanged events.
+	// Replaces the current dynamic watch list.
+	WatchPaths []string `json:"watchPaths,omitempty"`
+}
+
+// WorktreeCreateHookSpecificOutput is hook-specific output for
+// WorktreeCreate events.
+type WorktreeCreateHookSpecificOutput struct {
+	HookEventName string `json:"hookEventName"` // "WorktreeCreate"
+	// WorktreePath is the absolute path to the created worktree directory.
+	// Required when this output is sent.
+	WorktreePath string `json:"worktreePath"`
+}
+
+// MessageDisplayHookSpecificOutput is hook-specific output for
+// MessageDisplay events.
+//
+// Display-only: replaces the text on screen without changing the stored
+// message or what the model sees.
+type MessageDisplayHookSpecificOutput struct {
+	HookEventName string `json:"hookEventName"` // "MessageDisplay"
+	// DisplayContent is the text displayed in place of the delta. Leave
+	// empty to display the original.
+	DisplayContent string `json:"displayContent,omitempty"`
+}
+
+// Each hook-specific output marshals with its own event name stamped on the
+// hookEventName key, mirroring the Literal-typed discriminators of the
+// Python SDK's HookSpecificOutput union. A caller-set HookEventName value is
+// overwritten, so an output can never carry a mismatched event name.
+
+// MarshalJSON implements json.Marshaler for PreToolUseHookSpecificOutput.
+func (o PreToolUseHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain PreToolUseHookSpecificOutput
+	return marshalHookSpecificOutput("PreToolUse", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for PostToolUseHookSpecificOutput.
+func (o PostToolUseHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain PostToolUseHookSpecificOutput
+	return marshalHookSpecificOutput("PostToolUse", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for PostToolUseFailureHookSpecificOutput.
+func (o PostToolUseFailureHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain PostToolUseFailureHookSpecificOutput
+	return marshalHookSpecificOutput("PostToolUseFailure", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for UserPromptSubmitHookSpecificOutput.
+func (o UserPromptSubmitHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain UserPromptSubmitHookSpecificOutput
+	return marshalHookSpecificOutput("UserPromptSubmit", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for UserPromptExpansionHookSpecificOutput.
+func (o UserPromptExpansionHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain UserPromptExpansionHookSpecificOutput
+	return marshalHookSpecificOutput("UserPromptExpansion", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for SessionStartHookSpecificOutput.
+func (o SessionStartHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain SessionStartHookSpecificOutput
+	return marshalHookSpecificOutput("SessionStart", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for NotificationHookSpecificOutput.
+func (o NotificationHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain NotificationHookSpecificOutput
+	return marshalHookSpecificOutput("Notification", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for SubagentStartHookSpecificOutput.
+func (o SubagentStartHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain SubagentStartHookSpecificOutput
+	return marshalHookSpecificOutput("SubagentStart", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for PermissionRequestHookSpecificOutput.
+func (o PermissionRequestHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain PermissionRequestHookSpecificOutput
+	return marshalHookSpecificOutput("PermissionRequest", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for PostToolBatchHookSpecificOutput.
+func (o PostToolBatchHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain PostToolBatchHookSpecificOutput
+	return marshalHookSpecificOutput("PostToolBatch", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for StopHookSpecificOutput.
+func (o StopHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain StopHookSpecificOutput
+	return marshalHookSpecificOutput("Stop", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for SubagentStopHookSpecificOutput.
+func (o SubagentStopHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain SubagentStopHookSpecificOutput
+	return marshalHookSpecificOutput("SubagentStop", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for PermissionDeniedHookSpecificOutput.
+func (o PermissionDeniedHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain PermissionDeniedHookSpecificOutput
+	return marshalHookSpecificOutput("PermissionDenied", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for PreModelSwitchHookSpecificOutput.
+func (o PreModelSwitchHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain PreModelSwitchHookSpecificOutput
+	return marshalHookSpecificOutput("PreModelSwitch", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for PostModelSwitchHookSpecificOutput.
+func (o PostModelSwitchHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain PostModelSwitchHookSpecificOutput
+	return marshalHookSpecificOutput("PostModelSwitch", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for ElicitationHookSpecificOutput.
+func (o ElicitationHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain ElicitationHookSpecificOutput
+	return marshalHookSpecificOutput("Elicitation", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for ElicitationResultHookSpecificOutput.
+func (o ElicitationResultHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain ElicitationResultHookSpecificOutput
+	return marshalHookSpecificOutput("ElicitationResult", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for CwdChangedHookSpecificOutput.
+func (o CwdChangedHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain CwdChangedHookSpecificOutput
+	return marshalHookSpecificOutput("CwdChanged", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for FileChangedHookSpecificOutput.
+func (o FileChangedHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain FileChangedHookSpecificOutput
+	return marshalHookSpecificOutput("FileChanged", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for WorktreeCreateHookSpecificOutput.
+func (o WorktreeCreateHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain WorktreeCreateHookSpecificOutput
+	return marshalHookSpecificOutput("WorktreeCreate", plain(o))
+}
+
+// MarshalJSON implements json.Marshaler for MessageDisplayHookSpecificOutput.
+func (o MessageDisplayHookSpecificOutput) MarshalJSON() ([]byte, error) {
+	type plain MessageDisplayHookSpecificOutput
+	return marshalHookSpecificOutput("MessageDisplay", plain(o))
 }
 
 // MCP Server Status Types

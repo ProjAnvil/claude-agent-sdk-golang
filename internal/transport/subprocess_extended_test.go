@@ -320,3 +320,62 @@ func TestConnect_EnvVars(t *testing.T) {
 		t.Error("CLAUDE_CODE_ENTRYPOINT=sdk-go not found in process environment")
 	}
 }
+
+// TestBuildCommand_SandboxIgnoreViolations mirrors python
+// test_sandbox_ignore_violations_passed_through (Python SDK #1380): a
+// command-pattern ignoreViolations map reaches the CLI's sandbox settings
+// JSON unchanged. (Go passes sandbox via --sandbox rather than Python's
+// --settings; the JSON payload contract is the same.)
+func TestBuildCommand_SandboxIgnoreViolations(t *testing.T) {
+	sandbox := &SandboxSettings{
+		Enabled: true,
+		IgnoreViolations: SandboxIgnoreViolations{
+			"*":        []string{"/etc/hosts"},
+			"npm test": []string{"registry.npmjs.org"},
+		},
+	}
+
+	transport, err := NewSubprocessTransport("test", &TransportOptions{Sandbox: sandbox})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
+	}
+
+	cmd := transport.buildCommand(context.Background())
+	args := cmd.Args[1:]
+
+	found := false
+	for i, arg := range args {
+		if arg == "--sandbox" && i+1 < len(args) {
+			found = true
+			var parsed SandboxSettings
+			if err := json.Unmarshal([]byte(args[i+1]), &parsed); err != nil {
+				t.Fatalf("Failed to parse sandbox JSON: %v", err)
+			}
+			want := map[string][]string{
+				"*":        {"/etc/hosts"},
+				"npm test": {"registry.npmjs.org"},
+			}
+			if parsed.IgnoreViolations == nil {
+				t.Fatal("Expected ignoreViolations in --sandbox JSON")
+			}
+			if len(parsed.IgnoreViolations) != len(want) {
+				t.Errorf("ignoreViolations: got %v", parsed.IgnoreViolations)
+			}
+			for pattern, substrings := range want {
+				got := parsed.IgnoreViolations[pattern]
+				if len(got) != len(substrings) {
+					t.Errorf("ignoreViolations[%q]: got %v, want %v", pattern, got, substrings)
+					continue
+				}
+				for j, s := range substrings {
+					if got[j] != s {
+						t.Errorf("ignoreViolations[%q][%d]: got %q, want %q", pattern, j, got[j], s)
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("Could not find --sandbox value")
+	}
+}

@@ -659,6 +659,85 @@ func TestClientHookCallbackInvoked(t *testing.T) {
 	})
 }
 
+// TestClientHookCallbackNewInputFields drives the v0.2.166 hook input fields
+// (Python SDK #1331) through the full client path: the CLI's hook_callback
+// control request is parsed by internal.Query, converted to the public
+// HookInput, and every new field survives the mapping.
+func TestClientHookCallbackNewInputFields(t *testing.T) {
+	hookCalled := make(chan HookInput, 1)
+	opts := &ClaudeAgentOptions{
+		Hooks: map[HookEvent][]HookMatcher{
+			HookEventStop: {
+				{
+					Matcher: "",
+					Hooks: []HookCallback{
+						func(input HookInput, toolUseID string, ctx HookContext) (HookOutput, error) {
+							hookCalled <- input
+							return HookOutput{}, nil
+						},
+					},
+				},
+			},
+		},
+	}
+	_, mockT, _ := connectedClient(t, opts, nil)
+
+	feedControlRequest(mockT, "req_hook_new", map[string]interface{}{
+		"subtype":     "hook_callback",
+		"callback_id": "hook_0",
+		"input": map[string]interface{}{
+			"hook_event_name":        "Stop",
+			"session_id":             "sess-1",
+			"prompt_id":              "550e8400-e29b-41d4-a716-446655440000",
+			"effort":                 map[string]interface{}{"level": "high"},
+			"duration_ms":            float64(12),
+			"last_assistant_message": "Done.",
+			"background_tasks": []interface{}{
+				map[string]interface{}{
+					"id":          "task-1",
+					"type":        "shell",
+					"status":      "running",
+					"description": "npm test",
+					"command":     "npm test",
+				},
+			},
+			"session_crons": []interface{}{
+				map[string]interface{}{
+					"id":        "cron-1",
+					"schedule":  "0 9 * * 1-5",
+					"recurring": true,
+					"prompt":    "check CI",
+				},
+			},
+		},
+		"tool_use_id": "tu-1",
+	})
+
+	select {
+	case input := <-hookCalled:
+		if input.PromptID != "550e8400-e29b-41d4-a716-446655440000" {
+			t.Errorf("PromptID: got %q", input.PromptID)
+		}
+		if input.Effort == nil || input.Effort.Level != EffortLevelHigh {
+			t.Errorf("Effort: got %+v", input.Effort)
+		}
+		if input.DurationMS != 12 {
+			t.Errorf("DurationMS: got %d", input.DurationMS)
+		}
+		if input.LastAssistantMessage != "Done." {
+			t.Errorf("LastAssistantMessage: got %q", input.LastAssistantMessage)
+		}
+		if len(input.BackgroundTasks) != 1 || input.BackgroundTasks[0].Command != "npm test" {
+			t.Errorf("BackgroundTasks: got %+v", input.BackgroundTasks)
+		}
+		if len(input.SessionCrons) != 1 || !input.SessionCrons[0].Recurring {
+			t.Errorf("SessionCrons: got %+v", input.SessionCrons)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hook callback was not invoked")
+	}
+}
+
 func TestClientHookCallbackErrorPropagates(t *testing.T) {
 	opts := &ClaudeAgentOptions{
 		Hooks: map[HookEvent][]HookMatcher{

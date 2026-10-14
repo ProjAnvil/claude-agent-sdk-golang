@@ -157,12 +157,15 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 							TranscriptPath:        input.TranscriptPath,
 							CWD:                   input.CWD,
 							PermissionMode:        input.PermissionMode,
+							PromptID:              input.PromptID,
+							Effort:                effortFromInternal(input.Effort),
 							ToolName:              input.ToolName,
 							ToolInput:             input.ToolInput,
 							ToolResponse:          input.ToolResponse,
 							ToolUseID:             input.ToolUseID,
 							Error:                 input.Error,
 							IsInterrupt:           input.IsInterrupt,
+							DurationMS:            input.DurationMS,
 							Prompt:                input.Prompt,
 							StopHookActive:        input.StopHookActive,
 							AgentID:               input.AgentID,
@@ -174,6 +177,9 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 							Title:                 input.Title,
 							NotificationType:      input.NotificationType,
 							PermissionSuggestions: input.PermissionSuggestions,
+							LastAssistantMessage:  input.LastAssistantMessage,
+							BackgroundTasks:       backgroundTasksFromInternal(input.BackgroundTasks),
+							SessionCrons:          sessionCronsFromInternal(input.SessionCrons),
 						}
 						publicCtx := HookContext{}
 
