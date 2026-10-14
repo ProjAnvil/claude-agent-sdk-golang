@@ -5,7 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.166] - 2026-10-14
+
+Port of Python SDK v0.2.166. Of the nine commits since v0.2.165, three
+carried SDK changes — the two hook/types feature commits and the sandbox
+`ignoreViolations` type fix — and the rest were bundled-CLI version bumps
+and release housekeeping (not applicable: the Go SDK does not bundle a CLI).
+
+### Added
+
+- **Typed hook-specific outputs and missing hook input fields (#1331)**:
+  the `HookOutput.HookSpecificOutput` payload is now typed for every hook
+  event, mirroring the Python SDK's `HookSpecificOutput` union at v0.2.166.
+  New with #1331: `UserPromptExpansionHookSpecificOutput`,
+  `PostToolBatchHookSpecificOutput`, `StopHookSpecificOutput`,
+  `SubagentStopHookSpecificOutput`, `PermissionDeniedHookSpecificOutput`,
+  `PreModelSwitchHookSpecificOutput`, `PostModelSwitchHookSpecificOutput`,
+  `ElicitationHookSpecificOutput`, `ElicitationResultHookSpecificOutput`,
+  `CwdChangedHookSpecificOutput`, `FileChangedHookSpecificOutput`,
+  `WorktreeCreateHookSpecificOutput` (its `WorktreePath` is required), and
+  `MessageDisplayHookSpecificOutput`; `UserPromptSubmitHookSpecificOutput`
+  gains `sessionTitle` and `suppressOriginalPrompt`, and
+  `SessionStartHookSpecificOutput` gains `initialUserMessage`,
+  `sessionTitle`, `watchPaths`, and `reloadSkills`. The remaining members of
+  the union — `PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
+  `Notification`, `SubagentStart`, `PermissionRequest` — predate #1331 in
+  Python but had no typed form in Go; they are included so the Go surface
+  matches the union. Each struct marshals with its `hookEventName`
+  discriminator stamped (the Go analogue of Python's `Literal[...]` keys, so
+  an output can never carry a mismatched event name), and
+  `HookSpecificOutputMap` converts any of them into the map
+  `HookOutput.HookSpecificOutput` expects. New decision/action literal
+  types: `HookPermissionDecision` (allow/deny/ask/defer),
+  `ModelSwitchPermissionDecision` (allow/deny/ask), and
+  `ElicitationAction` (accept/decline/cancel).
+  Hook inputs gain the optional fields the CLI sends but the SDK dropped:
+  `HookInput.PromptID`, `Effort` (`*HookEffort` — reasoning effort in
+  effect for the turn), `DurationMS` (tool time excluding permission-prompt
+  and hook time), `LastAssistantMessage`, `BackgroundTasks`
+  (`[]BackgroundTaskSummary`), and `SessionCrons` (`[]SessionCronSummary`).
+  Python passes the raw hook input dict to callbacks verbatim, so its
+  commit is typing-only; Go whitelists fields, so these are also plumbed
+  through the internal hook_callback dispatch and both public hook
+  conversions (`Query` and `ClaudeSDKClient`). Ported from Python SDK #1331
+  (v0.2.166, commit `a8e7ce3`).
+- **`SystemInitData` for the init system message payload (#1332)**: the
+  `system`/`init` frame — the richest frame the CLI sends — is now typed.
+  `SystemInitData` describes `SystemMessage.Data` for `subtype == "init"`
+  with the same key names as on the wire (`uuid`, `session_id`, `agents`,
+  `apiKeySource`, `betas`, `claude_code_version`, `cwd`, `tools`,
+  `mcp_servers`, `model`, `permissionMode`, `slash_commands`,
+  `terminal_slash_commands`, `output_style`, `skills`, `plugins`,
+  `plugin_errors`, `fast_mode_state`, `fast_mode_disabled_reason`,
+  `capabilities`), with nested `SystemInitMcpServer`, `SystemInitPlugin`,
+  and `SystemInitPluginError` types and the `FastModeState` /
+  `FastModeDisabledReason` literals (open set — newer CLIs may send values
+  not listed). Python needs only a `cast` because its TypedDicts are dicts
+  at runtime; Go's payload is a map, so the new
+  `ParseSystemInitData(msg.Data)` narrows it. The parser is unchanged and
+  still returns a plain `*SystemMessage` for init frames (a test pins
+  that). Ported from Python SDK #1332 (v0.2.166, commit `033b8ed`).
 
 ### Fixed
 
@@ -48,6 +107,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never be reparsed as a separate CLI flag — the same hardening policy as
   `--resume=` and `--session-id=` (Python passes this flag as two tokens;
   the equals form is this repo's stricter policy).
+- **`SandboxSettings.IgnoreViolations` typed as a command-pattern map
+  (#1380)**: it was a struct with `File`/`Network` string-slice fields, but
+  the CLI reads the key as a map from command substring (`"*"` for every
+  command) to substrings of the violation text — so a `"file"` list applied
+  only to commands whose text contains "file" (a `Makefile`, a `--file`
+  flag), and strict callers couldn't express the working `"*"` shape at all.
+  The type is now `SandboxIgnoreViolations map[string][]string` (matching
+  the CLI settings schema `Record<string, string[]>` and the TypeScript
+  SDK), in both `claude.SandboxSettings` and `transport.SandboxSettings`;
+  the value reaches the CLI unchanged through `--sandbox`. A compile error,
+  not a silent change, forces callers off the old struct fields. Ported
+  from Python SDK #1380 (v0.2.166, commit `f33ec2b`).
+- **`Query()` hook callbacks now receive the full hook input**: the
+  `createInternalQueryConfig` conversion mapped only a subset of
+  `HookInput` fields (ToolUseID, Error, StopHookActive, the agent fields,
+  etc. were dropped on the `Query()` path even though the `ClaudeSDKClient`
+  path mapped them). It now maps every field, including the new #1331
+  ones. (Pre-existing Go gap found while porting #1331.)
+
+### Not Applicable
+
+- Bundled Claude CLI version bumps (2.1.295 → 2.1.296 → 2.1.299) and the
+  release/changelog chores of v0.2.166: the Go SDK does not bundle a CLI.
+
+### Test Coverage
+
+Statement coverage remains **≥95% in every library package** (root 97.2%,
+`internal` 96.9%, `internal/transport` 98.2%):
+
+- Port tests mirroring the new Python tests: the `SystemInitData` required/
+  optional key sets, nested key sets, and fast-mode literals (including an
+  unknown disabled-reason value staying representable); init frames still
+  parsing to a plain `*SystemMessage` with `ParseSystemInitData` narrowing
+  the verbatim `Data`; the key sets of all 21 hook-specific outputs (full
+  and zero values), their distinct `hookEventName` discriminators, and the
+  decision/action literal sets; the new hook input fields' JSON round-trips
+  and the `BackgroundTaskSummary` / `SessionCronSummary` / `HookEffort` key
+  sets; the new fields flowing through the internal `hook_callback`
+  dispatch, the public client end-to-end, and the `Query()` conversion;
+  `SandboxIgnoreViolations`' command-pattern JSON shape; and the
+  command-pattern map reaching `--sandbox` unchanged
+  (`test_sandbox_ignore_violations_passed_through` counterpart).
+
+- `version.go` / `internal/transport/version.go`: bumped to `0.2.166`.
+- Full suite: `go build ./...`, `go vet ./...`, `go test ./... -race -count=1`
+  all clean.
 
 ## [0.2.165] - 2026-10-13
 
