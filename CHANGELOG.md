@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **In-flight task ledger capped at 10,000 entries**: a CLI emitting
+  unbounded `task_started` frames of a deferring type (`local_agent` /
+  `local_workflow`) with no terminal frame grew the ledger — and with it the
+  SDK's memory — without bound, and both the run-end decision and the run-end
+  ceiling stand down while the ledger is non-empty, so the run never ended
+  (Python shares this weakness). Entries past the cap are no longer tracked;
+  a one-time warning is logged and an overflow flag makes `maybeEndRun` and
+  `endRunAtCeiling` treat the (now unreliable) ledger as empty, so the run
+  may end early rather than never. Below the cap, stand-down behavior is
+  unchanged.
+- **`hookCallbacks` map now synchronized on the query mutex**: registration
+  (during `Initialize`) and lookup (from the read loop's hook_callback
+  handler) could race, since the read loop starts before the initialize
+  handshake. Both sites now hold `q.mu` (registration still completes before
+  the initialize request is written, as in Python's synchronous registration);
+  lookups snapshot the callback under the lock and invoke it outside. An
+  unknown callback ID already answers the CLI with an error
+  control_response — never a crash, never silence.
+- **`CanUseTool` returning nil / typed-nil no longer kills the process**:
+  the public-to-internal result conversions returned `(nil, nil)` for
+  unsupported results, and the handler's `IsAllow()` call panicked in a
+  goroutine with no recover. All three layers (both conversion sites and the
+  internal handler) now turn a nil, typed-nil, or unsupported result into an
+  error control_response sent back to the CLI — no panic, and no deny is
+  synthesized (Python parity).
+- **Unknown / duplicate control responses no longer stall the read loop**:
+  a response whose `request_id` matches no pending request was already
+  skipped, but a duplicate for a resolved ID blocked forever on the full
+  1-buffered channel. The pending entry is now removed on first delivery
+  (duplicates become unknown) and the delivery send is non-blocking. The
+  `rawMessages` (Query) and `messages` (subprocess transport) forwarding
+  sends are also guarded by the close signal, so `Close()` releases a
+  read goroutine parked on a full channel instead of leaking it
+  (one leaked goroutine per abandoned query before).
+- **`--system-prompt-file` passed as `--system-prompt-file=<path>`**: the
+  equals form always binds the value to the flag, so a dash-leading path can
+  never be reparsed as a separate CLI flag — the same hardening policy as
+  `--resume=` and `--session-id=` (Python passes this flag as two tokens;
+  the equals form is this repo's stricter policy).
+
 ## [0.2.165] - 2026-10-13
 
 Port of Python SDK v0.2.143..v0.2.165 changes. Of the 22 tagged releases in

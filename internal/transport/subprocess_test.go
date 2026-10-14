@@ -608,7 +608,9 @@ func TestTaskBudgetFlag(t *testing.T) {
 	}
 }
 
-// TestSystemPromptFileFlag tests that --system-prompt-file flag is generated.
+// TestSystemPromptFileFlag tests that the file system prompt maps to
+// --system-prompt-file=<path> (equals form, so a dash-leading path can never
+// inject a separate flag — the same hardening policy as --resume=).
 func TestSystemPromptFileFlag(t *testing.T) {
 	transport, err := NewSubprocessTransport("test", &TransportOptions{
 		CLIPath:          "/fake/path/claude",
@@ -621,24 +623,28 @@ func TestSystemPromptFileFlag(t *testing.T) {
 	cmd := transport.buildCommand(context.Background())
 
 	args := strings.Join(cmd.Args, " ")
-	if !strings.Contains(args, "--system-prompt-file /path/to/prompt.md") {
-		t.Errorf("Expected --system-prompt-file flag in args: %s", args)
+	if !strings.Contains(args, "--system-prompt-file=/path/to/prompt.md") {
+		t.Errorf("Expected --system-prompt-file= flag in args: %s", args)
 	}
 	// Should NOT have --system-prompt when --system-prompt-file is set
 	if strings.Contains(args, "--system-prompt \"\"") || strings.Contains(args, "--system-prompt  ") ||
 		strings.Contains(args, "--system-prompt=") {
 		t.Errorf("Should not have --system-prompt when --system-prompt-file is set: %s", args)
 	}
-}
 
-// hasFlagPair reports whether args contains flag immediately followed by value.
-func hasFlagPair(args []string, flag, value string) bool {
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == flag && args[i+1] == value {
-			return true
-		}
+	// A dash-leading path rides inside the equals form as one token, so it
+	// can never be reparsed as its own flag.
+	transportDash, err := NewSubprocessTransport("test", &TransportOptions{
+		CLIPath:          "/fake/path/claude",
+		SystemPromptFile: &SystemPromptFile{Type: "file", Path: "--injected-flag"},
+	})
+	if err != nil {
+		t.Fatalf("NewSubprocessTransport failed: %v", err)
 	}
-	return false
+	dashArgs := transportDash.buildCommand(context.Background()).Args[1:]
+	if !containsToken(dashArgs, "--system-prompt-file=--injected-flag") {
+		t.Errorf("Expected --system-prompt-file=--injected-flag as a single token, got %v", dashArgs)
+	}
 }
 
 // TestSystemPromptCustomFlag tests that the custom system prompt form maps to
@@ -700,8 +706,8 @@ func TestSystemPromptPrecedenceFileBeatsCustom(t *testing.T) {
 	cmd := tr.buildCommand(context.Background())
 	args := cmd.Args[1:]
 
-	if !hasFlagPair(args, "--system-prompt-file", "/path/to/prompt.md") {
-		t.Errorf("Expected --system-prompt-file /path/to/prompt.md in args: %v", args)
+	if !containsToken(args, "--system-prompt-file=/path/to/prompt.md") {
+		t.Errorf("Expected --system-prompt-file=/path/to/prompt.md in args: %v", args)
 	}
 	if containsToken(args, "--system-prompt=Be helpful") {
 		t.Errorf("Custom prompt should lose to --system-prompt-file: %v", args)

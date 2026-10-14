@@ -851,10 +851,13 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	// System prompt. Precedence: file > custom > plain string > preset
 	// append. Snapshot is not a CLI flag — it only travels in the
 	// initialize request. The value-carrying forms use --flag=value so a
-	// dash-leading prompt can never be parsed as a separate CLI flag (the
-	// same injection the --resume/--session-id handling below closes).
+	// dash-leading value can never be parsed as a separate CLI flag (the
+	// same injection the --resume/--session-id handling below closes);
+	// --system-prompt-file follows the repo's hardening policy even though
+	// Python passes it as two tokens (the CLI declares it with a required
+	// value there, but the equals form always binds and costs nothing).
 	if t.options.SystemPromptFile != nil && t.options.SystemPromptFile.Path != "" {
-		args = append(args, "--system-prompt-file", t.options.SystemPromptFile.Path)
+		args = append(args, "--system-prompt-file="+t.options.SystemPromptFile.Path)
 	} else if t.options.SystemPromptCustom != nil {
 		args = append(args, "--system-prompt="+t.options.SystemPromptCustom.Prompt)
 	} else if t.options.SystemPrompt == "" && t.options.SystemPromptPreset == nil {
