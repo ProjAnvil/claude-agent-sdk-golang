@@ -1176,6 +1176,22 @@ func (t *SubprocessTransport) buildMCPConfig() string {
 	return string(configJSON)
 }
 
+// sendError delivers err on the errors channel without ever parking the
+// read goroutine forever: a consumer that stops draining leaves the buffer
+// full, and a plain blocking send would leak the reader — the same class
+// the messages send in readStdout guards against. Close() closes closedCh
+// to release a parked send (the error is dropped, matching the
+// messages-channel escape hatch); on a live transport the send behaves
+// exactly like a plain blocking send. A nil closedCh (test double
+// constructed in place) is never ready, which degrades to today's
+// blocking send.
+func (t *SubprocessTransport) sendError(err error) {
+	select {
+	case t.errors <- err:
+	case <-t.closedCh:
+	}
+}
+
 // readStdout reads and parses JSON messages from stdout.
 func (t *SubprocessTransport) readStdout() {
 	defer close(t.messages)
@@ -1201,7 +1217,7 @@ func (t *SubprocessTransport) readStdout() {
 		jsonBuffer.WriteString(line)
 
 		if jsonBuffer.Len() > t.maxBufferSize {
-			t.errors <- &BufferOverflowError{BufferSize: jsonBuffer.Len(), Limit: t.maxBufferSize}
+			t.sendError(&BufferOverflowError{BufferSize: jsonBuffer.Len(), Limit: t.maxBufferSize})
 			jsonBuffer.Reset()
 			continue
 		}
@@ -1233,16 +1249,16 @@ func (t *SubprocessTransport) readStdout() {
 
 	if err := scanner.Err(); err != nil {
 		if err == bufio.ErrTooLong {
-			t.errors <- &BufferOverflowError{BufferSize: t.maxBufferSize, Limit: t.maxBufferSize}
+			t.sendError(&BufferOverflowError{BufferSize: t.maxBufferSize, Limit: t.maxBufferSize})
 		} else {
-			t.errors <- &JSONDecodeError{Line: jsonBuffer.String(), Cause: err}
+			t.sendError(&JSONDecodeError{Line: jsonBuffer.String(), Cause: err})
 		}
 	}
 
 	if err := t.waitForProcessExit(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			t.exitError = &ProcessError{Message: "command failed", ExitCode: exitErr.ExitCode()}
-			t.errors <- t.exitError
+			t.sendError(t.exitError)
 		}
 	}
 }

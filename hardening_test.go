@@ -9,6 +9,7 @@ package claude
 // 694-704).
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -88,14 +89,34 @@ func TestClientCanUseToolNilResultErrorControlResponse(t *testing.T) {
 			strings.Contains(w, "CanUseTool returned a nil or unsupported permission result")
 	})
 
-	// Neither response is a deny: how the tool call proceeds stays the CLI's
-	// decision (Python parity).
-	if writes.any(func(w string) bool {
-		return strings.Contains(w, "req_nil_perm") || strings.Contains(w, "req_typed_nil_perm")
-	}) && writes.any(func(w string) bool {
-		return strings.Contains(w, `"behavior":"deny"`)
-	}) {
-		t.Error("nil CanUseTool result must not synthesize a deny response")
+	// Per-request assertion: every control_response the client sent for the
+	// nil-result requests must be an error response — an allow or deny would
+	// mean the nil result was answered as a permission decision, and how the
+	// tool call proceeds must stay the CLI's decision (Python parity).
+	// Scanning only these request ids (not all writes) keeps unrelated
+	// traffic from tripping the check.
+	for _, requestID := range []string{"req_nil_perm", "req_typed_nil_perm"} {
+		responses := 0
+		for _, w := range writes.snapshot() {
+			var msg map[string]interface{}
+			if json.Unmarshal([]byte(w), &msg) != nil {
+				continue
+			}
+			if msg["type"] != "control_response" {
+				continue
+			}
+			resp, _ := msg["response"].(map[string]interface{})
+			if resp == nil || resp["request_id"] != requestID {
+				continue
+			}
+			responses++
+			if subtype, _ := resp["subtype"].(string); subtype != "error" {
+				t.Errorf("%s: control_response subtype = %q, want \"error\" (never an allow/deny)", requestID, subtype)
+			}
+		}
+		if responses == 0 {
+			t.Errorf("%s: no control_response captured for the nil-result request", requestID)
+		}
 	}
 
 	// The client survives: a later allow request still succeeds.

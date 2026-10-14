@@ -39,6 +39,16 @@ func (w *writeLog) any(pred func(string) bool) bool {
 	return false
 }
 
+// snapshot returns a copy of the captured writes, for per-write assertions
+// (e.g. per-request control_response checks) that any() cannot express.
+func (w *writeLog) snapshot() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]string, len(w.data))
+	copy(out, w.data)
+	return out
+}
+
 // controlResponder installs a WriteFunc on mockT that captures writes and
 // auto-responds to every control_request with a success control_response.
 // payloadFor may return a response payload per request subtype (nil for none).

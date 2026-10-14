@@ -60,7 +60,10 @@ const overflowWarnMessage = "task ledger overflow; hostile CLI or >10000 concurr
 
 // TestTaskLedgerCapTracksUpToCapThenOverflows unit-tests the cap: entries
 // are tracked up to maxTrackedTasks, the first distinct task past it is not
-// tracked and flips taskLedgerOverflowed with exactly one warning.
+// tracked, flips taskLedgerOverflowed, and reports the transition in the
+// return value — the overflow warning itself now lives at readMessages'
+// call site (logged outside q.mu), so this direct-call unit test must NOT
+// produce one.
 func TestTaskLedgerCapTracksUpToCapThenOverflows(t *testing.T) {
 	logs := &captureHandler{}
 	previous := slog.Default()
@@ -71,7 +74,10 @@ func TestTaskLedgerCapTracksUpToCapThenOverflows(t *testing.T) {
 
 	q.mu.Lock()
 	for i := 0; i < maxTrackedTasks; i++ {
-		q.trackSystemFrame(runEndTaskStartedFrame(fmt.Sprintf("task-%d", i)))
+		if q.trackSystemFrame(runEndTaskStartedFrame(fmt.Sprintf("task-%d", i))) {
+			q.mu.Unlock()
+			t.Fatalf("task-%d under the cap must not report overflow", i)
+		}
 	}
 	if len(q.inflightTasks) != maxTrackedTasks {
 		q.mu.Unlock()
@@ -84,18 +90,24 @@ func TestTaskLedgerCapTracksUpToCapThenOverflows(t *testing.T) {
 
 	// Re-announcing an already-tracked task at the cap is a no-op, not
 	// overflow: the entry count would not grow.
-	q.trackSystemFrame(runEndTaskStartedFrame("task-0"))
+	if q.trackSystemFrame(runEndTaskStartedFrame("task-0")) {
+		q.mu.Unlock()
+		t.Fatal("re-announcing a tracked task must not report the overflow")
+	}
 	if q.taskLedgerOverflowed {
 		q.mu.Unlock()
 		t.Fatal("re-announcing a tracked task must not trip the overflow")
 	}
 
 	// The 10001st distinct task is refused and flags the overflow.
-	q.trackSystemFrame(runEndTaskStartedFrame("task-over"))
+	newlyOverflowed := q.trackSystemFrame(runEndTaskStartedFrame("task-over"))
 	overflowed := q.taskLedgerOverflowed
 	tracked, _ := q.inflightTasks["task-over"]
 	q.mu.Unlock()
 
+	if !newlyOverflowed {
+		t.Error("the first task past the cap must report the overflow transition")
+	}
 	if !overflowed {
 		t.Error("expected taskLedgerOverflowed after refusing a task past the cap")
 	}
@@ -103,17 +115,21 @@ func TestTaskLedgerCapTracksUpToCapThenOverflows(t *testing.T) {
 		t.Error("a task past the cap must not be added to the ledger")
 	}
 
-	// A second overflow does not warn again (flag already set).
+	// A second overflow does not warn again (flag already set) and is not
+	// re-reported.
 	q.mu.Lock()
-	q.trackSystemFrame(runEndTaskStartedFrame("task-over-2"))
+	newlyOverflowed2 := q.trackSystemFrame(runEndTaskStartedFrame("task-over-2"))
 	over2, _ := q.inflightTasks["task-over-2"]
 	q.mu.Unlock()
+	if newlyOverflowed2 {
+		t.Error("the second task past the cap must not re-report the overflow")
+	}
 	if over2 {
 		t.Error("a second task past the cap must not be added either")
 	}
 
-	if got := logs.warnCount(overflowWarnMessage); got != 1 {
-		t.Errorf("expected exactly 1 overflow warning, got %d", got)
+	if got := logs.warnCount(overflowWarnMessage); got != 0 {
+		t.Errorf("trackSystemFrame must not log the overflow itself (readMessages logs it outside q.mu); got %d warnings", got)
 	}
 }
 
@@ -164,7 +180,10 @@ func TestEndRunAtCeilingOverflowEndsRun(t *testing.T) {
 }
 
 // TestOverflowedLedgerRunEndsAtResult drives the real read loop: a flooded
-// (overflowed) ledger does not hold the run open at the result frame.
+// (overflowed) ledger does not hold the run open at the result frame. The
+// flood flows through readMessages (not direct trackSystemFrame calls)
+// because the overflow warning now fires at the read loop's call site,
+// outside q.mu — this is also what pins its exactly-once semantics.
 func TestOverflowedLedgerRunEndsAtResult(t *testing.T) {
 	logs := &captureHandler{}
 	previous := slog.Default()
@@ -174,13 +193,13 @@ func TestOverflowedLedgerRunEndsAtResult(t *testing.T) {
 	h := newRunEndQuery(t, 0)
 	h.writePrompt("Hello")
 
-	// Flood the ledger past its cap directly (frame-level delivery is
-	// covered by the unit test above; this test cares about the run-end
-	// decision, not 10000 channel round-trips).
-	h.q.mu.Lock()
+	// Flood the ledger past its cap through the read loop. Each send blocks
+	// until readMessages has processed the frame, so the overflow transition
+	// (and its single Warn) has happened by the time the loop ends.
 	for i := 0; i < maxTrackedTasks+5; i++ {
-		h.q.trackSystemFrame(runEndTaskStartedFrame(fmt.Sprintf("flood-%d", i)))
+		h.send(runEndTaskStartedFrame(fmt.Sprintf("flood-%d", i)))
 	}
+	h.q.mu.Lock()
 	overflowed := h.q.taskLedgerOverflowed
 	h.q.mu.Unlock()
 	if !overflowed {
@@ -544,12 +563,35 @@ func allStacks() string {
 	return string(buf[:n])
 }
 
-// goroutineParkedInSend reports whether any goroutine in the dump is blocked
-// at a channel send with wantFunc on its stack. Both park statuses are
-// accepted: a plain blocking send parks as "[chan send]", the fixed
-// select-guarded send parks as "[select]".
-func goroutineParkedInSend(dump, wantFunc string) bool {
+// stackBlocksByID parses a goroutine dump into {goroutine ID: stack block},
+// keyed by ID so leak assertions can diff against a baseline snapshot taken
+// before the action under test. A global substring scan would flake if any
+// earlier test leaked a same-named goroutine; the diff scopes the assertion
+// to goroutines that appeared during this test.
+func stackBlocksByID(dump string) map[string]string {
+	blocks := map[string]string{}
 	for _, block := range strings.Split(dump, "\n\ngoroutine ") {
+		block = strings.TrimPrefix(block, "goroutine ")
+		id := block
+		if i := strings.IndexAny(id, " \n"); i >= 0 {
+			id = id[:i]
+		}
+		if id != "" {
+			blocks[id] = block
+		}
+	}
+	return blocks
+}
+
+// goroutineParkedInSend reports whether a goroutine that appeared after
+// baseline is blocked at a channel send with wantFunc on its stack. Both
+// park statuses are accepted: a plain blocking send parks as "[chan send]",
+// a select-guarded send parks as "[select]".
+func goroutineParkedInSend(baseline map[string]string, wantFunc string) bool {
+	for id, block := range stackBlocksByID(allStacks()) {
+		if _, old := baseline[id]; old {
+			continue
+		}
 		if !strings.Contains(block, wantFunc) {
 			continue
 		}
@@ -560,6 +602,22 @@ func goroutineParkedInSend(dump, wantFunc string) bool {
 	return false
 }
 
+// noNewGoroutineInFunc reports whether no goroutine that appeared after
+// baseline is running wantFunc — i.e. every goroutine the test spawned for
+// it has exited (pre-existing same-named goroutines in the baseline do not
+// count against it).
+func noNewGoroutineInFunc(baseline map[string]string, wantFunc string) bool {
+	for id, block := range stackBlocksByID(allStacks()) {
+		if _, old := baseline[id]; old {
+			continue
+		}
+		if strings.Contains(block, wantFunc) {
+			return false
+		}
+	}
+	return true
+}
+
 // TestCloseReleasesParkedRawMessagesSender verifies the goroutine-leak
 // escape hatch: with no consumer draining rawMessages, the read loop parks
 // on the full buffer; Close() must release it so the goroutine can exit.
@@ -567,13 +625,16 @@ func goroutineParkedInSend(dump, wantFunc string) bool {
 //
 // rawMessages itself is never drained — a receive there would free buffer
 // space and release the parked sender even in the unfixed code, hiding the
-// leak. The reader's park and exit are observed via the goroutine dump
-// (goleak-style, no new dependency); confirming the [chan send] park BEFORE
-// Close rules out the race where the reader exits via the closed-flag check
-// without ever parking.
+// leak. The reader's park and exit are observed via the goroutine dump,
+// scoped by a baseline snapshot taken before Start (goleak-style, no new
+// dependency): confirming the [chan send] park BEFORE Close rules out the
+// race where the reader exits via the closed-flag check without ever
+// parking, and the baseline diff keeps an earlier test's leaked goroutine
+// from flaking the scan.
 func TestCloseReleasesParkedRawMessagesSender(t *testing.T) {
 	tr := newMockTransport()
 	q := NewQuery(QueryConfig{Transport: tr, IsStreamingMode: true})
+	baseline := stackBlocksByID(allStacks())
 	q.Start()
 
 	frame := func(i int) map[string]interface{} {
@@ -602,8 +663,9 @@ func TestCloseReleasesParkedRawMessagesSender(t *testing.T) {
 
 	// Confirm the reader is parked INSIDE the send before closing.
 	parked := false
-	for time.Now().Before(deadline) {
-		if goroutineParkedInSend(allStacks(), "(*Query).readMessages") {
+	parkDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(parkDeadline) {
+		if goroutineParkedInSend(baseline, "(*Query).readMessages") {
 			parked = true
 			break
 		}
@@ -614,14 +676,14 @@ func TestCloseReleasesParkedRawMessagesSender(t *testing.T) {
 	}
 
 	// Close releases the parked sender; the reader goroutine exits and its
-	// frame disappears from the dump.
+	// frame disappears from the dump of goroutines new since the baseline.
 	if err := q.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
 	}
 	deadline = time.Now().Add(2 * time.Second)
 	exited := false
 	for time.Now().Before(deadline) {
-		if !strings.Contains(allStacks(), "(*Query).readMessages") {
+		if noNewGoroutineInFunc(baseline, "(*Query).readMessages") {
 			exited = true
 			break
 		}

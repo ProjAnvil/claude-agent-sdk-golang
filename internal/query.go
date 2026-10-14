@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -74,6 +75,14 @@ var terminalTaskStatuses = map[string]bool{
 	"stopped":   true,
 	"killed":    true,
 }
+
+// errCanUseToolNilResult is the error surfaced when the internal CanUseTool
+// callback returns a nil, typed-nil, or unsupported permission result
+// (mirroring the root package's same-named value in query.go): the handler
+// must turn every such shape into an explicit error instead of feeding a
+// nil interface into code that would panic (Python raises TypeError in the
+// same spot, query.py:635-638).
+var errCanUseToolNilResult = errors.New("CanUseTool returned a nil or unsupported permission result")
 
 const (
 	// runEndCeilingEnv is the CLI's own background-wait ceiling once stdin is
@@ -787,12 +796,15 @@ func (q *Query) closeMCPBridges() {
 // a second task_started. The lifecycle frames are the only self-consistent
 // source here (see #1088).
 //
-// Caller must hold q.mu.
-func (q *Query) trackSystemFrame(message map[string]interface{}) {
+// Caller must hold q.mu. It returns whether this frame newly tripped the
+// ledger overflow (the false→true transition of taskLedgerOverflowed);
+// readMessages logs that outside the lock so the Warn never fires while
+// q.mu is held.
+func (q *Query) trackSystemFrame(message map[string]interface{}) bool {
 	subtype, _ := message["subtype"].(string)
 	taskID, _ := message["task_id"].(string)
 	if taskID == "" {
-		return
+		return false
 	}
 	switch subtype {
 	case "task_started":
@@ -804,12 +816,12 @@ func (q *Query) trackSystemFrame(message map[string]interface{}) {
 			// overflow. Python shares the unbounded-ledger weakness; the
 			// cap is a deliberate defensive divergence (see maxTrackedTasks).
 			if _, tracked := q.inflightTasks[taskID]; !tracked && len(q.inflightTasks) >= maxTrackedTasks {
+				newlyOverflowed := false
 				if !q.taskLedgerOverflowed {
 					q.taskLedgerOverflowed = true
-					slog.Warn("task ledger overflow; hostile CLI or >10000 concurrent tasks — run-end may end early",
-						"cap", maxTrackedTasks)
+					newlyOverflowed = true
 				}
-				return
+				return newlyOverflowed
 			}
 			q.inflightTasks[taskID] = true
 		}
@@ -824,6 +836,7 @@ func (q *Query) trackSystemFrame(message map[string]interface{}) {
 			delete(q.inflightTasks, taskID)
 		}
 	}
+	return false
 }
 
 // onSessionState tracks the CLI's session_state_changed state (#1190).
@@ -1147,7 +1160,7 @@ func (q *Query) readMessages() {
 			q.mu.Lock()
 			subtype, _ := data["subtype"].(string)
 			hadInflight := len(q.inflightTasks) > 0
-			q.trackSystemFrame(data)
+			overflowed := q.trackSystemFrame(data)
 			if hadInflight && len(q.inflightTasks) == 0 {
 				// The ceiling left the last tracked agent alone; the wait
 				// between turns starts over now that it settled.
@@ -1165,6 +1178,14 @@ func (q *Query) readMessages() {
 				}
 			}
 			q.mu.Unlock()
+			// The overflow warning fires outside q.mu (trackSystemFrame only
+			// flips the flag under the lock): logging under it would serialize
+			// every reader wakeup behind a handler that may itself log. The
+			// flag gate keeps it exactly-once.
+			if overflowed {
+				slog.Warn("task ledger overflow; hostile CLI or >10000 concurrent tasks — run-end may end early",
+					"cap", maxTrackedTasks)
+			}
 		}
 
 		// Track results for proper stream closure
@@ -1499,7 +1520,7 @@ func (q *Query) handleCanUseTool(ctx context.Context, request map[string]interfa
 	switch r := result.(type) {
 	case *PermissionResultAllow:
 		if r == nil {
-			return nil, fmt.Errorf("CanUseTool returned a nil or unsupported permission result")
+			return nil, errCanUseToolNilResult
 		}
 		response := map[string]interface{}{
 			"behavior": "allow",
@@ -1515,7 +1536,7 @@ func (q *Query) handleCanUseTool(ctx context.Context, request map[string]interfa
 		return response, nil
 	case *PermissionResultDeny:
 		if r == nil {
-			return nil, fmt.Errorf("CanUseTool returned a nil or unsupported permission result")
+			return nil, errCanUseToolNilResult
 		}
 		response := map[string]interface{}{
 			"behavior": "deny",
@@ -1526,7 +1547,7 @@ func (q *Query) handleCanUseTool(ctx context.Context, request map[string]interfa
 		}
 		return response, nil
 	default:
-		return nil, fmt.Errorf("CanUseTool returned a nil or unsupported permission result")
+		return nil, errCanUseToolNilResult
 	}
 }
 
