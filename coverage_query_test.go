@@ -419,8 +419,10 @@ func TestCreateInternalQueryConfigConversions(t *testing.T) {
 		t.Errorf("deny fields: %+v", internalDeny)
 	}
 	unknownRes, err := cfg.CanUseTool("unknown", nil, internal.ToolPermissionContext{})
-	if err != nil || unknownRes != nil {
-		t.Errorf("unknown result should map to (nil, nil), got (%v, %v)", unknownRes, err)
+	if err == nil || unknownRes != nil {
+		t.Errorf("unknown result should map to an explicit error (nil result), got (%v, %v)", unknownRes, err)
+	} else if err != errCanUseToolNilResult {
+		t.Errorf("unknown result error = %v, want errCanUseToolNilResult", err)
 	}
 	if _, err := cfg.CanUseTool("boom", nil, internal.ToolPermissionContext{}); err == nil {
 		t.Error("expected callback error to propagate")

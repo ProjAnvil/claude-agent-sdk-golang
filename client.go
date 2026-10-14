@@ -228,18 +228,29 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 				return nil, err
 			}
 
+			// A nil, typed-nil, or unsupported result is an explicit error:
+			// returning it as (nil, nil) feeds a nil interface into the
+			// internal handler, whose result.IsAllow() would panic in a
+			// goroutine with no recover. A typed nil is equally rejected —
+			// dereferencing its fields below would panic the same way.
 			switch r := result.(type) {
 			case *PermissionResultAllow:
+				if r == nil {
+					return nil, errCanUseToolNilResult
+				}
 				return &internal.PermissionResultAllow{
 					UpdatedInput: r.UpdatedInput,
 				}, nil
 			case *PermissionResultDeny:
+				if r == nil {
+					return nil, errCanUseToolNilResult
+				}
 				return &internal.PermissionResultDeny{
 					Message:   r.Message,
 					Interrupt: r.Interrupt,
 				}, nil
 			default:
-				return nil, nil
+				return nil, errCanUseToolNilResult
 			}
 		}
 	}

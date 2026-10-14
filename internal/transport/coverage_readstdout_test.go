@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -135,5 +136,98 @@ func TestCoverage_ReadStdoutScannerGenericError(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timeout waiting for read failure error")
+	}
+}
+
+// TestCloseReleasesParkedReadStdoutSender verifies the goroutine-leak escape
+// hatch: with no consumer draining messages, readStdout parks on the full
+// buffer; Close() must release it so the goroutine (and the channel) can
+// finish. Before the fix the blocking send leaked the reader forever.
+func TestCloseReleasesParkedReadStdoutSender(t *testing.T) {
+	cmd := exec.Command("sleep", "10")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Failed to start dummy process: %v", err)
+	}
+
+	pr, pw := io.Pipe()
+	tr := &SubprocessTransport{
+		process:       cmd,
+		stdout:        pr,
+		stderr:        io.NopCloser(strings.NewReader("")),
+		maxBufferSize: 1024,
+		// Small buffer so the reader parks quickly.
+		messages: make(chan map[string]interface{}, 3),
+		errors:   make(chan error, 10),
+		closedCh: make(chan struct{}),
+		options:  &TransportOptions{},
+	}
+	go tr.readStdout()
+
+	line := []byte(`{"type":"assistant","uuid":"u"}` + "\n")
+	go func() {
+		// 5 lines into a 3-slot buffer: the 4th send parks the reader.
+		for i := 0; i < 5; i++ {
+			if _, err := pw.Write(line); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Wait until the buffer is full AND the reader is parked inside the
+	// send (a snapshot that merely shows readStdout may be mid-loop before
+	// the closed check, and Close could then win that race).
+	deadline := time.Now().Add(2 * time.Second)
+	parked := false
+	for time.Now().Before(deadline) {
+		dump := make([]byte, 1<<20)
+		n := runtime.Stack(dump, true)
+		for _, block := range strings.Split(string(dump[:n]), "\n\ngoroutine ") {
+			if !strings.Contains(block, "(*SubprocessTransport).readStdout") {
+				continue
+			}
+			// A plain blocking send parks as "[chan send]"; the fixed
+			// select-guarded send parks as "[select]".
+			if strings.Contains(block, "[chan send") || strings.Contains(block, "[select") {
+				parked = true
+				break
+			}
+		}
+		if parked {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !parked {
+		t.Fatal("readStdout never parked on the full messages channel")
+	}
+
+	// Make Close's process wait return promptly, then close: the parked
+	// sender must be released and readStdout must run to completion. Its
+	// deferred close(t.errors) is the join signal — messages itself is NOT
+	// drained, because a receive there would free buffer space and release
+	// the parked sender even in the unfixed code.
+	_ = cmd.Process.Kill()
+	_ = pw.Close()
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	exited := false
+	for time.Now().Before(deadline) {
+		select {
+		case _, ok := <-tr.errors:
+			if !ok {
+				exited = true
+			}
+		default:
+		}
+		if exited {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !exited {
+		t.Fatal("readStdout goroutine did not exit after Close; it is parked on a full messages channel")
 	}
 }

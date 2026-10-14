@@ -198,6 +198,14 @@ type SubprocessTransport struct {
 	errors        chan error
 	closed        bool
 	closeMu       sync.Mutex
+	// closedCh is closed by Close (exactly once; the closed flag under
+	// closeMu gates it) so a readStdout parked on a full messages channel is
+	// released instead of leaking. Assigned in NewSubprocessTransport before
+	// any goroutine starts; only closed thereafter, so receiving needs no
+	// lock. Test doubles that construct the struct directly leave it nil —
+	// a nil channel is simply never ready, which degrades the select to
+	// today's blocking send.
+	closedCh chan struct{}
 	// waitMu serializes process reaping: os/exec.Cmd.Wait is not safe for
 	// concurrent use, and both readStdout's teardown and Close's graceful
 	// shutdown need the process's exit status. The first caller runs Wait;
@@ -238,6 +246,7 @@ func NewSubprocessTransport(prompt interface{}, opts *TransportOptions) (*Subpro
 		maxBufferSize: maxBufferSize,
 		messages:      make(chan map[string]interface{}, 100),
 		errors:        make(chan error, 10),
+		closedCh:      make(chan struct{}),
 	}, nil
 }
 
@@ -1205,7 +1214,17 @@ func (t *SubprocessTransport) readStdout() {
 		closed := t.closed
 		t.closeMu.Unlock()
 		if !closed {
-			t.messages <- data
+			// The escape hatch matters, not the buffer: with the consumer
+			// gone this send would park the read goroutine forever. Close()
+			// closes closedCh to release it. On a live transport the send
+			// behaves exactly like a plain blocking send — no message is
+			// dropped while the channel is being consumed. A nil closedCh
+			// (test double constructed in place) is never ready, which
+			// degrades to today's blocking send.
+			select {
+			case t.messages <- data:
+			case <-t.closedCh:
+			}
 		}
 	}
 
@@ -1316,7 +1335,15 @@ func (t *SubprocessTransport) EndInput() error {
 // Close terminates the connection and cleans up resources.
 func (t *SubprocessTransport) Close() error {
 	t.closeMu.Lock()
+	wasClosed := t.closed
 	t.closed = true
+	// Release a readStdout parked on a full messages channel (see the send
+	// in readStdout) so an abandoned transport does not leak its reader.
+	// Gated by the closed flag so the channel closes exactly once; a nil
+	// closedCh (test double constructed in place) is skipped.
+	if !wasClosed && t.closedCh != nil {
+		close(t.closedCh)
+	}
 	t.closeMu.Unlock()
 
 	t.ready = false

@@ -289,6 +289,12 @@ func QuerySync(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions
 	}
 }
 
+// errCanUseToolNilResult is the error surfaced when the public CanUseTool
+// callback yields a nil, typed-nil, or unsupported permission result. The
+// internal handler turns it into an error control_response back to the CLI —
+// never a panic (Python raises TypeError in the same spot, query.py:635-638).
+var errCanUseToolNilResult = errors.New("CanUseTool returned a nil or unsupported permission result")
+
 // createInternalQueryConfig converts ClaudeAgentOptions to internal.QueryConfig
 func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) (internal.QueryConfig, error) {
 	// Convert hooks to internal format
@@ -368,18 +374,29 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 				return nil, err
 			}
 
+			// A nil, typed-nil, or unsupported result is an explicit error:
+			// returning it as (nil, nil) feeds a nil interface into the
+			// internal handler, whose result.IsAllow() would panic in a
+			// goroutine with no recover. A typed nil is equally rejected —
+			// dereferencing its fields below would panic the same way.
 			switch r := result.(type) {
 			case *PermissionResultAllow:
+				if r == nil {
+					return nil, errCanUseToolNilResult
+				}
 				return &internal.PermissionResultAllow{
 					UpdatedInput: r.UpdatedInput,
 				}, nil
 			case *PermissionResultDeny:
+				if r == nil {
+					return nil, errCanUseToolNilResult
+				}
 				return &internal.PermissionResultDeny{
 					Message:   r.Message,
 					Interrupt: r.Interrupt,
 				}, nil
 			default:
-				return nil, nil
+				return nil, errCanUseToolNilResult
 			}
 		}
 	}

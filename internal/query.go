@@ -87,6 +87,17 @@ const (
 	// the TypeScript SDK, whose timers cannot run longer; it also keeps a
 	// huge value safe to convert to a duration.
 	maxRunEndCeilingMS = 1<<31 - 1
+	// maxTrackedTasks caps the in-flight task ledger (trackSystemFrame).
+	//
+	// Divergence from Python, deliberate: Python's _inflight_tasks is an
+	// unbounded set (query.py:267), so a CLI emitting unbounded task_started
+	// frames of a deferring type (local_agent/local_workflow) with no
+	// terminal frame grows memory without bound AND keeps the run from ever
+	// ending — both _maybe_end_run and the run-end ceiling explicitly stand
+	// down while the ledger is non-empty (query.py:940-957, 1011-1033). The
+	// cap is defensive: past it the ledger is unreliable, so the run may end
+	// early rather than never (see taskLedgerOverflowed).
+	maxTrackedTasks = 10_000
 )
 
 // RunEndCeilingMS reads CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS as the CLI will
@@ -224,9 +235,15 @@ type Query struct {
 	errors      chan error
 
 	// State
-	mu                   sync.Mutex
-	initialized          bool
-	closed               bool
+	mu          sync.Mutex
+	initialized bool
+	closed      bool
+	// closedCh is closed by Close (exactly once; the closed flag under mu
+	// gates it) so a read loop parked on a full rawMessages channel is
+	// released instead of leaking — Python's close() cancels and reaps the
+	// reader (query.py:1194-1196). Assigned in NewQuery before any goroutine
+	// starts; only closed thereafter, so receiving needs no lock.
+	closedCh             chan struct{}
 	initializationResult map[string]interface{}
 	firstResultReceived  bool
 	firstResultCh        chan struct{}
@@ -273,6 +290,14 @@ type Query struct {
 	// responses (see #1088), so a result that arrives while this set is
 	// non-empty must not close stdin.
 	inflightTasks map[string]bool
+	// taskLedgerOverflowed is set once inflightTasks hits maxTrackedTasks
+	// and stopped tracking new tasks (trackSystemFrame). The ledger is then
+	// an under-count, so maybeEndRun and endRunAtCeiling no longer stand
+	// down on a non-empty one: the run may end while uncounted tasks are in
+	// flight, the alternative the cap exists to prevent (a hostile CLI
+	// withholding the run-end forever). Terminal frames still remove tracked
+	// entries normally. Guarded by mu.
+	taskLedgerOverflowed bool
 }
 
 // CanUseToolFunc is the callback type for tool permission requests.
@@ -465,6 +490,7 @@ func NewQuery(cfg QueryConfig) *Query {
 		firstResultCh:          make(chan struct{}),
 		inflightTasks:          make(map[string]bool),
 		runEndedCh:             make(chan struct{}),
+		closedCh:               make(chan struct{}),
 	}
 }
 
@@ -482,6 +508,13 @@ func (q *Query) Initialize(ctx context.Context) (map[string]interface{}, error) 
 	// Build hooks configuration
 	hooksConfig := make(map[string]interface{})
 	if q.hooks != nil {
+		// Registration is guarded by q.mu: the read loop is already running
+		// (Start precedes Initialize) and handleHookCallback looks callbacks
+		// up under the same lock — Python gets the same guarantee from
+		// asyncio's single thread (its dict population is synchronous before
+		// the initialize request is written, query.py:319-337). q.mu stays a
+		// leaf lock here: nothing in the loop takes it again.
+		q.mu.Lock()
 		for event, matchers := range q.hooks {
 			if len(matchers) > 0 {
 				eventConfig := make([]map[string]interface{}, 0, len(matchers))
@@ -505,6 +538,7 @@ func (q *Query) Initialize(ctx context.Context) (map[string]interface{}, error) 
 				hooksConfig[event] = eventConfig
 			}
 		}
+		q.mu.Unlock()
 	}
 
 	request := map[string]interface{}{
@@ -653,7 +687,15 @@ func (q *Query) EndInput() error {
 // Close closes the query and transport.
 func (q *Query) Close() error {
 	q.mu.Lock()
+	wasClosed := q.closed
 	q.closed = true
+	// Release a read loop parked on a full rawMessages channel (see the
+	// send in readMessages): without this, an abandoned query leaks its
+	// reader goroutine. Gated by the closed flag so the channel closes
+	// exactly once even though Close itself is idempotent.
+	if !wasClosed {
+		close(q.closedCh)
+	}
 	// Stand down the run-end ceiling (Python's close cancels the child task
 	// that sleeps on it) so no timer outlives the query.
 	q.clearRunEndCeiling()
@@ -755,6 +797,20 @@ func (q *Query) trackSystemFrame(message map[string]interface{}) {
 	switch subtype {
 	case "task_started":
 		if taskType, _ := message["task_type"].(string); deferringTaskTypes[taskType] {
+			// Cap the ledger (maxTrackedTasks): a task that would exceed it
+			// is NOT tracked, and the overflow flag is set so run-end
+			// decisions stop deferring to the (now unreliable) ledger.
+			// Re-announcing an already-tracked task never counts as
+			// overflow. Python shares the unbounded-ledger weakness; the
+			// cap is a deliberate defensive divergence (see maxTrackedTasks).
+			if _, tracked := q.inflightTasks[taskID]; !tracked && len(q.inflightTasks) >= maxTrackedTasks {
+				if !q.taskLedgerOverflowed {
+					q.taskLedgerOverflowed = true
+					slog.Warn("task ledger overflow; hostile CLI or >10000 concurrent tasks — run-end may end early",
+						"cap", maxTrackedTasks)
+				}
+				return
+			}
 			q.inflightTasks[taskID] = true
 		}
 	case "task_notification":
@@ -806,9 +862,13 @@ func (q *Query) onSessionState(state interface{}) {
 // reports "idle" with an agent still live, so this matters for CLIs that
 // report "idle" at every turn end or not at all.
 //
+// An overflowed ledger (taskLedgerOverflowed) does not stand down: it is an
+// under-count, so the run ends despite a non-empty one rather than being
+// withheld forever (see maxTrackedTasks).
+//
 // Caller must hold q.mu.
 func (q *Query) maybeEndRun() {
-	if len(q.inflightTasks) > 0 {
+	if len(q.inflightTasks) > 0 && !q.taskLedgerOverflowed {
 		slog.Debug("Turn ended with tracked task(s) still in flight; keeping stdin open",
 			"count", len(q.inflightTasks))
 		return
@@ -881,7 +941,9 @@ func (q *Query) rearmRunEndCeilingBetweenTurns() {
 // was cleared or re-armed while this timer was already firing (generation
 // mismatch), and never cuts off a tracked background agent that may still
 // need stdin (#1088) — the ceiling restarts once it settles, from the read
-// loop's rearm when the ledger drains.
+// loop's rearm when the ledger drains. An overflowed ledger
+// (taskLedgerOverflowed) is an under-count, so the ceiling ends the run
+// anyway rather than standing down forever (see maxTrackedTasks).
 func (q *Query) endRunAtCeiling(generation int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -890,7 +952,7 @@ func (q *Query) endRunAtCeiling(generation int) {
 		return
 	}
 	q.ceilingTimer = nil
-	if len(q.inflightTasks) > 0 {
+	if len(q.inflightTasks) > 0 && !q.taskLedgerOverflowed {
 		slog.Debug("No 'idle' within the run-end ceiling, but tracked task(s) still in flight; keeping stdin open",
 			"ceiling_ms", q.runEndCeilingMS, "count", len(q.inflightTasks))
 		return
@@ -1171,7 +1233,17 @@ func (q *Query) readMessages() {
 		closed := q.closed
 		q.mu.Unlock()
 		if !closed {
-			q.rawMessages <- data
+			// The escape hatch matters, not the buffer: with the consumer
+			// gone this send would park the read goroutine forever (one
+			// leaked goroutine per abandoned query). Close() closes
+			// closedCh to release it — Python's close() cancels and reaps
+			// the reader instead (query.py:1194-1196). On a live query the
+			// send behaves exactly like a plain blocking send: no message
+			// is dropped while the channel is being consumed.
+			select {
+			case q.rawMessages <- data:
+			case <-q.closedCh:
+			}
 		}
 	}
 
@@ -1240,21 +1312,38 @@ func (q *Query) handleControlResponse(data map[string]interface{}) {
 		return
 	}
 
+	// Membership check and removal under one lock section (Python:
+	// `if request_id in self.pending_control_responses`, query.py:401). An
+	// unknown response is silently skipped, and removing the entry on first
+	// delivery makes every later duplicate unknown too.
 	q.mu.Lock()
 	ch, exists := q.pendingResponses[requestID]
+	if exists {
+		delete(q.pendingResponses, requestID)
+	}
 	q.mu.Unlock()
 
 	if !exists {
 		return
 	}
 
+	var result controlResult
 	subtype, _ := response["subtype"].(string)
 	if subtype == "error" {
 		errMsg, _ := response["error"].(string)
-		ch <- controlResult{err: fmt.Errorf("%s", errMsg)}
+		result = controlResult{err: fmt.Errorf("%s", errMsg)}
 	} else {
 		respData, _ := response["response"].(map[string]interface{})
-		ch <- controlResult{response: respData}
+		result = controlResult{response: respData}
+	}
+	// Non-blocking on purpose: the channel is buffered(1) and the entry was
+	// just removed, so this only loses to the waiter's own timeout/return
+	// path — a hostile duplicate or a stale channel must never park the
+	// read loop on a full buffer (Python resolves the future once; the
+	// membership guard makes duplicates no-ops).
+	select {
+	case ch <- result:
+	default:
 	}
 }
 
@@ -1399,31 +1488,46 @@ func (q *Query) handleCanUseTool(ctx context.Context, request map[string]interfa
 		return nil, err
 	}
 
-	if result.IsAllow() {
-		allow := result.(*PermissionResultAllow)
+	// Validate the concrete result before use: a nil (or typed-nil, or
+	// unsupported) return must become an error, never a panic — the handler
+	// goroutine has no recover, so a nil interface here (or a nil pointer
+	// dereferenced on a field below) would kill the process. Python raises
+	// TypeError in the same spot (query.py:635-638) and its handler's
+	// catch-all turns it into an error control_response (query.py:694-704);
+	// handleControlRequest does the same here via sendControlError. No deny
+	// is synthesized — how the tool call proceeds stays the CLI's decision.
+	switch r := result.(type) {
+	case *PermissionResultAllow:
+		if r == nil {
+			return nil, fmt.Errorf("CanUseTool returned a nil or unsupported permission result")
+		}
 		response := map[string]interface{}{
 			"behavior": "allow",
 		}
-		if allow.UpdatedInput != nil {
-			response["updatedInput"] = allow.UpdatedInput
+		if r.UpdatedInput != nil {
+			response["updatedInput"] = r.UpdatedInput
 		} else {
 			response["updatedInput"] = input
 		}
-		if allow.UpdatedPermissions != nil {
-			response["updatedPermissions"] = allow.UpdatedPermissions
+		if r.UpdatedPermissions != nil {
+			response["updatedPermissions"] = r.UpdatedPermissions
 		}
 		return response, nil
+	case *PermissionResultDeny:
+		if r == nil {
+			return nil, fmt.Errorf("CanUseTool returned a nil or unsupported permission result")
+		}
+		response := map[string]interface{}{
+			"behavior": "deny",
+			"message":  r.Message,
+		}
+		if r.Interrupt {
+			response["interrupt"] = true
+		}
+		return response, nil
+	default:
+		return nil, fmt.Errorf("CanUseTool returned a nil or unsupported permission result")
 	}
-
-	deny := result.(*PermissionResultDeny)
-	response := map[string]interface{}{
-		"behavior": "deny",
-		"message":  deny.Message,
-	}
-	if deny.Interrupt {
-		response["interrupt"] = true
-	}
-	return response, nil
 }
 
 // handleHookCallback handles hook callback requests.
@@ -1432,7 +1536,17 @@ func (q *Query) handleHookCallback(ctx context.Context, request map[string]inter
 		return nil, ctx.Err()
 	}
 	callbackID, _ := request["callback_id"].(string)
+	// Snapshot the callback under q.mu (Initialize registers under the same
+	// lock; Python relies on asyncio's single thread for the same
+	// guarantee). The callback is invoked below, outside the lock — user
+	// code may call back into Query methods that take q.mu. An unknown ID is
+	// an explicit error returned to the CLI as an error control_response,
+	// never a crash and never silence (Python: "No hook callback found for
+	// ID: ..." from query.py:643-646, caught by the handler's except and
+	// written back at query.py:694-704).
+	q.mu.Lock()
 	callback, exists := q.hookCallbacks[callbackID]
+	q.mu.Unlock()
 	if !exists {
 		return nil, fmt.Errorf("no hook callback found for ID: %s", callbackID)
 	}
