@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.176] - 2026-11-02
+
+### Highlights
+
+- Synchronizes the Go SDK with Python SDK **v0.2.176**, including the
+  session-history fix released in Python v0.2.170.
+- Session readers now retain every tool call and result from parallel turns
+  instead of returning only the branch continued by the next response.
+
+### Fixed
+
+- **Complete parallel tool history (Python #1422, `beffc50`)**:
+  recover assistant entries sharing an on-chain API response ID and their
+  orphaned tool results after that response's last on-chain entry. Keep
+  calls before results, sort recovered entries stably by timestamp, and
+  preserve file/call ordering for timestamp ties.
+- Match stray results using `sourceToolAssistantUUID` or an unambiguous
+  `tool_use_id`, only across entries written by the same agent. Do not
+  revive abandoned responses, import another agent's stray results, or
+  duplicate already-answered calls.
+- Preserve optional transcript metadata needed for recovery (`agentId`,
+  `timestamp`, `sourceToolAssistantUUID`) without discarding otherwise valid
+  messages when that metadata is not a string.
+- Apply the shared fix to filesystem and SessionStore readers, including
+  subagent readers. Pagination includes recovered entries, and subagent
+  parent metadata remains intact. Sequential-chain and compaction behavior
+  are unchanged.
+
+### Documentation
+
+- Clarify that `IncludeHookEvents` does not suppress `SessionStart` or
+  `Setup` lifecycle events (Python #1336, `aada024`).
+- Document session-history behavior, the external CLI requirement, and
+  commands for regression, race, fuzz, and benchmark testing.
+
+### Tests
+
+- Add regression coverage for completion permutations, terminal parallel
+  turns, timestamp ordering and ties, missing parents, source/ID fallback,
+  ambiguous call IDs, agent isolation, deduplication, malformed metadata,
+  sequential chains, and pagination.
+- Add filesystem/SessionStore and subagent integration tests, a deterministic
+  real-subprocess wire/mirroring/read-back test, a fuzz target, and an
+  allocation-reporting benchmark.
+- The subprocess test does not require API credentials; authenticated
+  Claude API end-to-end testing is separate.
+
+### Compatibility
+
+- No public API removals, new dependencies, or Go version-floor changes.
+- Session-history pagination can shift because previously missing messages
+  are now returned. Consumers should use message UUIDs for stable identity.
+- The Go SDK still requires an externally installed Claude Code CLI.
+  Python v0.2.176 bundles CLI v2.1.316; Go does not bundle a CLI.
+
+### Upstream Synchronization
+
+Baseline recorded before updating:
+
+| SDK | Version | Commit |
+| --- | --- | --- |
+| Python | v0.2.166 | `65a6676344ca793a09843f2c9b150da50668d2e2` |
+| Go | v0.2.166 | `fcec491f88e8746500d988563647c82a85c559ab` |
+
+Python was updated to `2146f9d8985513053e904b13200c8f744b36785a`
+(v0.2.176). All **40 intervening commits** were reviewed (15 CLI updates,
+20 release/changelog commits, two SDK/documentation changes, and three CI changes):
+
+- SDK behavior and option documentation: ported above.
+- Bundled CLI updates from v2.1.299 to v2.1.316: not applicable to Go,
+  which uses an external CLI.
+- Hash-pinned wheel build tooling (#1415), PyPI trusted publishing (#1418),
+  and the PyPI quota guard increase to 150 GiB (#1455): Python packaging/CI
+  only; not applicable to Go modules.
+- SDK version bumps and generated changelog entries: reflected in the Go
+  version and this consolidated release.
+
+**Full changelog**:
+[Go v0.2.166...v0.2.176](https://github.com/ProjAnvil/claude-agent-sdk-golang/compare/v0.2.166...v0.2.176)
+· [Python baseline...target](https://github.com/anthropics/claude-agent-sdk-python/compare/65a6676344ca793a09843f2c9b150da50668d2e2...2146f9d8985513053e904b13200c8f744b36785a)
+
 ## [0.2.166] - 2026-10-14
 
 Port of Python SDK v0.2.166. Of the eight commits since v0.2.165, three

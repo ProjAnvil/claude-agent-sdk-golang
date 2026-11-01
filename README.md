@@ -2,6 +2,9 @@
 
 Go SDK for Claude Agent. This SDK provides a high-performance, idiomatic Go interface for interacting with Claude Code CLI, mirroring the functionality of the [Python SDK](https://github.com/anthropics/claude-agent-sdk-python).
 
+The current release tracks Python SDK **v0.2.176**. Unlike Python's wheels,
+the Go SDK does not bundle Claude Code; install the CLI separately.
+
 ## Installation
 
 ```bash
@@ -144,6 +147,10 @@ messages, _ := client.Query(ctx, "Add 10 and 20")
 
 A **hook** is a function invoked at specific points of the Claude agent loop.
 
+Set `IncludeHookEvents: true` to receive hook lifecycle messages in the
+message stream. `SessionStart` and `Setup` events are emitted by the CLI
+regardless of that option.
+
 ```go
 opts := &claude.ClaudeAgentOptions{
 	AllowedTools: []string{"Bash"},
@@ -255,6 +262,33 @@ for {
 	}
 }
 ```
+
+## Session History
+
+`GetSessionMessages` reads a local JSONL transcript, and
+`GetSessionMessagesFromStore` reads entries from a `SessionStore`.
+Both return every tool call and result from parallel turns, not just the
+branch followed by the next response. Recovered calls stay together with
+their response and precede their results; offset and limit count recovered
+messages. Sequential turns and abandoned responses keep their existing behavior.
+The same recovery applies to subagent readers and preserves parent metadata.
+
+## Testing
+
+```bash
+go test ./...
+go test -race -cover ./...
+go vet ./...
+go build ./...
+go test . -run '^TestParallelTool' -count=1
+go test . -run '^$' -fuzz '^FuzzParallelToolConversation$' -fuzztime=10s -parallel=2
+go test . -run '^$' -bench '^BenchmarkParallelToolConversation$' -benchmem
+```
+
+The parallel-tool subprocess test uses a stand-in CLI over real stdin/stdout
+and checks live messages, transcript mirroring, and filesystem/store read-back
+without API credentials. It is skipped on Windows and with `go test -short`.
+It does not exercise an authenticated Claude API conversation.
 
 ## License
 
