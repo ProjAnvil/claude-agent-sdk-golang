@@ -87,7 +87,8 @@ type GetSessionMessagesOptions struct {
 // GetSessionMessages reads a session's conversation messages from its JSONL transcript file.
 //
 // Parses the full JSONL, builds the conversation chain via parentUuid links,
-// and returns user/assistant messages in chronological order.
+// and returns user/assistant messages in chronological order, including every
+// tool call and result from parallel turns.
 func GetSessionMessages(opts *GetSessionMessagesOptions) ([]SessionMessage, error) {
 	if opts == nil {
 		return nil, fmt.Errorf("options cannot be nil")
@@ -960,6 +961,10 @@ type transcriptEntry struct {
 	IsMeta           bool                   `json:"isMeta,omitempty"`
 	IsCompactSummary bool                   `json:"isCompactSummary,omitempty"`
 	TeamName         string                 `json:"teamName,omitempty"`
+	// Optional metadata is untrusted; non-string values must not drop a message.
+	AgentID                 any `json:"agentId,omitempty"`
+	Timestamp               any `json:"timestamp,omitempty"`
+	SourceToolAssistantUUID any `json:"sourceToolAssistantUUID,omitempty"`
 }
 
 // parseTranscriptEntries parses JSONL content into transcript entries.
@@ -1115,7 +1120,7 @@ func buildConversationChain(entries []transcriptEntry) []transcriptEntry {
 		chain[i], chain[j] = chain[j], chain[i]
 	}
 
-	return chain
+	return recoverParallelToolEntries(entries, byUUID, chain, seen)
 }
 
 // isVisibleMessage returns true if the entry should be included in returned messages.

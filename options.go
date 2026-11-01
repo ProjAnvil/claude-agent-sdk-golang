@@ -118,6 +118,7 @@ type ClaudeAgentOptions struct {
 	StrictMCPConfig bool
 	// IncludeHookEvents when true, the CLI emits hook events (PreToolUse, PostToolUse,
 	// Stop, etc.) as HookEventMessage objects in the message stream.
+	// SessionStart and Setup events are emitted regardless of this setting.
 	IncludeHookEvents bool
 	// ResumeSessionAt, when resuming, only loads the conversation up to and
 	// including the message with this UUID. Use with Resume (and usually

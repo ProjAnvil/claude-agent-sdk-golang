@@ -57,6 +57,7 @@ type TransportOptions struct {
 	// StrictMCPConfig when true, only use MCP servers from --mcp-config.
 	StrictMCPConfig bool
 	// IncludeHookEvents when true, emit hook events in the message stream.
+	// SessionStart and Setup events are emitted regardless of this setting.
 	IncludeHookEvents bool
 	// ResumeSessionAt, when resuming, only loads the conversation up to and
 	// including the message with this UUID. Use with Resume (and usually

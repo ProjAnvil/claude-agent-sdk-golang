@@ -1807,11 +1807,12 @@ type MirrorErrorMessage struct {
 
 func (m *MirrorErrorMessage) messageMarker() {}
 
-// HookEventMessage is a hook event emitted by the CLI when IncludeHookEvents is enabled.
+// HookEventMessage is a hook lifecycle event emitted by the CLI.
 //
 // When ClaudeAgentOptions.IncludeHookEvents is true, the CLI emits hook lifecycle
 // events (PreToolUse, PostToolUse, Stop, etc.) into the message stream. Each event
 // is identified by HookEventName and the full raw payload is available in Data.
+// SessionStart and Setup events are emitted regardless of IncludeHookEvents.
 //
 // These arrive on the wire as {"type": "system", "subtype": "hook_started" | "hook_response", ...}.
 type HookEventMessage struct {
