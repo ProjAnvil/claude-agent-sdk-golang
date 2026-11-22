@@ -316,51 +316,95 @@ func TestIsWindowsNativeExe(t *testing.T) {
 	}
 }
 
-// TestFindCLIForGOOS_WindowsPrefersNativeExe exercises the Windows discovery
-// branches with a synthetic PATH: a shadowing "claude" entry plus a native
-// "claude.exe" must resolve to the exe; a shim-only PATH must still return
-// the shim (so Connect raises the batch refusal) rather than a not-found.
-func TestFindCLIForGOOS_WindowsPrefersNativeExe(t *testing.T) {
-	dir := t.TempDir()
-	shim := filepath.Join(dir, "claude")
-	exe := filepath.Join(dir, "claude.exe")
-	for _, p := range []string{shim, exe} {
-		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+// TestFindCLIForGOOS_WindowsAbsolutePathOnly mirrors Python's
+// TestWindowsCliLookup (v0.2.181, #1484). On Windows only a native
+// claude.exe from an absolute PATH entry is returned: relative entries and
+// the working directory are never searched, and a shim or wrapper cannot
+// shadow an exe installed in a later PATH directory.
+func TestFindCLIForGOOS_WindowsAbsolutePathOnly(t *testing.T) {
+	writeCLI := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("PATH", dir)
 
-	// Both present: the native exe wins over the extensionless shim.
-	got, err := findCLIForGOOS("windows")
-	if err != nil {
-		t.Fatalf("findCLIForGOOS failed: %v", err)
-	}
-	if got != exe {
-		t.Errorf("Expected native exe %q, got %q", exe, got)
-	}
+	t.Run("finds native exe on an absolute PATH entry", func(t *testing.T) {
+		dir := t.TempDir()
+		home := t.TempDir()
+		exe := filepath.Join(dir, "claude.exe")
+		writeCLI(t, exe)
+		t.Setenv("HOME", home)
+		t.Setenv("PATH", dir)
+		got, err := findCLIForGOOS("windows")
+		if err != nil {
+			t.Fatalf("findCLIForGOOS failed: %v", err)
+		}
+		if got != exe {
+			t.Errorf("Expected native exe %q, got %q", exe, got)
+		}
+	})
 
-	// Shim only: discovery returns the shim so Connect refuses it with the
-	// explanatory message, rather than reporting a bare not-found.
-	if err := os.Remove(exe); err != nil {
-		t.Fatal(err)
-	}
-	got, err = findCLIForGOOS("windows")
-	if err != nil {
-		t.Fatalf("findCLIForGOOS failed: %v", err)
-	}
-	if got != shim {
-		t.Errorf("Expected shim %q as last resort, got %q", shim, got)
-	}
+	t.Run("skips a relative PATH entry", func(t *testing.T) {
+		home := t.TempDir()
+		dir := t.TempDir()
+		writeCLI(t, filepath.Join(dir, "claude.exe"))
+		t.Setenv("HOME", home)
+		t.Setenv("PATH", "relative-bin")
+		if _, err := findCLIForGOOS("windows"); err == nil {
+			t.Error("Expected CLINotFoundError: a relative PATH entry must not be searched")
+		}
+	})
 
-	// POSIX discovery uses the LookPath("claude") result directly.
-	got, err = findCLIForGOOS("linux")
-	if err != nil {
-		t.Fatalf("findCLIForGOOS failed: %v", err)
-	}
-	if got != shim {
-		t.Errorf("Expected POSIX discovery to return %q, got %q", shim, got)
-	}
+	t.Run("shim and wrapper do not shadow a later native exe", func(t *testing.T) {
+		shimDir := t.TempDir()
+		exeDir := t.TempDir()
+		writeCLI(t, filepath.Join(shimDir, "claude"))
+		writeCLI(t, filepath.Join(shimDir, "claude.cmd"))
+		exe := filepath.Join(exeDir, "claude.exe")
+		writeCLI(t, exe)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("PATH", strings.Join([]string{shimDir, exeDir}, string(os.PathListSeparator)))
+		got, err := findCLIForGOOS("windows")
+		if err != nil {
+			t.Fatalf("findCLIForGOOS failed: %v", err)
+		}
+		if got != exe {
+			t.Errorf("Expected later native exe %q, got %q", exe, got)
+		}
+	})
+
+	t.Run("shim-only PATH reports not found", func(t *testing.T) {
+		shimDir := t.TempDir()
+		writeCLI(t, filepath.Join(shimDir, "claude"))
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("PATH", shimDir)
+		_, err := findCLIForGOOS("windows")
+		if err == nil {
+			t.Fatal("Expected CLINotFoundError on a shim-only machine")
+		}
+		var notFound *CLINotFoundError
+		if !errors.As(err, &notFound) {
+			t.Fatalf("Expected *CLINotFoundError, got %T: %v", err, err)
+		}
+		if !strings.Contains(err.Error(), "native") {
+			t.Errorf("Expected the native installer remediation, got: %s", err.Error())
+		}
+	})
+
+	t.Run("POSIX discovery still uses LookPath", func(t *testing.T) {
+		dir := t.TempDir()
+		cli := filepath.Join(dir, "claude")
+		writeCLI(t, cli)
+		t.Setenv("PATH", dir)
+		got, err := findCLIForGOOS("linux")
+		if err != nil {
+			t.Fatalf("findCLIForGOOS failed: %v", err)
+		}
+		if got != cli {
+			t.Errorf("Expected POSIX discovery to return %q, got %q", cli, got)
+		}
+	})
 }
 
 // --- #1127: ExtraArgs value binding -----------------------------------------

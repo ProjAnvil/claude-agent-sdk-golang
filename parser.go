@@ -2,6 +2,45 @@ package claude
 
 import "encoding/json"
 
+// stringSliceFromInterface converts a CLI uuid list into a []string. It
+// returns nil when the key is absent or has an unexpected shape. A reported
+// empty list returns a non-nil empty slice, so callers can tell an empty
+// report from no report.
+func stringSliceFromInterface(value interface{}) []string {
+	switch items := value.(type) {
+	case []string:
+		if items == nil {
+			return nil
+		}
+		out := make([]string, len(items))
+		copy(out, items)
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			s, ok := item.(string)
+			if !ok {
+				return nil
+			}
+			out = append(out, s)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// setUserMessageUUIDs reads the two user-message uuid fields shared by
+// assistant, result and stream_event frames (Python SDK v0.2.183).
+func setUserMessageUUID(data map[string]interface{}, single *string, list *[]string) {
+	if uuid, ok := data["user_message_uuid"].(string); ok {
+		*single = uuid
+	}
+	if uuids := stringSliceFromInterface(data["user_message_uuids"]); uuids != nil {
+		*list = uuids
+	}
+}
+
 // ParseMessage parses a raw JSON message into a typed Message.
 // Returns nil for unknown message types for forward compatibility.
 func ParseMessage(data map[string]interface{}) (Message, error) {
@@ -123,6 +162,7 @@ func parseAssistantMessage(data map[string]interface{}) (*AssistantMessage, erro
 	if uuid, ok := data["uuid"].(string); ok {
 		msg.UUID = uuid
 	}
+	setUserMessageUUID(data, &msg.UserMessageUUID, &msg.UserMessageUUIDs)
 
 	// Extract content blocks
 	contentRaw, ok := messageData["content"].([]interface{})
@@ -519,6 +559,7 @@ func parseResultMessage(data map[string]interface{}) (*ResultMessage, error) {
 	if uuid, ok := data["uuid"].(string); ok {
 		msg.UUID = uuid
 	}
+	setUserMessageUUID(data, &msg.UserMessageUUID, &msg.UserMessageUUIDs)
 
 	if terminalReason, ok := data["terminal_reason"].(string); ok {
 		msg.TerminalReason = terminalReason
@@ -553,6 +594,7 @@ func parseStreamEvent(data map[string]interface{}) (*StreamEvent, error) {
 	if parentID, ok := data["parent_tool_use_id"].(string); ok {
 		msg.ParentToolUseID = parentID
 	}
+	setUserMessageUUID(data, &msg.UserMessageUUID, &msg.UserMessageUUIDs)
 
 	return msg, nil
 }

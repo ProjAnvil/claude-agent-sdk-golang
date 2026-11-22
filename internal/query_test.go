@@ -927,7 +927,7 @@ func TestHandleCanUseToolUpdatedInput(t *testing.T) {
 				"arg": "updated_value",
 			},
 			UpdatedPermissions: []PermissionUpdate{
-				{Type: "permanent"},
+				{Type: "addRules", Behavior: "allow", Rules: []PermissionRuleValue{{ToolName: "Read"}}},
 			},
 		}, nil
 	}
@@ -962,12 +962,27 @@ func TestHandleCanUseToolUpdatedInput(t *testing.T) {
 		t.Errorf("Expected updatedInput.arg='updated_value', got %v", updatedInput["arg"])
 	}
 
-	updatedPerms, ok := response["updatedPermissions"].([]PermissionUpdate)
+	// The wire shape is what Claude Code accepts: destination always present,
+	// ruleContent omitted for a whole-tool rule (Python SDK #1502).
+	updatedPerms, ok := response["updatedPermissions"].([]map[string]interface{})
 	if !ok {
-		t.Fatal("Expected updatedPermissions in response")
+		t.Fatalf("Expected updatedPermissions in wire form, got %T", response["updatedPermissions"])
 	}
-	if len(updatedPerms) != 1 || updatedPerms[0].Type != "permanent" {
-		t.Error("Expected updatedPermissions to contain permanent update")
+	if len(updatedPerms) != 1 {
+		t.Fatalf("Expected 1 updated permission, got %d", len(updatedPerms))
+	}
+	if updatedPerms[0]["type"] != "addRules" {
+		t.Errorf("Expected type 'addRules', got %v", updatedPerms[0]["type"])
+	}
+	if updatedPerms[0]["destination"] != "session" {
+		t.Errorf("Expected destination 'session', got %v", updatedPerms[0]["destination"])
+	}
+	rules, ok := updatedPerms[0]["rules"].([]map[string]interface{})
+	if !ok || len(rules) != 1 {
+		t.Fatalf("Expected 1 wire rule, got %v", updatedPerms[0]["rules"])
+	}
+	if _, present := rules[0]["ruleContent"]; present {
+		t.Errorf("Whole-tool rule must omit ruleContent, got %v", rules[0])
 	}
 }
 
@@ -1898,16 +1913,23 @@ func TestHandleCanUseToolSuggestionsRoundtrip(t *testing.T) {
 		t.Errorf("Expected Destination 'localSettings', got '%s'", receivedSuggestions[0].Destination)
 	}
 
-	// Verify response includes updatedPermissions
-	updatedPerms, ok := response["updatedPermissions"].([]PermissionUpdate)
+	// Verify the echoed update reaches the CLI unchanged, in wire form.
+	updatedPerms, ok := response["updatedPermissions"].([]map[string]interface{})
 	if !ok {
-		t.Fatalf("Expected updatedPermissions to be []PermissionUpdate, got %T", response["updatedPermissions"])
+		t.Fatalf("Expected updatedPermissions in wire form, got %T", response["updatedPermissions"])
 	}
 	if len(updatedPerms) != 1 {
 		t.Fatalf("Expected 1 updated permission, got %d", len(updatedPerms))
 	}
-	if updatedPerms[0].Type != "addRules" {
-		t.Errorf("Expected type 'addRules', got '%s'", updatedPerms[0].Type)
+	if updatedPerms[0]["type"] != "addRules" {
+		t.Errorf("Expected type 'addRules', got %v", updatedPerms[0]["type"])
+	}
+	if updatedPerms[0]["destination"] != "localSettings" {
+		t.Errorf("Expected destination 'localSettings', got %v", updatedPerms[0]["destination"])
+	}
+	rules, ok := updatedPerms[0]["rules"].([]map[string]interface{})
+	if !ok || len(rules) != 1 || rules[0]["ruleContent"] != "ls" {
+		t.Errorf("Expected the echoed rule content 'ls', got %v", updatedPerms[0]["rules"])
 	}
 }
 

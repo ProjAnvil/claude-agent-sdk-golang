@@ -10,6 +10,24 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// Transport is the low-level I/O contract for a Claude Code connection.
+// Implement it to run the SDK against a remote CLI or a test double. The
+// SDK calls Connect, delivers prompts with Write, and reads frames from
+// ReadMessages. Command-line options in ClaudeAgentOptions do not apply to
+// a custom transport. This mirrors the Python SDK's Transport ABC.
+//
+// The method set matches internal/transport.Transport, so the built-in
+// subprocess transport satisfies this interface without an adapter.
+type Transport interface {
+	Connect(ctx context.Context) error
+	Write(data string) error
+	ReadMessages() <-chan map[string]interface{}
+	Errors() <-chan error
+	EndInput() error
+	Close() error
+	IsReady() bool
+}
+
 // makeTransport is a factory function for creating transports.
 // It is exposed as a variable to allow mocking in tests.
 var makeTransport = func(prompt interface{}, opts *transport.TransportOptions) (transport.Transport, error) {
@@ -77,6 +95,19 @@ func runEndCeilingForQuery(opts *ClaudeAgentOptions) int {
 // Query performs a one-shot query to Claude Code.
 // It returns two channels: one for messages and one for errors.
 // The message channel is closed when the query completes.
+// QueryWithTransport runs a one-shot query over a caller-supplied
+// Transport. It mirrors the Python SDK's query(..., transport=...).
+// Command-line options are not applied to the custom transport.
+func QueryWithTransport(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions, t Transport) (<-chan Message, <-chan error) {
+	if opts == nil {
+		opts = DefaultOptions()
+	}
+	configured := *opts
+	configured.Transport = t
+	return Query(ctx, prompt, &configured)
+}
+
+// Query runs a one-shot query against the Claude Code CLI.
 func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<-chan Message, <-chan error) {
 	messages := make(chan Message, 100)
 	errs := make(chan error, 10)
@@ -117,11 +148,17 @@ func Query(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions) (<
 			transportPrompt = placeholder
 		}
 
-		// Create transport
-		t, err := makeTransport(transportPrompt, transportOpts)
-		if err != nil {
-			errs <- wrapTransportError(err)
-			return
+		// Create transport. A caller-supplied transport bypasses the
+		// subprocess factory, so CLI flags never reach it (Python SDK).
+		var t transport.Transport
+		if opts.Transport != nil {
+			t = opts.Transport
+		} else {
+			t, err = makeTransport(transportPrompt, transportOpts)
+			if err != nil {
+				errs <- wrapTransportError(err)
+				return
+			}
 		}
 		// We don't defer t.Close() here because internal.Query handles it when Close() is called
 		// But internal.Query.Close() calls t.Close().
@@ -292,8 +329,75 @@ func QuerySync(ctx context.Context, prompt interface{}, opts *ClaudeAgentOptions
 // errCanUseToolNilResult is the error surfaced when the public CanUseTool
 // callback yields a nil, typed-nil, or unsupported permission result. The
 // internal handler turns it into an error control_response back to the CLI —
+// errCanUseToolNilResult is returned when CanUseTool returns a nil or
+// unsupported permission result. The handler turns it into a control error,
 // never a panic (Python raises TypeError in the same spot, query.py:635-638).
 var errCanUseToolNilResult = errors.New("CanUseTool returned a nil or unsupported permission result")
+
+// permissionUpdatesToInternal converts public permission updates into the
+// internal representation. It preserves RuleContentIsSet so an echoed CLI
+// suggestion carrying an explicit empty ruleContent stays unchanged.
+func permissionUpdatesToInternal(updates []PermissionUpdate) []internal.PermissionUpdate {
+	if updates == nil {
+		return nil
+	}
+	out := make([]internal.PermissionUpdate, len(updates))
+	for i, u := range updates {
+		out[i] = internal.PermissionUpdate{
+			Type:        u.Type,
+			Behavior:    u.Behavior,
+			Mode:        string(u.Mode),
+			Destination: u.Destination,
+		}
+		if u.Directories != nil {
+			out[i].Directories = make([]string, len(u.Directories))
+			copy(out[i].Directories, u.Directories)
+		}
+		if u.Rules != nil {
+			out[i].Rules = make([]internal.PermissionRuleValue, len(u.Rules))
+			for j, r := range u.Rules {
+				out[i].Rules[j] = internal.PermissionRuleValue{
+					ToolName:         r.ToolName,
+					RuleContent:      r.RuleContent,
+					RuleContentIsSet: r.RuleContentIsSet,
+				}
+			}
+		}
+	}
+	return out
+}
+
+// permissionSuggestionsFromInternal converts CLI permission suggestions
+// into the public representation.
+func permissionSuggestionsFromInternal(updates []internal.PermissionUpdate) []PermissionUpdate {
+	if updates == nil {
+		return nil
+	}
+	out := make([]PermissionUpdate, len(updates))
+	for i, u := range updates {
+		out[i] = PermissionUpdate{
+			Type:        u.Type,
+			Behavior:    u.Behavior,
+			Mode:        PermissionMode(u.Mode),
+			Destination: u.Destination,
+		}
+		if u.Directories != nil {
+			out[i].Directories = make([]string, len(u.Directories))
+			copy(out[i].Directories, u.Directories)
+		}
+		if u.Rules != nil {
+			out[i].Rules = make([]PermissionRuleValue, len(u.Rules))
+			for j, r := range u.Rules {
+				out[i].Rules[j] = PermissionRuleValue{
+					ToolName:         r.ToolName,
+					RuleContent:      r.RuleContent,
+					RuleContentIsSet: r.RuleContentIsSet,
+				}
+			}
+		}
+	}
+	return out
+}
 
 // createInternalQueryConfig converts ClaudeAgentOptions to internal.QueryConfig
 func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) (internal.QueryConfig, error) {
@@ -359,9 +463,10 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 					}
 				}
 				internalHooks[string(event)][i] = internal.HookMatcherInternal{
-					Matcher: m.Matcher,
-					Hooks:   internalCallbacks,
-					Timeout: m.Timeout,
+					Matcher:   m.Matcher,
+					Hooks:     internalCallbacks,
+					Timeout:   m.Timeout,
+					OnFailure: m.OnFailure,
 				}
 			}
 		}
@@ -385,8 +490,14 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 	if opts.CanUseTool != nil {
 		canUseTool = func(toolName string, input map[string]interface{}, ctx internal.ToolPermissionContext) (internal.PermissionResult, error) {
 			publicCtx := ToolPermissionContext{
-				ToolUseID: ctx.ToolUseID,
-				AgentID:   ctx.AgentID,
+				ToolUseID:      ctx.ToolUseID,
+				AgentID:        ctx.AgentID,
+				BlockedPath:    ctx.BlockedPath,
+				DecisionReason: ctx.DecisionReason,
+				Title:          ctx.Title,
+				DisplayName:    ctx.DisplayName,
+				Description:    ctx.Description,
+				Suggestions:    permissionSuggestionsFromInternal(ctx.Suggestions),
 			}
 			result, err := opts.CanUseTool(toolName, input, publicCtx)
 			if err != nil {
@@ -404,7 +515,8 @@ func createInternalQueryConfig(opts *ClaudeAgentOptions, t transport.Transport) 
 					return nil, errCanUseToolNilResult
 				}
 				return &internal.PermissionResultAllow{
-					UpdatedInput: r.UpdatedInput,
+					UpdatedInput:       r.UpdatedInput,
+					UpdatedPermissions: permissionUpdatesToInternal(r.UpdatedPermissions),
 				}, nil
 			case *PermissionResultDeny:
 				if r == nil {
@@ -481,6 +593,7 @@ func convertToTransportOptions(opts *ClaudeAgentOptions) *transport.TransportOpt
 		StrictMCPConfig:          opts.StrictMCPConfig,
 		IncludeHookEvents:        opts.IncludeHookEvents,
 		VerbatimPrompts:          opts.VerbatimPrompts,
+		ClientApp:                opts.ClientApp,
 	}
 
 	if opts.SessionID != "" {

@@ -14,7 +14,7 @@ func main() {
 
 	opts := &claude.ClaudeAgentOptions{
 		SettingSources: []claude.SettingSource{
-			claude.SettingSourceUser, // 使用 ~/.claude 的设置
+			claude.SettingSourceUser, // Use settings from ~/.claude
 		},
 	}
 

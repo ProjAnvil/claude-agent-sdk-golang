@@ -78,6 +78,11 @@ type TransportOptions struct {
 	// StampUserMessage, applied in streamInput). Requires CLI 2.1.248+;
 	// older CLIs ignore the field (Connect warns about them).
 	VerbatimPrompts bool
+	// ClientApp sets CLAUDE_AGENT_SDK_CLIENT_APP for the CLI subprocess when
+	// non-nil. It wins over a value in Env. A pointer to an empty string is
+	// an explicit opt-out. The Go SDK never derives a label: Go binaries
+	// have no installed-distribution metadata to read.
+	ClientApp *string
 }
 
 // SystemPromptFile represents a file-based system prompt.

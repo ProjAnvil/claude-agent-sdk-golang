@@ -5,6 +5,106 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.187] - 2026-11-22
+
+### Highlights
+
+- Synchronizes the Go SDK with Python SDK **v0.2.187** (from v0.2.176,
+  spanning v0.2.177 through v0.2.187). Bundled CLI reference moves from
+  2.1.316 to 2.1.330.
+- `Version` and the `CLAUDE_AGENT_SDK_VERSION` value are now `0.2.187`. The
+  transport copy had drifted to `0.2.166` and is corrected.
+- Also closes the remaining Python SDK parity gaps: public `Transport`
+  injection, `ReceiveMessages`, W3C trace context propagation,
+  `DebugStderr` and typed per-event hook inputs.
+
+### Added
+
+- **`HookMatcher.OnFailure` (Python #1460)**: `"block"` fails closed when a
+  hook callback fails; `"continue"` keeps the old behavior. `Initialize`
+  sends `onFailure` to the CLI and returns `CLIConnectionError` when the
+  responder does not report `hook_on_failure_supported`, or reports
+  `hooks_applied: false`. Unknown values are treated as `"block"` because
+  the CLI does.
+- **`user_message_uuid` / `user_message_uuids` (Python #1505)**: exposed on
+  `AssistantMessage`, `ResultMessage` and `StreamEvent`, and parsed from the
+  corresponding CLI frames. An empty list stays distinguishable from an
+  absent one.
+- **`ClaudeAgentOptions.ClientApp` (Python #1432)**: sets
+  `CLAUDE_AGENT_SDK_CLIENT_APP` for the CLI subprocess, wins over `Env`, and
+  accepts a pointer to `""` as an explicit opt-out. The SDK strips any
+  inherited `CLAUDE_AGENT_SDK_DERIVED_CLIENT_APP` value. Go does not derive
+  an app label: Go binaries have no installed-distribution metadata.
+- `PermissionRuleValue.RuleContentIsSet` preserves an explicit empty
+  `ruleContent` when echoing a CLI permission suggestion.
+- **Public `Transport` interface**: external code can now implement
+  `Connect`, `Write`, `ReadMessages`, `Errors`, `EndInput`, `Close` and
+  `IsReady`. Pass it via `ClaudeAgentOptions.Transport`,
+  `QueryWithTransport()` or `NewClient(opts, transport)`. A custom transport
+  bypasses the subprocess factory, receives no CLI flags, and skips
+  store-backed session resume. Mirrors the Python SDK's `Transport` ABC and
+  `query(..., transport=...)`.
+- **`ClaudeSDKClient.ReceiveMessages(ctx)`**: returns every message until
+  the stream ends. `ReceiveResponse()` still stops at the first
+  `ResultMessage`.
+- **W3C trace context propagation**: the active span's `TRACEPARENT` and
+  `TRACESTATE` now reach the CLI subprocess. Stale inherited values are
+  scrubbed only when a span is active, and explicit `Env` values win. Adds
+  `go.opentelemetry.io/otel v1.38.0` as a direct dependency.
+- **`ClaudeAgentOptions.DebugStderr`**: API-parity field. The Python SDK
+  declares `debug_stderr` but never reads it, so this is a documented no-op.
+  Use `StderrCallback` to receive CLI stderr.
+- **Typed per-event hook inputs**: added `BaseHookInput` and ten exported
+  types matching the Python SDK's `HookInput` union: `PreToolUseHookInput`,
+  `PostToolUseHookInput`, `PostToolUseFailureHookInput`,
+  `UserPromptSubmitHookInput`, `StopHookInput`, `SubagentStopHookInput`,
+  `PreCompactHookInput`, `NotificationHookInput`, `SubagentStartHookInput`
+  and `PermissionRequestHookInput`. They implement the `TypedHookInput`
+  discriminated interface. `HookInput.Typed()` narrows by `hook_event_name`;
+  `ParseTypedHookInput()` decodes a raw control frame directly;
+  `TypedHookCallback()` adapts a typed callback to the existing
+  `HookCallback` signature. The flat `HookInput` struct and `HookCallback`
+  are unchanged, so existing callers are unaffected. An event with no typed
+  input returns an error.
+
+### Fixed
+
+- **Permission updates now use the wire shape the CLI accepts (Python
+  #1502)**: `destination` is always sent and defaults to `"session"`,
+  `ruleContent` is omitted for whole-tool rules, and a missing required
+  field or unknown update type is an error. A malformed update drops every
+  update in the same allow result (all-or-nothing) but still allows the
+  tool call. `PermissionResultAllow.UpdatedPermissions` and
+  `ToolPermissionContext.Suggestions` are no longer dropped when converting
+  public options to the internal query config.
+- **Sandbox settings (Python #1426)**: sandbox is now merged into
+  `--settings` as the Python SDK does, instead of being passed through a
+  `--sandbox` flag the upstream SDK never uses. Settings files resolve
+  against `cwd`, tolerate a UTF-8 BOM, and any load failure returns
+  `CLIConnectionError` rather than silently dropping the caller's rules.
+- **CLI version check from the init frame (Python #1483)**: the SDK no
+  longer spawns a second `<cli_path> -v` process. It reads
+  `claude_code_version` from the first `system/init` frame, warns once, and
+  still honors `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK`.
+- **Windows CLI discovery (Python #1484)**: only native `claude.exe`
+  binaries in absolute `PATH` entries are returned. Relative entries, the
+  working directory, and shim/wrapper hits no longer shadow a native
+  install.
+
+### Tests
+
+- Ported the Python unit tests for hook `on_failure`, permission-update
+  wire shape and suggestion round trips, user message uuid parsing, client
+  app env precedence, merged settings loading, init-frame version checks,
+  and Windows CLI discovery. Replaced the obsolete `-v` probe tests.
+- Added coverage for custom-transport routing, `ReceiveMessages` continuing
+  past a `ResultMessage`, and trace-context injection precedence.
+- Added `coverage_gaps_test.go` and extended `settings_merge_test.go` to
+  cover the remaining branches of the new conversion helpers, typed hook
+  input decoding, hook-specific output error paths and
+  `ReceiveMessages` cancellation. Core packages now measure 97.5% (root),
+  97.0% (`internal`) and 98.5% (`internal/transport`).
+
 ## [0.2.176] - 2026-11-02
 
 ### Highlights

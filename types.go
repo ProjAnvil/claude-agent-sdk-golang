@@ -204,6 +204,15 @@ type AssistantMessage struct {
 	StopReason      string                 `json:"stop_reason,omitempty"`
 	SessionID       string                 `json:"session_id,omitempty"`
 	UUID            string                 `json:"uuid,omitempty"`
+	// UserMessageUUID is the uuid of the user message this turn answers. The
+	// CLI sets it on the first top-level assistant message after the value
+	// is set or changes. Empty on every other message and on older CLIs.
+	UserMessageUUID string `json:"user_message_uuid,omitempty"`
+	// UserMessageUUIDs lists every user message this turn has taken in so
+	// far. Nil when the CLI did not report the list; an empty non-nil slice
+	// is a valid report. A message taken in later may appear only on the
+	// ResultMessage.
+	UserMessageUUIDs []string `json:"user_message_uuids,omitempty"`
 }
 
 func (m *AssistantMessage) messageMarker() {}
@@ -433,12 +442,22 @@ type ResultMessage struct {
 	// bypassed the query loop such as a local slash command). Mirrors the
 	// TypeScript SDK's SDKResultMessage.terminal_reason.
 	TerminalReason string `json:"terminal_reason,omitempty"`
-	// Origin is the origin of the user message that triggered this turn — see
-	// MessageOrigin. Lets a streaming-input consumer distinguish the result of
-	// its own prompt (nil, or {"kind": "human"} if it stamped that) from
-	// results of injected turns such as background-task notifications
-	// ({"kind": "task-notification"}).
+	// Origin describes only what started the turn, such as a background-task
+	// notification ({"kind": "task-notification"}). A prompt sent while an
+	// injected turn is running can be answered inside that turn, so match
+	// UserMessageUUIDs to find the result for a given prompt.
 	Origin MessageOrigin `json:"origin,omitempty"`
+	// UserMessageUUID is the uuid of the user message that started the turn
+	// (the last one when several were merged). On error results it is set
+	// too, so check IsError and TerminalReason before treating the turn as
+	// answered. Only prompts sent as message dicts with a top-level uuid
+	// string have one; plain string prompts have none.
+	UserMessageUUID string `json:"user_message_uuid,omitempty"`
+	// UserMessageUUIDs lists, in order, every user message this turn took
+	// in. The CLI reports at most 64. Nil when UserMessageUUID is empty for
+	// another reason, and on some error results and older CLIs. An empty
+	// non-nil slice is a valid report for an interrupted turn.
+	UserMessageUUIDs []string `json:"user_message_uuids,omitempty"`
 }
 
 func (m *ResultMessage) messageMarker() {}
@@ -449,6 +468,12 @@ type StreamEvent struct {
 	SessionID       string                 `json:"session_id"`
 	Event           map[string]interface{} `json:"event"`
 	ParentToolUseID string                 `json:"parent_tool_use_id,omitempty"`
+	// UserMessageUUID is set on the first top-level non-ping event after
+	// the answered user message uuid changes. Empty on all others.
+	UserMessageUUID string `json:"user_message_uuid,omitempty"`
+	// UserMessageUUIDs lists every user message taken in so far, reported
+	// on the same events as UserMessageUUID except on older CLIs.
+	UserMessageUUIDs []string `json:"user_message_uuids,omitempty"`
 }
 
 func (m *StreamEvent) messageMarker() {}
@@ -1047,8 +1072,16 @@ type PermissionUpdate struct {
 
 // PermissionRuleValue represents a permission rule.
 type PermissionRuleValue struct {
-	ToolName    string `json:"toolName"`
+	ToolName string `json:"toolName"`
+	// RuleContent is what the rule matches within the tool, e.g. "npm test"
+	// for Bash. Empty means a rule that covers every use of the tool: the
+	// ruleContent key is omitted on the wire because Claude Code rejects a
+	// null ruleContent.
 	RuleContent string `json:"ruleContent,omitempty"`
+	// RuleContentIsSet sends ruleContent even when RuleContent is empty.
+	// Set it when echoing a CLI suggestion that carried an explicit empty
+	// ruleContent, so the round trip stays unchanged.
+	RuleContentIsSet bool `json:"-"`
 }
 
 // HookMatcher configures which hooks to invoke.
@@ -1056,6 +1089,13 @@ type HookMatcher struct {
 	Matcher string         // Tool name pattern (e.g., "Bash", "Write|MultiEdit|Edit")
 	Hooks   []HookCallback // Hook callback functions
 	Timeout time.Duration  // Timeout for hooks in this matcher
+	// OnFailure controls what happens when a callback in this matcher fails.
+	// "block" blocks the action when a callback returns an error, returns no
+	// value, or returns a value the CLI rejects. "continue" and the empty
+	// value treat a failure as no decision. Stop, SubagentStop,
+	// TaskCompleted and TeammateIdle ignore this field. Initialize returns a
+	// CLIConnectionError when the CLI does not honor "block".
+	OnFailure string
 }
 
 // HookCallback is the function signature for hook handlers.
@@ -1157,6 +1197,251 @@ type HookInput struct {
 	// this session later (scoped to the parent session for SubagentStop).
 	// Empty when none are scheduled. Stop, SubagentStop.
 	SessionCrons []SessionCronSummary `json:"session_crons,omitempty"`
+}
+
+// BaseHookInput holds the fields the CLI sends on every hook event. The
+// per-event types below embed it, mirroring the Python SDK's BaseHookInput
+// TypedDict.
+type BaseHookInput struct {
+	SessionID      string      `json:"session_id"`
+	TranscriptPath string      `json:"transcript_path"`
+	CWD            string      `json:"cwd"`
+	PermissionMode string      `json:"permission_mode,omitempty"`
+	PromptID       string      `json:"prompt_id,omitempty"`
+	Effort         *HookEffort `json:"effort,omitempty"`
+}
+
+// TypedHookInput is the discriminated union of per-event hook inputs. Use a
+// Go type switch to narrow it. The Python SDK spells this union HookInput;
+// Go keeps HookInput for the flat struct that HookCallback receives.
+type TypedHookInput interface {
+	hookInputMarker()
+}
+
+// PreToolUseHookInput is the input for a PreToolUse hook.
+type PreToolUseHookInput struct {
+	BaseHookInput
+	HookEventName HookEvent              `json:"hook_event_name"`
+	ToolName      string                 `json:"tool_name"`
+	ToolInput     map[string]interface{} `json:"tool_input"`
+	ToolUseID     string                 `json:"tool_use_id"`
+	// AgentID and AgentType are present only when the hook fires inside a
+	// Task-spawned sub-agent.
+	AgentID   string `json:"agent_id,omitempty"`
+	AgentType string `json:"agent_type,omitempty"`
+}
+
+// PostToolUseHookInput is the input for a PostToolUse hook.
+type PostToolUseHookInput struct {
+	BaseHookInput
+	HookEventName HookEvent              `json:"hook_event_name"`
+	ToolName      string                 `json:"tool_name"`
+	ToolInput     map[string]interface{} `json:"tool_input"`
+	ToolResponse  interface{}            `json:"tool_response"`
+	ToolUseID     string                 `json:"tool_use_id"`
+	DurationMS    int                    `json:"duration_ms,omitempty"`
+	AgentID       string                 `json:"agent_id,omitempty"`
+	AgentType     string                 `json:"agent_type,omitempty"`
+}
+
+// PostToolUseFailureHookInput is the input for a PostToolUseFailure hook.
+type PostToolUseFailureHookInput struct {
+	BaseHookInput
+	HookEventName HookEvent              `json:"hook_event_name"`
+	ToolName      string                 `json:"tool_name"`
+	ToolInput     map[string]interface{} `json:"tool_input"`
+	ToolUseID     string                 `json:"tool_use_id"`
+	Error         string                 `json:"error"`
+	IsInterrupt   bool                   `json:"is_interrupt,omitempty"`
+	DurationMS    int                    `json:"duration_ms,omitempty"`
+	AgentID       string                 `json:"agent_id,omitempty"`
+	AgentType     string                 `json:"agent_type,omitempty"`
+}
+
+// UserPromptSubmitHookInput is the input for a UserPromptSubmit hook.
+type UserPromptSubmitHookInput struct {
+	BaseHookInput
+	HookEventName HookEvent `json:"hook_event_name"`
+	Prompt        string    `json:"prompt"`
+}
+
+// StopHookInput is the input for a Stop hook.
+type StopHookInput struct {
+	BaseHookInput
+	HookEventName        HookEvent               `json:"hook_event_name"`
+	StopHookActive       bool                    `json:"stop_hook_active"`
+	LastAssistantMessage string                  `json:"last_assistant_message,omitempty"`
+	BackgroundTasks      []BackgroundTaskSummary `json:"background_tasks,omitempty"`
+	SessionCrons         []SessionCronSummary    `json:"session_crons,omitempty"`
+}
+
+// SubagentStopHookInput is the input for a SubagentStop hook.
+type SubagentStopHookInput struct {
+	BaseHookInput
+	HookEventName        HookEvent               `json:"hook_event_name"`
+	StopHookActive       bool                    `json:"stop_hook_active"`
+	AgentID              string                  `json:"agent_id"`
+	AgentTranscriptPath  string                  `json:"agent_transcript_path"`
+	AgentType            string                  `json:"agent_type"`
+	LastAssistantMessage string                  `json:"last_assistant_message,omitempty"`
+	BackgroundTasks      []BackgroundTaskSummary `json:"background_tasks,omitempty"`
+	SessionCrons         []SessionCronSummary    `json:"session_crons,omitempty"`
+}
+
+// PreCompactHookInput is the input for a PreCompact hook. Trigger is
+// "manual" or "auto". The CLI can send null for CustomInstructions; an
+// empty string covers that case after decoding.
+type PreCompactHookInput struct {
+	BaseHookInput
+	HookEventName      HookEvent `json:"hook_event_name"`
+	Trigger            string    `json:"trigger"`
+	CustomInstructions string    `json:"custom_instructions,omitempty"`
+}
+
+// NotificationHookInput is the input for a Notification hook.
+type NotificationHookInput struct {
+	BaseHookInput
+	HookEventName    HookEvent `json:"hook_event_name"`
+	Message          string    `json:"message"`
+	Title            string    `json:"title,omitempty"`
+	NotificationType string    `json:"notification_type"`
+}
+
+// SubagentStartHookInput is the input for a SubagentStart hook.
+type SubagentStartHookInput struct {
+	BaseHookInput
+	HookEventName HookEvent `json:"hook_event_name"`
+	AgentID       string    `json:"agent_id"`
+	AgentType     string    `json:"agent_type"`
+}
+
+// PermissionRequestHookInput is the input for a PermissionRequest hook.
+type PermissionRequestHookInput struct {
+	BaseHookInput
+	HookEventName         HookEvent                `json:"hook_event_name"`
+	ToolName              string                   `json:"tool_name"`
+	ToolInput             map[string]interface{}   `json:"tool_input"`
+	PermissionSuggestions []map[string]interface{} `json:"permission_suggestions,omitempty"`
+	AgentID               string                   `json:"agent_id,omitempty"`
+	AgentType             string                   `json:"agent_type,omitempty"`
+}
+
+func (PreToolUseHookInput) hookInputMarker()         {}
+func (PostToolUseHookInput) hookInputMarker()        {}
+func (PostToolUseFailureHookInput) hookInputMarker() {}
+func (UserPromptSubmitHookInput) hookInputMarker()   {}
+func (StopHookInput) hookInputMarker()               {}
+func (SubagentStopHookInput) hookInputMarker()       {}
+func (PreCompactHookInput) hookInputMarker()         {}
+func (NotificationHookInput) hookInputMarker()       {}
+func (SubagentStartHookInput) hookInputMarker()      {}
+func (PermissionRequestHookInput) hookInputMarker()  {}
+
+// Typed narrows a HookInput to the per-event type named by HookEventName.
+// It returns an error for an event with no typed input, such as a hook event
+// added by a newer CLI. The returned value is one of the ten *HookInput
+// structs above; use a type switch on it.
+func (h HookInput) Typed() (TypedHookInput, error) {
+	base := BaseHookInput{
+		SessionID:      h.SessionID,
+		TranscriptPath: h.TranscriptPath,
+		CWD:            h.CWD,
+		PermissionMode: h.PermissionMode,
+		PromptID:       h.PromptID,
+		Effort:         h.Effort,
+	}
+	event := HookEvent(h.HookEventName)
+	switch event {
+	case HookEventPreToolUse:
+		return PreToolUseHookInput{
+			BaseHookInput: base, HookEventName: event,
+			ToolName: h.ToolName, ToolInput: h.ToolInput, ToolUseID: h.ToolUseID,
+			AgentID: h.AgentID, AgentType: h.AgentType,
+		}, nil
+	case HookEventPostToolUse:
+		return PostToolUseHookInput{
+			BaseHookInput: base, HookEventName: event,
+			ToolName: h.ToolName, ToolInput: h.ToolInput, ToolResponse: h.ToolResponse,
+			ToolUseID: h.ToolUseID, DurationMS: h.DurationMS,
+			AgentID: h.AgentID, AgentType: h.AgentType,
+		}, nil
+	case HookEventPostToolUseFailure:
+		return PostToolUseFailureHookInput{
+			BaseHookInput: base, HookEventName: event,
+			ToolName: h.ToolName, ToolInput: h.ToolInput, ToolUseID: h.ToolUseID,
+			Error: h.Error, IsInterrupt: h.IsInterrupt, DurationMS: h.DurationMS,
+			AgentID: h.AgentID, AgentType: h.AgentType,
+		}, nil
+	case HookEventUserPromptSubmit:
+		return UserPromptSubmitHookInput{
+			BaseHookInput: base, HookEventName: event, Prompt: h.Prompt,
+		}, nil
+	case HookEventStop:
+		return StopHookInput{
+			BaseHookInput: base, HookEventName: event,
+			StopHookActive: h.StopHookActive, LastAssistantMessage: h.LastAssistantMessage,
+			BackgroundTasks: h.BackgroundTasks, SessionCrons: h.SessionCrons,
+		}, nil
+	case HookEventSubagentStop:
+		return SubagentStopHookInput{
+			BaseHookInput: base, HookEventName: event,
+			StopHookActive: h.StopHookActive, AgentID: h.AgentID,
+			AgentTranscriptPath: h.AgentTranscriptPath, AgentType: h.AgentType,
+			LastAssistantMessage: h.LastAssistantMessage,
+			BackgroundTasks:      h.BackgroundTasks, SessionCrons: h.SessionCrons,
+		}, nil
+	case HookEventPreCompact:
+		return PreCompactHookInput{
+			BaseHookInput: base, HookEventName: event,
+			Trigger: h.Trigger, CustomInstructions: h.CustomInstructions,
+		}, nil
+	case HookEventNotification:
+		return NotificationHookInput{
+			BaseHookInput: base, HookEventName: event,
+			Message: h.Message, Title: h.Title, NotificationType: h.NotificationType,
+		}, nil
+	case HookEventSubagentStart:
+		return SubagentStartHookInput{
+			BaseHookInput: base, HookEventName: event,
+			AgentID: h.AgentID, AgentType: h.AgentType,
+		}, nil
+	case HookEventPermissionRequest:
+		return PermissionRequestHookInput{
+			BaseHookInput: base, HookEventName: event,
+			ToolName: h.ToolName, ToolInput: h.ToolInput,
+			PermissionSuggestions: h.PermissionSuggestions,
+			AgentID:               h.AgentID, AgentType: h.AgentType,
+		}, nil
+	default:
+		return nil, fmt.Errorf("no typed hook input for event %q", h.HookEventName)
+	}
+}
+
+// ParseTypedHookInput decodes a raw control-protocol hook input into the
+// matching per-event type.
+func ParseTypedHookInput(data map[string]interface{}) (TypedHookInput, error) {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	var h HookInput
+	if err := json.Unmarshal(raw, &h); err != nil {
+		return nil, err
+	}
+	return h.Typed()
+}
+
+// TypedHookCallback adapts a callback that receives TypedHookInput to the
+// HookCallback signature. It calls HookInput.Typed first. An event with no
+// typed input returns an error instead of invoking fn.
+func TypedHookCallback(fn func(input TypedHookInput, toolUseID string, ctx HookContext) (HookOutput, error)) HookCallback {
+	return func(input HookInput, toolUseID string, ctx HookContext) (HookOutput, error) {
+		typed, err := input.Typed()
+		if err != nil {
+			return HookOutput{}, err
+		}
+		return fn(typed, toolUseID, ctx)
+	}
 }
 
 // HookOutput defines the response from a hook callback.

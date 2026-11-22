@@ -28,10 +28,17 @@ type ClaudeSDKClient struct {
 	verbatimPrompts bool
 }
 
-// NewClient creates a new ClaudeSDKClient.
-func NewClient(opts *ClaudeAgentOptions) *ClaudeSDKClient {
+// NewClient creates a new ClaudeSDKClient. Pass a Transport as the optional
+// second argument to run over a custom connection instead of a CLI
+// subprocess. This mirrors the Python SDK's ClaudeSDKClient(transport=...).
+func NewClient(opts *ClaudeAgentOptions, custom ...Transport) *ClaudeSDKClient {
 	if opts == nil {
 		opts = DefaultOptions()
+	}
+	if len(custom) > 0 && custom[0] != nil {
+		configured := *opts
+		configured.Transport = custom[0]
+		opts = &configured
 	}
 	return &ClaudeSDKClient{
 		options: opts,
@@ -62,7 +69,8 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 
 	// resume/continue + session_store: load the session from the store and
 	// materialize it into a temp CLAUDE_CONFIG_DIR the subprocess can read.
-	if c.options != nil && c.options.SessionStore != nil &&
+	// A custom transport never receives CLI flags, so skip this work.
+	if c.options != nil && c.options.Transport == nil && c.options.SessionStore != nil &&
 		(c.options.Resume != "" || c.options.ContinueConversation) {
 		m, err := materializeResumeSession(ctx, c.options)
 		if err != nil {
@@ -126,10 +134,17 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 		promptArg = make(chan map[string]interface{})
 	}
 
-	// Create transport
-	t, err := c.transportFactory(promptArg, transportOpts)
-	if err != nil {
-		return err
+	// Create transport. A caller-supplied transport bypasses the factory,
+	// so CLI flags in options never reach it (Python SDK).
+	var t transport.Transport
+	if c.options.Transport != nil {
+		t = c.options.Transport
+	} else {
+		var err error
+		t, err = c.transportFactory(promptArg, transportOpts)
+		if err != nil {
+			return err
+		}
 	}
 
 	if err := t.Connect(ctx); err != nil {
@@ -200,9 +215,10 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 					}
 				}
 				internalHooks[string(event)][i] = internal.HookMatcherInternal{
-					Matcher: m.Matcher,
-					Hooks:   internalCallbacks,
-					Timeout: m.Timeout,
+					Matcher:   m.Matcher,
+					Hooks:     internalCallbacks,
+					Timeout:   m.Timeout,
+					OnFailure: m.OnFailure,
 				}
 			}
 		}
@@ -226,8 +242,14 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 	if c.options.CanUseTool != nil {
 		canUseTool = func(toolName string, input map[string]interface{}, ctx internal.ToolPermissionContext) (internal.PermissionResult, error) {
 			publicCtx := ToolPermissionContext{
-				ToolUseID: ctx.ToolUseID,
-				AgentID:   ctx.AgentID,
+				ToolUseID:      ctx.ToolUseID,
+				AgentID:        ctx.AgentID,
+				BlockedPath:    ctx.BlockedPath,
+				DecisionReason: ctx.DecisionReason,
+				Title:          ctx.Title,
+				DisplayName:    ctx.DisplayName,
+				Description:    ctx.Description,
+				Suggestions:    permissionSuggestionsFromInternal(ctx.Suggestions),
 			}
 			result, err := c.options.CanUseTool(toolName, input, publicCtx)
 			if err != nil {
@@ -245,7 +267,8 @@ func (c *ClaudeSDKClient) Connect(ctx context.Context, prompt ...interface{}) er
 					return nil, errCanUseToolNilResult
 				}
 				return &internal.PermissionResultAllow{
-					UpdatedInput: r.UpdatedInput,
+					UpdatedInput:       r.UpdatedInput,
+					UpdatedPermissions: permissionUpdatesToInternal(r.UpdatedPermissions),
 				}, nil
 			case *PermissionResultDeny:
 				if r == nil {
@@ -441,6 +464,45 @@ func (c *ClaudeSDKClient) Query(ctx context.Context, prompt string, opts ...Quer
 				continue
 			}
 			messages <- msg
+		}
+	}()
+
+	return messages, nil
+}
+
+// ReceiveMessages returns every message from Claude until the stream ends.
+// It does not stop at a ResultMessage, unlike ReceiveResponse. This mirrors
+// the Python SDK's receive_messages(). Cancel ctx to stop consuming.
+func (c *ClaudeSDKClient) ReceiveMessages(ctx context.Context) (<-chan Message, error) {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return nil, NewCLIConnectionError("not connected", nil)
+	}
+	q := c.query
+	c.mu.RUnlock()
+
+	messages := make(chan Message, 100)
+	go func() {
+		defer close(messages)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case rawMsg, ok := <-q.RawMessages():
+				if !ok {
+					return
+				}
+				msg, err := ParseMessage(rawMsg)
+				if err != nil || msg == nil {
+					continue
+				}
+				select {
+				case messages <- msg:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
 	}()
 

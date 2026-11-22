@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -183,6 +184,33 @@ func TestBuildCommand_ThinkingPrecedence(t *testing.T) {
 	}
 }
 
+// settingsSandboxFromCommand extracts the merged sandbox object from the
+// --settings value (Python SDK #1426: sandbox travels inside --settings).
+func settingsSandboxFromCommand(t *testing.T, cmd *exec.Cmd) SandboxSettings {
+	t.Helper()
+	args := cmd.Args[1:]
+	for i, arg := range args {
+		if arg != "--settings" || i+1 >= len(args) {
+			continue
+		}
+		var settings map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(args[i+1]), &settings); err != nil {
+			t.Fatalf("Failed to parse --settings JSON: %v", err)
+		}
+		raw, ok := settings["sandbox"]
+		if !ok {
+			t.Fatalf("Expected sandbox in --settings JSON, got %s", args[i+1])
+		}
+		var parsed SandboxSettings
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			t.Fatalf("Failed to parse sandbox JSON: %v", err)
+		}
+		return parsed
+	}
+	t.Fatal("Could not find --settings value")
+	return SandboxSettings{}
+}
+
 func TestBuildCommand_Sandbox(t *testing.T) {
 	sandbox := &SandboxSettings{
 		Enabled:                  true,
@@ -193,48 +221,24 @@ func TestBuildCommand_Sandbox(t *testing.T) {
 		},
 	}
 
-	opts := &TransportOptions{
-		Sandbox: sandbox,
-	}
-
-	transport, err := NewSubprocessTransport("test", opts)
+	transport, err := NewSubprocessTransport("test", &TransportOptions{Sandbox: sandbox})
 	if err != nil {
 		t.Fatalf("NewSubprocessTransport failed: %v", err)
 	}
 
 	cmd := transport.buildCommand(context.Background())
-	args := cmd.Args[1:]
-	argsStr := strings.Join(args, " ")
-
-	if !strings.Contains(argsStr, "--sandbox") {
-		t.Error("Expected --sandbox flag")
+	if strings.Contains(strings.Join(cmd.Args[1:], " "), "--sandbox") {
+		t.Error("Expected sandbox inside --settings, not a --sandbox flag")
 	}
-
-	// Verify JSON content
-	found := false
-	for i, arg := range args {
-		if arg == "--sandbox" && i+1 < len(args) {
-			found = true
-			jsonStr := args[i+1]
-			var parsed SandboxSettings
-			if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
-				t.Fatalf("Failed to parse sandbox JSON: %v", err)
-			}
-
-			if !parsed.Enabled {
-				t.Error("Expected Enabled=true")
-			}
-			if !parsed.AutoAllowBashIfSandboxed {
-				t.Error("Expected AutoAllowBashIfSandboxed=true")
-			}
-			if parsed.Network == nil || !parsed.Network.AllowLocalBinding {
-				t.Error("Expected Network.AllowLocalBinding=true")
-			}
-		}
+	parsed := settingsSandboxFromCommand(t, cmd)
+	if !parsed.Enabled {
+		t.Error("Expected Enabled=true")
 	}
-
-	if !found {
-		t.Error("Could not find --sandbox value")
+	if !parsed.AutoAllowBashIfSandboxed {
+		t.Error("Expected AutoAllowBashIfSandboxed=true")
+	}
+	if parsed.Network == nil || !parsed.Network.AllowLocalBinding {
+		t.Error("Expected Network.AllowLocalBinding=true")
 	}
 }
 
@@ -324,8 +328,8 @@ func TestConnect_EnvVars(t *testing.T) {
 // TestBuildCommand_SandboxIgnoreViolations mirrors python
 // test_sandbox_ignore_violations_passed_through (Python SDK #1380): a
 // command-pattern ignoreViolations map reaches the CLI's sandbox settings
-// JSON unchanged. (Go passes sandbox via --sandbox rather than Python's
-// --settings; the JSON payload contract is the same.)
+// JSON unchanged. The sandbox object rides inside --settings, as it does in
+// the Python SDK.
 func TestBuildCommand_SandboxIgnoreViolations(t *testing.T) {
 	sandbox := &SandboxSettings{
 		Enabled: true,
@@ -340,42 +344,27 @@ func TestBuildCommand_SandboxIgnoreViolations(t *testing.T) {
 		t.Fatalf("NewSubprocessTransport failed: %v", err)
 	}
 
-	cmd := transport.buildCommand(context.Background())
-	args := cmd.Args[1:]
-
-	found := false
-	for i, arg := range args {
-		if arg == "--sandbox" && i+1 < len(args) {
-			found = true
-			var parsed SandboxSettings
-			if err := json.Unmarshal([]byte(args[i+1]), &parsed); err != nil {
-				t.Fatalf("Failed to parse sandbox JSON: %v", err)
-			}
-			want := map[string][]string{
-				"*":        {"/etc/hosts"},
-				"npm test": {"registry.npmjs.org"},
-			}
-			if parsed.IgnoreViolations == nil {
-				t.Fatal("Expected ignoreViolations in --sandbox JSON")
-			}
-			if len(parsed.IgnoreViolations) != len(want) {
-				t.Errorf("ignoreViolations: got %v", parsed.IgnoreViolations)
-			}
-			for pattern, substrings := range want {
-				got := parsed.IgnoreViolations[pattern]
-				if len(got) != len(substrings) {
-					t.Errorf("ignoreViolations[%q]: got %v, want %v", pattern, got, substrings)
-					continue
-				}
-				for j, s := range substrings {
-					if got[j] != s {
-						t.Errorf("ignoreViolations[%q][%d]: got %q, want %q", pattern, j, got[j], s)
-					}
-				}
+	parsed := settingsSandboxFromCommand(t, transport.buildCommand(context.Background()))
+	want := map[string][]string{
+		"*":        {"/etc/hosts"},
+		"npm test": {"registry.npmjs.org"},
+	}
+	if parsed.IgnoreViolations == nil {
+		t.Fatal("Expected ignoreViolations in sandbox JSON")
+	}
+	if len(parsed.IgnoreViolations) != len(want) {
+		t.Errorf("ignoreViolations: got %v", parsed.IgnoreViolations)
+	}
+	for pattern, substrings := range want {
+		got := parsed.IgnoreViolations[pattern]
+		if len(got) != len(substrings) {
+			t.Errorf("ignoreViolations[%q]: got %v, want %v", pattern, got, substrings)
+			continue
+		}
+		for j, s := range substrings {
+			if got[j] != s {
+				t.Errorf("ignoreViolations[%q][%d]: got %q, want %q", pattern, j, got[j], s)
 			}
 		}
-	}
-	if !found {
-		t.Error("Could not find --sandbox value")
 	}
 }

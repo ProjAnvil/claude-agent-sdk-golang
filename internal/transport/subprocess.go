@@ -19,6 +19,9 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 const (
@@ -37,8 +40,17 @@ const (
 	sdkReadsSessionStateEnv = "CLAUDE_CODE_SDK_READS_SESSION_STATE"
 	// skipVersionCheckEnv mirrors Python's CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK
 	// (subprocess_cli.py): set to any non-empty value, it disables the
-	// connect-time CLI version probe entirely.
+	// init-frame CLI version check entirely.
 	skipVersionCheckEnv = "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"
+	// explicitClientAppEnv carries the app label supplied by the caller.
+	explicitClientAppEnv = "CLAUDE_AGENT_SDK_CLIENT_APP"
+	// derivedClientAppEnv carries a label derived by an outer SDK session.
+	// The Go SDK never derives one and strips any inherited value, so an
+	// outer session's app name is not reused here.
+	derivedClientAppEnv = "CLAUDE_AGENT_SDK_DERIVED_CLIENT_APP"
+	// W3C trace context keys passed to the CLI subprocess.
+	traceParentEnv = "TRACEPARENT"
+	traceStateEnv  = "TRACESTATE"
 )
 
 // cmdExeMetacharacters are the cmd.exe metacharacters (plus the quote
@@ -54,43 +66,11 @@ const cmdExeMetacharacters = `&|<>^%!"`
 // check because the CLI trims it as whitespace and unicode.IsSpace does not.
 var skillNameInvalidChars = regexp.MustCompile(`[(),\x00-\x1f\x7f-\x9f\x{feff}]`)
 
-// cliVersionPattern matches an x.y.z version at the very start of the CLI's
-// `-v` output (e.g. "2.1.248 (Claude Code)"). Python anchors the same pattern
-// with re.match on the stripped output, so a version appearing anywhere other
-// than the beginning is not the CLI's version.
-var cliVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+`)
-
-// runCLIVersionCommand runs `<path> -v` and returns its stdout, bounded by a
-// 2s timeout. It is a package-level variable so tests can substitute a fake
-// instead of needing a real CLI binary.
-var runCLIVersionCommand = func(path string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "-v")
-	// Same env contract as the real child (buildCommand): the probe child
-	// must not see CLAUDECODE and believe it runs inside a Claude Code
-	// parent. Nothing from options.Env is applied — Python's probe inherits
-	// the parent env otherwise unchanged.
-	cmd.Env = withoutCLAUDECODE(os.Environ())
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", err
-	}
-	if err := cmd.Start(); err != nil {
-		return "", err
-	}
-	// 8 KiB is far beyond any version string: a binary parked at the CLI
-	// path cannot inflate SDK memory for the probe's 2s lifetime.
-	out, readErr := io.ReadAll(io.LimitReader(stdout, 8*1024))
-	waitErr := cmd.Wait()
-	if readErr != nil {
-		return "", readErr
-	}
-	if waitErr != nil {
-		return "", waitErr
-	}
-	return string(out), nil
-}
+// cliVersionPattern matches an x.y.z version at the very start of the
+// version the CLI reports in its init frame (e.g. "2.1.248 (Claude Code)").
+// Python anchors the same pattern with re.match, so a version appearing
+// anywhere other than the beginning is not the CLI's version.
+var cliVersionPattern = regexp.MustCompile(`^\d{1,9}\.\d{1,9}\.\d{1,9}`)
 
 // StampUserMessage applies TransportOptions.VerbatimPrompts to an outgoing
 // user message: it returns msg unchanged when verbatim is off, and otherwise
@@ -112,42 +92,49 @@ func StampUserMessage(msg map[string]interface{}, verbatim bool) map[string]inte
 	return stamped
 }
 
-// checkCLIVersion probes the CLI's version and warns when it predates the
-// minimum supported version, or — when VerbatimPrompts is on — the first
-// version that honors client_composed. Mirrors Python's _check_claude_version
-// (subprocess_cli.py): the probe is gated on CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK
-// being unset/empty, best-effort — every error is swallowed and it can never
-// fail connect.
-func (t *SubprocessTransport) checkCLIVersion() {
-	if v, ok := os.LookupEnv(skipVersionCheckEnv); ok && v != "" {
+// checkCLIVersion warns when the CLI's first init frame shows it is too old
+// to report a version, or when VerbatimPrompts is on and the CLI predates
+// client_composed. The version comes from the running CLI's init frame, not
+// from a separate `cli_path -v` process: cli_path is executed only by
+// Connect. Mirrors Python's _check_claude_version (subprocess_cli.py,
+// v0.2.181). The check runs once, is gated on
+// CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK, and can never fail Connect.
+func (t *SubprocessTransport) checkCLIVersion(data map[string]interface{}) {
+	if t.versionChecked || os.Getenv(skipVersionCheckEnv) != "" {
 		return
 	}
-	out, err := runCLIVersionCommand(t.cliPath)
-	if err != nil {
+	if data["type"] != "system" || data["subtype"] != "init" {
 		return
 	}
-	// Python anchors re.match on the stripped output: the x.y.z version must
-	// lead, otherwise the output is treated as an unknown version.
-	version := cliVersionPattern.FindString(strings.TrimSpace(out))
-	if version == "" {
-		return
-	}
-	if compareCLIVersions(version, MinimumCLIVersion) < 0 {
+	t.versionChecked = true
+
+	version, _ := data["claude_code_version"].(string)
+	match := cliVersionPattern.FindString(strings.TrimSpace(version))
+	if match == "" {
 		slog.Warn(fmt.Sprintf(
-			"Claude Code version %s at %s is unsupported in the Agent SDK. "+
-				"Minimum required version is %s. "+
+			"Claude Code at %s is too old to report its version, and may be "+
+				"unsupported in the Agent SDK. Minimum required version is %s. "+
 				"Some features may not work correctly.",
-			version, t.cliPath, MinimumCLIVersion))
+			t.cliPath, MinimumCLIVersion))
 	}
-	if t.options.VerbatimPrompts &&
-		compareCLIVersions(version, VerbatimPromptsMinimumCLIVersion) < 0 {
+	minimum := VerbatimPromptsMinimumCLIVersion
+	if t.options != nil && t.options.VerbatimPrompts &&
+		(match == "" || compareCLIVersions(match, minimum) < 0) {
 		slog.Warn(fmt.Sprintf(
-			"verbatim_prompts is enabled, but Claude Code version %s at %s "+
-				"ignores it: prompts will still have @path mentions expanded "+
-				"and slash commands dispatched. Claude Code %s or later is "+
-				"required.",
-			version, t.cliPath, VerbatimPromptsMinimumCLIVersion))
+			"verbatim_prompts is enabled, but Claude Code "+
+				"version %s at %s ignores it: prompts will still "+
+				"have @path mentions expanded and slash commands dispatched. "+
+				"Claude Code %s or later is required.",
+			versionOrUnknown(version), t.cliPath, minimum))
 	}
+}
+
+// versionOrUnknown keeps an absent CLI version out of the warning text.
+func versionOrUnknown(version string) string {
+	if version == "" {
+		return "unknown"
+	}
+	return version
 }
 
 // compareCLIVersions compares two dot-separated numeric version strings
@@ -216,6 +203,10 @@ type SubprocessTransport struct {
 	// goos overrides runtime.GOOS for the Windows-only validation in
 	// Connect; empty means runtime.GOOS. Test seam only.
 	goos string
+	// versionChecked gates the init-frame version check. It is set at
+	// construction when CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK is non-empty, so
+	// the check never runs in that case.
+	versionChecked bool
 }
 
 // NewSubprocessTransport creates a new subprocess transport.
@@ -239,14 +230,15 @@ func NewSubprocessTransport(prompt interface{}, opts *TransportOptions) (*Subpro
 	}
 
 	return &SubprocessTransport{
-		prompt:        prompt,
-		options:       opts,
-		cliPath:       cliPath,
-		cwd:           opts.CWD,
-		maxBufferSize: maxBufferSize,
-		messages:      make(chan map[string]interface{}, 100),
-		errors:        make(chan error, 10),
-		closedCh:      make(chan struct{}),
+		prompt:         prompt,
+		options:        opts,
+		cliPath:        cliPath,
+		cwd:            opts.CWD,
+		maxBufferSize:  maxBufferSize,
+		messages:       make(chan map[string]interface{}, 100),
+		errors:         make(chan error, 10),
+		closedCh:       make(chan struct{}),
+		versionChecked: os.Getenv(skipVersionCheckEnv) != "",
 	}, nil
 }
 
@@ -356,27 +348,23 @@ func findCLIForGOOS(goos string) (string, error) {
 		return bundled, nil
 	}
 
-	// Check PATH
-	var whichHit string
-	if cli, err := exec.LookPath("claude"); err == nil {
-		if goos != "windows" || isWindowsNativeExe(cli) {
-			return cli, nil
+	// Windows: only a native claude.exe from absolute PATH entries.
+	// CreateProcess cannot run an extensionless wrapper script, Connect
+	// refuses npm's claude.cmd shim, and exec.LookPath would search the
+	// working directory first. Relative PATH entries are skipped for the
+	// same reason (Python SDK #1484).
+	if goos == "windows" {
+		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+			if !filepath.IsAbs(dir) {
+				continue
+			}
+			candidate := filepath.Join(dir, "claude.exe")
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate, nil
+			}
 		}
-		// Windows resolved something CreateProcess cannot run directly as
-		// the CLI: npm's claude.cmd shim (which Connect refuses to spawn)
-		// or an extensionless wrapper script from a git-bash / WSL setup
-		// (which fails at spawn with WinError 193). LookPath walks PATH
-		// directory-major, so such an entry in an early PATH directory
-		// shadows a native claude.exe installed in a later one. Prefer any
-		// discoverable native executable, and keep this hit only as the
-		// last resort so a shim-only machine still gets the explanatory
-		// batch-script refusal from Connect. The claude.exe probe is
-		// vetted too: PATHEXT resolution can append an extension and hand
-		// back "claude.exe.cmd".
-		if exe, err := exec.LookPath("claude.exe"); err == nil && isWindowsNativeExe(exe) {
-			return exe, nil
-		}
-		whichHit = cli
+	} else if cli, err := exec.LookPath("claude"); err == nil {
+		return cli, nil
 	}
 
 	// Check common locations
@@ -385,14 +373,6 @@ func findCLIForGOOS(goos string) (string, error) {
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			return path, nil
 		}
-	}
-
-	if whichHit != "" {
-		// No native executable was discoverable anywhere: return the
-		// original PATH hit so Connect raises the batch-script refusal
-		// (with its remediation) for a shim, or the spawn error for a
-		// wrapper script, rather than a bare not-found error.
-		return whichHit, nil
 	}
 
 	return "", &CLINotFoundError{windows: goos == "windows"}
@@ -700,10 +680,12 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 		return err
 	}
 
-	cmd := t.buildCommand(ctx)
+	cmd, err := t.buildCommandChecked(ctx)
+	if err != nil {
+		return err
+	}
 	t.process = cmd
 
-	var err error
 	t.stdin, err = cmd.StdinPipe()
 	if err != nil {
 		return &CLIConnectionError{Message: "failed to create stdin pipe", Cause: err}
@@ -732,11 +714,8 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 
 	t.ready = true
 
-	// Best-effort version probe after the main spawn (Python calls it in
-	// connect): warns on unsupported CLIs and on verbatim_prompts being
-	// ignored, and never fails connect.
-	t.checkCLIVersion()
-
+	// The CLI version check reads the first system/init frame from stdout.
+	// Connect never runs a second `<cli_path> -v` process.
 	go t.readStdout()
 	go t.readStderr()
 
@@ -841,8 +820,73 @@ func (t *SubprocessTransport) applySkillsDefaults() (allowedTools []string, sett
 	return
 }
 
-// buildCommand constructs the CLI command with arguments.
+// buildCommand constructs the CLI command with arguments. It keeps the
+// historical single-value signature for callers that only need the command;
+// errors from loading settings are surfaced by buildCommandChecked.
 func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
+	cmd, _ := t.buildCommandChecked(ctx)
+	return cmd
+}
+
+// buildSettingsValue returns the --settings value. Without Sandbox the
+// caller's settings pass through untouched. With Sandbox, settings are
+// loaded (inline JSON, or a file path resolved against cwd with an
+// optional UTF-8 BOM), merged with the sandbox object, and re-encoded.
+// Any load failure is an error: launching without the caller's settings
+// would drop their permission rules and hooks (Python SDK #1426).
+func (t *SubprocessTransport) buildSettingsValue() (string, error) {
+	settings := t.options.Settings
+	if t.options.Sandbox == nil {
+		return settings, nil
+	}
+
+	settingsObj := map[string]interface{}{}
+	if settings != "" {
+		trimmed := strings.TrimSpace(settings)
+		raw := trimmed
+		if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+			path := trimmed
+			if t.cwd != "" && !filepath.IsAbs(path) {
+				path = filepath.Join(t.cwd, path)
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return "", err
+			}
+			raw = strings.TrimPrefix(string(content), "\ufeff")
+		}
+		if err := json.Unmarshal([]byte(raw), &settingsObj); err != nil {
+			return "", err
+		}
+		if settingsObj == nil {
+			settingsObj = map[string]interface{}{}
+		}
+	}
+
+	sandboxJSON, err := json.Marshal(t.options.Sandbox)
+	if err != nil {
+		return "", err
+	}
+	settingsObj["sandbox"] = json.RawMessage(sandboxJSON)
+	merged, err := json.Marshal(settingsObj)
+	if err != nil {
+		return "", err
+	}
+	return string(merged), nil
+}
+
+// buildCommandChecked is buildCommand with an error for unloadable settings.
+func (t *SubprocessTransport) buildCommandChecked(ctx context.Context) (*exec.Cmd, error) {
+	settingsValue, err := t.buildSettingsValue()
+	if err != nil {
+		// Do not place the raw settings in the message: inline settings can
+		// hold secrets.
+		return nil, &CLIConnectionError{
+			Message: fmt.Sprintf("Failed to load settings: %v", err),
+			Cause:   err,
+		}
+	}
+
 	// -p "" enables print mode (non-interactive). Claude CLI v2.x requires
 	// --print for --output-format and --input-format flags to take effect;
 	// without it the CLI enters interactive TUI mode.
@@ -936,8 +980,8 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		args = append(args, "--session-id="+t.options.SessionID)
 	}
 
-	if t.options.Settings != "" {
-		args = append(args, "--settings", t.options.Settings)
+	if settingsValue != "" {
+		args = append(args, "--settings", settingsValue)
 	}
 
 	for _, dir := range t.options.AddDirs {
@@ -1045,11 +1089,8 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 		args = append(args, "--include-hook-events")
 	}
 
-	// Sandbox
-	if t.options.Sandbox != nil {
-		sandboxJSON, _ := json.Marshal(t.options.Sandbox)
-		args = append(args, "--sandbox", string(sandboxJSON))
-	}
+	// Sandbox travels inside the merged --settings value above, as it does
+	// in the Python SDK. The CLI has no --sandbox flag.
 
 	// Effort
 	if t.options.Effort != "" {
@@ -1076,6 +1117,15 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	// Filter out CLAUDECODE so SDK-spawned subprocesses don't think
 	// they're running inside a Claude Code parent.
 	env := withoutCLAUDECODE(os.Environ())
+	// An active span replaces any stale inherited W3C context. Scrub the
+	// inherited entries now, before options.Env is appended, so an explicit
+	// caller value remains the only value for its key.
+	carrier := traceCarrier(ctx)
+	if carrier != nil {
+		for _, key := range []string{traceParentEnv, traceStateEnv} {
+			env = withoutEnvKey(env, key)
+		}
+	}
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
 	// Ask the CLI for the session_state_changed frames the SDK reads to tell
 	// when a run is over — unless the caller chose a value for the variable,
@@ -1091,6 +1141,25 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 	for k, v := range t.options.Env {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
+	// A derived label names an outer SDK session's app. Never pass it on,
+	// whether it came from the process env or from options.Env.
+	env = withoutEnvKey(env, derivedClientAppEnv)
+	// ClientApp wins over a value in Env. A pointer to "" is an explicit
+	// opt-out, so the key is still set. Appending last makes it the value
+	// os/exec keeps when a key appears more than once (Python SDK #1432).
+	if t.options.ClientApp != nil {
+		env = append(env, explicitClientAppEnv+"="+*t.options.ClientApp)
+	}
+	// Propagate the active W3C trace context so CLI spans parent under the
+	// caller's distributed trace (Python SDK subprocess_cli.py). No active
+	// span is a no-op; explicit options.Env values win.
+	for k, v := range carrier {
+		key := strings.ToUpper(k)
+		if _, set := t.options.Env[key]; set {
+			continue
+		}
+		env = append(env, key+"="+v)
+	}
 	if t.cwd != "" {
 		env = append(env, fmt.Sprintf("PWD=%s", t.cwd))
 	}
@@ -1103,13 +1172,41 @@ func (t *SubprocessTransport) buildCommand(ctx context.Context) *exec.Cmd {
 
 	cmd.Env = env
 
-	return cmd
+	return cmd, nil
+}
+
+// traceCarrier returns the active W3C trace context, or nil when no span is
+// active. Go's global propagator is a no-op until configured, so fall back to
+// W3C TraceContext when it injects nothing.
+func traceCarrier(ctx context.Context) propagation.MapCarrier {
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	if _, ok := carrier["traceparent"]; !ok {
+		propagation.TraceContext{}.Inject(ctx, carrier)
+	}
+	if _, ok := carrier["traceparent"]; !ok {
+		return nil
+	}
+	return carrier
+}
+
+// withoutEnvKey removes every entry whose key equals key. os/exec keeps the
+// last value for a repeated key, so removal is the only way to stop an
+// inherited value from reaching the child.
+func withoutEnvKey(env []string, key string) []string {
+	prefix := key + "="
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
 
 // withoutCLAUDECODE returns env with any CLAUDECODE entry removed, so
 // SDK-spawned subprocesses don't think they're running inside a Claude Code
-// parent. Both the real child (buildCommand) and the connect-time version
-// probe use it.
+// parent. The real child uses it.
 func withoutCLAUDECODE(env []string) []string {
 	filtered := make([]string, 0, len(env))
 	for _, e := range env {
@@ -1228,6 +1325,10 @@ func (t *SubprocessTransport) readStdout() {
 		}
 
 		jsonBuffer.Reset()
+
+		// The CLI reports its version in the first system/init frame. Check
+		// it before the frame reaches callers (Python SDK v0.2.181).
+		t.checkCLIVersion(data)
 
 		t.closeMu.Lock()
 		closed := t.closed

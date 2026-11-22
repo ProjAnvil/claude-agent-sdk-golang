@@ -358,15 +358,19 @@ type PermissionUpdate struct {
 
 // PermissionRuleValue represents a permission rule.
 type PermissionRuleValue struct {
-	ToolName    string
-	RuleContent string
+	ToolName string
+	// RuleContentIsSet sends ruleContent even when RuleContent is empty.
+	// It preserves a CLI suggestion that carried an explicit empty value.
+	RuleContent      string
+	RuleContentIsSet bool
 }
 
 // HookMatcherInternal is the internal representation of a hook matcher.
 type HookMatcherInternal struct {
-	Matcher string
-	Hooks   []HookCallback
-	Timeout time.Duration
+	Matcher   string
+	Hooks     []HookCallback
+	Timeout   time.Duration
+	OnFailure string
 }
 
 // HookCallback is the function signature for hook handlers.
@@ -553,6 +557,7 @@ func (q *Query) Initialize(ctx context.Context) (map[string]interface{}, error) 
 
 	// Build hooks configuration
 	hooksConfig := make(map[string]interface{})
+	blocksOnFailure := false
 	if q.hooks != nil {
 		// Registration is guarded by q.mu: the read loop is already running
 		// (Start precedes Initialize) and handleHookCallback looks callbacks
@@ -578,6 +583,12 @@ func (q *Query) Initialize(ctx context.Context) (map[string]interface{}, error) 
 					}
 					if matcher.Timeout > 0 {
 						matcherConfig["timeout"] = matcher.Timeout.Seconds()
+					}
+					if matcher.OnFailure != "" {
+						matcherConfig["onFailure"] = matcher.OnFailure
+						// The CLI reads an unknown value as "block", so
+						// every value but "continue" needs its support.
+						blocksOnFailure = blocksOnFailure || matcher.OnFailure != "continue"
 					}
 					eventConfig = append(eventConfig, matcherConfig)
 				}
@@ -616,6 +627,25 @@ func (q *Query) Initialize(ctx context.Context) (map[string]interface{}, error) 
 	response, err := q.sendControlRequest(ctx, request)
 	if err != nil {
 		return nil, err
+	}
+
+	// A guard set to fail closed would fail open or never run. A responder
+	// that does not honor onFailure, such as an older CLI, drops the field
+	// and answers normally. hooks_applied=false means nothing registered
+	// these callbacks, as on a process that was already running.
+	if blocksOnFailure {
+		supported, _ := response["hook_on_failure_supported"].(bool)
+		if !supported {
+			return nil, &transport.CLIConnectionError{Message: "The process answering initialize does not honor on_failure " +
+				"on hook matchers, so a hook that fails would not block. " +
+				"Update Claude Code if it is old, or remove on_failure=\"block\" " +
+				"from your hooks."}
+		}
+		if applied, ok := response["hooks_applied"].(bool); ok && !applied {
+			return nil, &transport.CLIConnectionError{Message: "This session was already running and did not register your " +
+				"hooks, so a hook set to on_failure=\"block\" would never run. " +
+				"Start a new session, or remove on_failure=\"block\" from your hooks."}
+		}
 	}
 
 	q.mu.Lock()
@@ -1464,6 +1494,87 @@ func (q *Query) handleControlRequest(ctx context.Context, data map[string]interf
 	q.sendControlSuccess(requestID, responseData)
 }
 
+// permissionUpdateToWire converts a PermissionUpdate to the shape the CLI
+// accepts. It mirrors PermissionUpdate.to_dict in the Python SDK
+// (v0.2.184, #1502): destination is always sent and defaults to "session",
+// ruleContent is omitted for a whole-tool rule because the CLI rejects a
+// null value, and a missing required field or unknown type is an error
+// instead of an update the CLI silently drops.
+func permissionUpdateToWire(update PermissionUpdate) (map[string]interface{}, error) {
+	destination := update.Destination
+	if destination == "" {
+		destination = "session"
+	}
+	result := map[string]interface{}{
+		"type":        update.Type,
+		"destination": destination,
+	}
+
+	switch update.Type {
+	case "addRules", "replaceRules", "removeRules":
+		if update.Rules == nil {
+			return nil, fmt.Errorf(
+				"PermissionUpdate(type=%s) has no rules. Set rules to a list of PermissionRuleValue.",
+				update.Type)
+		}
+		if update.Behavior == "" {
+			return nil, fmt.Errorf(
+				"PermissionUpdate(type=%s) has no behavior. Set behavior to 'allow', 'deny' or 'ask'.",
+				update.Type)
+		}
+		rules := make([]map[string]interface{}, 0, len(update.Rules))
+		for _, rule := range update.Rules {
+			wireRule := map[string]interface{}{"toolName": rule.ToolName}
+			if rule.RuleContentIsSet || rule.RuleContent != "" {
+				wireRule["ruleContent"] = rule.RuleContent
+			}
+			rules = append(rules, wireRule)
+		}
+		result["rules"] = rules
+		result["behavior"] = update.Behavior
+	case "setMode":
+		if update.Mode == "" {
+			return nil, errors.New(
+				"PermissionUpdate(type='setMode') has no mode. Set mode to a permission mode such as 'acceptEdits'.")
+		}
+		result["mode"] = update.Mode
+	case "addDirectories", "removeDirectories":
+		if update.Directories == nil {
+			return nil, fmt.Errorf(
+				"PermissionUpdate(type=%s) has no directories. Set directories to a list of paths.",
+				update.Type)
+		}
+		result["directories"] = update.Directories
+	default:
+		return nil, fmt.Errorf(
+			"PermissionUpdate has type %q, which this version of the SDK cannot send. "+
+				"Use one of addRules, replaceRules, removeRules, setMode, addDirectories "+
+				"or removeDirectories, or upgrade the SDK if this update came from Claude Code.",
+			update.Type)
+	}
+	return result, nil
+}
+
+// permissionUpdatesToWire converts every update of an allow result. It
+// returns ok=false when any update cannot be sent. The updates are applied
+// all together or not at all, because the failed one may be a restriction
+// the others were meant to come with. The tool call stays allowed.
+func permissionUpdatesToWire(updates []PermissionUpdate) ([]map[string]interface{}, bool) {
+	wire := make([]map[string]interface{}, 0, len(updates))
+	for index, update := range updates {
+		converted, err := permissionUpdateToWire(update)
+		if err != nil {
+			slog.Warn(fmt.Sprintf(
+				"The CanUseTool callback allowed the tool call, but none of its "+
+					"permission updates were applied, because updated_permissions[%d] "+
+					"cannot be sent: %v", index, err))
+			return nil, false
+		}
+		wire = append(wire, converted)
+	}
+	return wire, true
+}
+
 // permissionUpdateFromMap constructs a PermissionUpdate from the control protocol dict.
 func permissionUpdateFromMap(data map[string]interface{}) PermissionUpdate {
 	update := PermissionUpdate{}
@@ -1495,6 +1606,7 @@ func permissionUpdateFromMap(data map[string]interface{}) PermissionUpdate {
 				}
 				if rc, ok := rMap["ruleContent"].(string); ok {
 					rule.RuleContent = rc
+					rule.RuleContentIsSet = true
 				}
 				update.Rules = append(update.Rules, rule)
 			}
@@ -1568,7 +1680,11 @@ func (q *Query) handleCanUseTool(ctx context.Context, request map[string]interfa
 			response["updatedInput"] = input
 		}
 		if r.UpdatedPermissions != nil {
-			response["updatedPermissions"] = r.UpdatedPermissions
+			// All updates or none: a malformed one may be a restriction
+			// the others were meant to come with (Python SDK #1502).
+			if wire, ok := permissionUpdatesToWire(r.UpdatedPermissions); ok {
+				response["updatedPermissions"] = wire
+			}
 		}
 		return response, nil
 	case *PermissionResultDeny:

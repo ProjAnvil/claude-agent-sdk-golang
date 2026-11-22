@@ -196,6 +196,25 @@ type ClaudeAgentOptions struct {
 	// when it connects to an older CLI with this option on. The option is
 	// read when the session starts (ClaudeSDKClient captures it at Connect).
 	VerbatimPrompts bool
+	// ClientApp identifies the calling app or library in requests to the
+	// API, e.g. "my-app/1.0.0". When non-nil it sets
+	// CLAUDE_AGENT_SDK_CLIENT_APP for the CLI subprocess and wins over a
+	// value supplied in Env. A pointer to an empty string sends no
+	// identifier. The value must be valid in an HTTP header.
+	//
+	// Unlike the Python SDK, the Go SDK does not derive a label from an
+	// installed package: Go binaries have no distribution metadata to read.
+	ClientApp *string
+	// Transport replaces the default subprocess transport. The SDK calls
+	// Connect, Write, ReadMessages, Errors, EndInput, Close and IsReady on
+	// it. Command-line options in this struct do not apply to a custom
+	// transport, and store-backed session resume is skipped. This mirrors
+	// the Python SDK's query(..., transport=...) argument.
+	Transport Transport
+	// DebugStderr exists for API parity with the Python SDK. The Python SDK
+	// declares debug_stderr but never reads it; this field is likewise a
+	// no-op. Use StderrCallback to receive CLI stderr output.
+	DebugStderr interface{}
 }
 
 // DefaultOptions returns ClaudeAgentOptions with default values.
